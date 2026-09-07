@@ -1,0 +1,125 @@
+Subject: [PATCH] ui: preferred colour scheme and system highlight from the profile
+
+Two findings from the first V3 run against a real machine, one of which was not
+what it looked like.
+
+Thirty-three CSS system colours differed, and I assumed a platform mapping
+problem. They were almost entirely dark mode against light: the reference Mac
+runs dark, the headless Linux subject light. Colour scheme is a user preference
+rather than a device property, but it belongs in the profile precisely because
+one setting moves about thirty observable values at once — a capture taken in
+dark mode and replayed in light differs on every one of them.
+
+CalculatePreferredColorScheme is the single source, and the profile is consulted
+there. An explicit --force-dark-mode still wins, because that is a deliberate
+instruction from whoever launched the browser rather than a property of the
+device being presented.
+
+The genuine platform difference was narrower and sharper: Highlight is
+rgba(179, 215, 255, 0.8) on macOS and rgba(0, 65, 198, 0.8) on Linux. macOS
+overrides exactly two colours, and on platforms without a native mapping
+MapNativeColorsToCssSystemColors is an empty body — so a Linux host claiming
+macOS contradicts its own platform, user agent and Client Hints in a single
+getComputedStyle read. Supplying the two from the profile keeps that one
+function correct for any claimed platform instead of adding another per-platform
+table.
+
+Colours are stored as 0xAARRGGBB so a partly transparent highlight round-trips;
+the captured macOS value has an alpha of 0.8.
+
+Ledger: css.system-colors, css.prefers-color-scheme, coh.platform-resource-sets.
+
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index adce0ad..6afb31f 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -164,6 +164,20 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+     }
+   }
+ 
++  if (const DictValue* theme = dict->FindDict("theme")) {
++    if (std::optional<bool> v = theme->FindBool("prefers_dark")) {
++      profile->prefers_dark_ = *v;
++    }
++    // Stored as 0xAARRGGBB so a partly transparent highlight round-trips; the
++    // captured macOS value carries an alpha of 0.8.
++    if (std::optional<double> v = theme->FindDouble("highlight_argb")) {
++      profile->css_highlight_argb_ = static_cast<uint32_t>(*v);
++    }
++    if (std::optional<double> v = theme->FindDouble("highlight_text_argb")) {
++      profile->css_highlight_text_argb_ = static_cast<uint32_t>(*v);
++    }
++  }
++
+   if (const DictValue* browser = dict->FindDict("browser")) {
+     if (const std::string* v = browser->FindString("user_agent")) {
+       profile->user_agent_ = *v;
+diff --git a/ui/color/css_system_color_mixer.cc b/ui/color/css_system_color_mixer.cc
+index 2e51a25..e1c9a35 100644
+--- a/ui/color/css_system_color_mixer.cc
++++ b/ui/color/css_system_color_mixer.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "ui/color/css_system_color_mixer.h"
+ 
++#include "base/apostate/profile.h"
++
+ #include "build/build_config.h"
+ #include "ui/color/color_id.h"
+ #include "ui/color/color_mixer.h"
+@@ -16,6 +18,23 @@ namespace ui {
+ 
+ #if !BUILDFLAG(IS_WIN) && !BUILDFLAG(IS_MAC)
+ void MapNativeColorsToCssSystemColors(ColorMixer& mixer, ColorProviderKey key) {
++  // Apostate: upstream leaves this empty on platforms with no native mapping,
++  // which is why a Linux build claiming macOS reports the wrong selection
++  // highlight — macOS overrides exactly these two colours and nothing supplies
++  // them here.
++  //
++  // Taking them from the profile rather than hard-coding a per-platform table
++  // keeps this one function correct for any claimed platform.
++  if (const base::apostate::Profile* profile = base::apostate::Profile::Get()) {
++    if (profile->css_highlight_argb().has_value()) {
++      mixer[kColorCssSystemHighlight] = {
++          static_cast<SkColor>(*profile->css_highlight_argb())};
++    }
++    if (profile->css_highlight_text_argb().has_value()) {
++      mixer[kColorCssSystemHighlightText] = {
++          static_cast<SkColor>(*profile->css_highlight_text_argb())};
++    }
++  }
+ }
+ #endif
+ 
+diff --git a/ui/native_theme/native_theme.cc b/ui/native_theme/native_theme.cc
+index 478080b..7ec59b1 100644
+--- a/ui/native_theme/native_theme.cc
++++ b/ui/native_theme/native_theme.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "ui/native_theme/native_theme.h"
+ 
++#include "base/apostate/profile.h"
++
+ #include <stddef.h>
+ 
+ #include <algorithm>
+@@ -588,6 +590,18 @@ ColorProviderKey::ForcedColors NativeTheme::CalculateForcedColors() const {
+ 
+ NativeTheme::PreferredColorScheme NativeTheme::CalculatePreferredColorScheme()
+     const {
++  // Apostate: the profile wins over the host's setting, but not over an
++  // explicit --force-dark-mode, which is a deliberate instruction from whoever
++  // launched the browser.
++  if (!IsForcedDarkMode()) {
++    if (const base::apostate::Profile* profile =
++            base::apostate::Profile::Get()) {
++      if (profile->prefers_dark().has_value()) {
++        return *profile->prefers_dark() ? PreferredColorScheme::kDark
++                                        : PreferredColorScheme::kLight;
++      }
++    }
++  }
+   return IsForcedDarkMode() ? PreferredColorScheme::kDark
+                             : OsSettingsProvider::Get().PreferredColorScheme();
+ }

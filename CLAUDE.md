@@ -96,6 +96,18 @@ confirmation of an obvious next step are not material decisions.
 
 When genuinely blocked, ask with a recommendation rather than a survey.
 
+## The shared checkout
+
+`.workspace/src` is shared: mapping work cites line numbers from it while patch
+work applies patches to it. Those conflict, and it has already cost real
+rework — a shard was mapping a file while a patch was applied underneath it, so
+its citations pointed at lines that no longer existed.
+
+Rule: **the checkout stays pristine while mapping is in flight.** Apply patches
+only to compile-check, then reset. Ledger citations always name the pristine
+tree at `CHROMIUM_VERSION`; the patch that changes a line is linked through the
+row's `patch_id`, not by re-citing the patched line.
+
 ## Parallel work
 
 Delegated units return JSON validating against a schema in `ledger/schema/`,

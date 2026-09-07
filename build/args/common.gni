@@ -37,3 +37,23 @@ ffmpeg_branding = "Chrome"
 # No developer-only surfaces in a shipped binary.
 dcheck_always_on = false
 enable_dsyms = false
+
+# Do NOT apply testing/variations/fieldtrial_testing_config.json.
+#
+# ShouldUseFieldTrialTestingConfig() in
+# components/variations/service/variations_field_trial_creator.cc gates the
+# testing config on branding: a GOOGLE_CHROME_BRANDING build applies it only
+# when --enable-field-trial-config is passed, while every non-branded build —
+# which is every Chromium fork, including ours — applies it by default. The
+# config forces 1,716 features across 1,375 studies into their *testing* state,
+# which is not the state real Chrome ships.
+#
+# Measured consequence at 152.0.7977.82: the testing config enables
+# ReduceAcceptLanguage, so FrameFetchContext::AddReducedAcceptLanguageIfNecessary
+# sets Accept-Language in the renderer. Stock Chrome leaves it unset there and
+# URLRequestHttpJob::AddExtraHeaders appends it last. Header order therefore
+# differed from Chrome in an unpatched build of our own pins — Accept-Language
+# at index 15 instead of 24 — a difference no amount of JS-surface work can
+# reach. Fixing it at the GN level rather than with --disable-field-trial-config
+# keeps us from adding a command-line switch (axiom: no new observables).
+disable_fieldtrial_testing_config = true

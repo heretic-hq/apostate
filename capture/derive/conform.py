@@ -192,7 +192,10 @@ def main() -> int:
             continue
 
         rv, sv = r["value"], s["value"]
-        if pid == "headers.echo":
+        if pid.startswith("headers.echo"):
+            # Both the main-thread and worker echoes carry the capture server's
+            # Host and Referer; normalising only the first left two captures of
+            # one machine differing because they used different ports.
             rv, sv = normalise_headers(rv), normalise_headers(sv)
 
         mismatches = [

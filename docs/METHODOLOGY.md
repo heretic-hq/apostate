@@ -144,6 +144,27 @@ So a capture must record the exact browser build, and a reference is only a
 valid V3 target for a binary of the same version. Rebasing onto a new Chromium
 means re-capturing the references, not just re-applying the patches.
 
+### The loader is faithful: 30/30 on a self-consistency test
+
+Before reading anything into a cross-platform score, the loader itself has to be
+shown correct. The control for that holds every platform variable constant:
+capture the browser with no profile, derive a profile from that capture, run the
+same binary again with it, and diff the two.
+
+**30 of 30 probes conform.** Same host, same build, no platform difference in
+play — so the profile round-trips through capture, derivation and replay without
+loss.
+
+That makes the cross-platform number interpretable. A gap there is a property of
+the host, not a defect in the loader, and the two can be reported separately
+instead of being confounded.
+
+The test found one defect, and it was in the harness: the worker header echo was
+not being normalised for environment-dependent values, so two captures of one
+machine differed because they had used different ports. The main-thread echo had
+been normalised months of iterations earlier and the worker variant was added
+later without it.
+
 ### Measured: what a profile can and cannot reach across platforms
 
 A Linux host was made to present a macOS M4 Max, and the result diffed against

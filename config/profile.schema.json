@@ -101,6 +101,13 @@
             30
           ],
           "description": "Chromium uses this as an HDR flag rather than a bit depth; only 24 and 30 exist, and the same fact drives CSS color, dynamic-range and color-gamut."
+        },
+        "avail_left": {
+          "type": "integer"
+        },
+        "avail_top": {
+          "type": "integer",
+          "description": "Height of the menu bar on macOS or a top-docked taskbar on Windows. Not derivable from the sizes: a total inset says nothing about how it splits above and below."
         }
       }
     },

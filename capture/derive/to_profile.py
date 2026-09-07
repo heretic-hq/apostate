@@ -77,6 +77,8 @@ def build(capture):
 
     put("screen", "width", screen.get("width"))
     put("screen", "height", screen.get("height"))
+    put("screen", "avail_left", screen.get("availLeft"))
+    put("screen", "avail_top", screen.get("availTop"))
     put("screen", "avail_width", screen.get("availWidth"))
     put("screen", "avail_height", screen.get("availHeight"))
     put("screen", "device_pixel_ratio", screen.get("devicePixelRatio"))

@@ -21,6 +21,8 @@
  "screen": {
   "width": 1728,
   "height": 1117,
+  "avail_left": 0,
+  "avail_top": 33,
   "avail_width": 1728,
   "avail_height": 1003,
   "device_pixel_ratio": 2,

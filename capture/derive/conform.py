@@ -81,6 +81,16 @@ def measured_volatility(capture):
 ENVIRONMENT_HEADERS = {"host", "referer", "origin", "connection", "content-length",
                        "cookie", "if-none-match", "if-modified-since"}
 
+# Client hints that report the size of the window rather than the device. These
+# are the same information as screen.geometry's outerWidth/innerWidth, which are
+# already excluded above because window size is the user's choice — a capture
+# taken in a 1728-wide window cannot hold a browser launched at 800x600 to that
+# number without turning a launch flag into a fingerprint defect. dpr is
+# deliberately NOT in this set: pixel ratio is device identity, not window state.
+WINDOW_STATE_HEADERS = {"viewport-width", "sec-ch-viewport-width",
+                        "viewport-height", "sec-ch-viewport-height",
+                        "width", "sec-ch-width"}
+
 
 def normalise_headers(value):
     """Blank environment-dependent header values, keeping names and order."""
@@ -88,7 +98,8 @@ def normalise_headers(value):
         return value
     out = dict(value)
     out["headers"] = [
-        [k, "<environment>" if k.lower() in ENVIRONMENT_HEADERS else v]
+        [k, "<environment>" if k.lower() in ENVIRONMENT_HEADERS
+            else "<window>" if k.lower() in WINDOW_STATE_HEADERS else v]
         for k, v in value["headers"]
     ]
     return out
@@ -175,6 +186,7 @@ def main() -> int:
 
     rp, sp = ref["probes"], sub["probes"]
     passed, failed, skipped, errored = [], [], [], []
+    version_derived = []
 
     for pid in sorted(rp):
         if pid in volatile:
@@ -202,6 +214,26 @@ def main() -> int:
             m for m in diff(rv, sv)
             if (pid, ".".join(m[0])) not in volatile_paths
         ]
+
+        # Separate the differences that exist only because the two builds are
+        # different point releases. The test is exact rather than a blanket
+        # exemption: a field is excused only when substituting the subject's
+        # version string for the reference's makes the two values identical.
+        # A field that merely *contains* a version but differs in some other
+        # way still fails, so this cannot mask a real defect.
+        if version_mismatch and mismatches:
+            excused, real = [], []
+            for m in mismatches:
+                path, a, b = m
+                if (isinstance(a, str) and isinstance(b, str)
+                        and sub_ver in b and a == b.replace(sub_ver, ref_ver)):
+                    excused.append(m)
+                else:
+                    real.append(m)
+            if excused:
+                version_derived.append((pid, excused))
+            mismatches = real
+
         if mismatches:
             failed.append((pid, mismatches))
         else:
@@ -216,6 +248,17 @@ def main() -> int:
             print(f"          subject  : {truncate(b)}")
         if len(mismatches) > args.max_per_probe:
             print(f"        … {len(mismatches) - args.max_per_probe} more")
+        print()
+
+    if version_derived:
+        n = sum(len(m) for _, m in version_derived)
+        print(f"version-derived, not counted as failures "
+              f"({n} field(s) across {len(version_derived)} probe(s)):")
+        print(f"  reference build {ref_ver}, subject build {sub_ver}. Each field below")
+        print("  is identical once the version string is substituted.")
+        for pid, ms in version_derived:
+            locs = ", ".join(".".join(p) if p else "<value>" for p, _, _ in ms)
+            print(f"  {pid}: {locs}")
         print()
 
     for pid, why in errored:

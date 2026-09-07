@@ -1,0 +1,192 @@
+Subject: [PATCH] embedder_support: platform identity from the device profile
+
+The highest-leverage single patch in the map: this one struct feeds every
+Sec-CH-UA header and every navigator.userAgentData value, so overriding it here
+closes twenty-two ledger surfaces at once.
+
+It works because UserAgentMetadata is computed once in the browser process and
+pushed to renderers as a mojo copy — unlike deviceMemory, which each process
+recomputes. Both the browser's navigation headers and the renderer's subresource
+headers read this same struct, and so does userAgentData in window and worker
+scope. There is no second site to keep in step.
+
+The brand list and browser version are deliberately untouched. This binary
+really is the Chromium version it reports, and claiming another would require
+behaving like it — every feature-detection difference would contradict the
+claim. What is presented is a device, not a different browser. That also keeps
+the GREASE entry and brand ordering correct by construction, since both are
+deterministic functions of the real major version.
+
+Separately, this restores the browser brand entry. Upstream supplies it only
+under a Chrome-branded build, so a Chromium build emits a two-entry brand list
+where real Chrome sends three — and that absence is itself the tell. It is one
+suppressed assignment, not a branding requirement: no src-internal and no
+is_chrome_branded involved.
+
+form_factors needs no explicit handling. It is derived from the mobile bit,
+which the low-entropy block corrects before form_factors is computed, so it
+follows the profile without a second assignment.
+
+Ledger: navigator.user-agent-data.platform, navigator.user-agent-data.brands,
+http.sec-ch-ua-platform, http.sec-ch-ua-platform-version, http.sec-ch-ua-arch,
+http.sec-ch-ua-bitness, http.sec-ch-ua-model, http.sec-ch-ua-mobile,
+branding.product-brand-entry, and the rest of the Client Hints family.
+
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index 8a64885..ff7be12 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -113,6 +113,27 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+     }
+   }
+ 
++  if (const DictValue* platform = dict->FindDict("platform")) {
++    if (const std::string* v = platform->FindString("name")) {
++      profile->ua_platform_ = *v;
++    }
++    if (const std::string* v = platform->FindString("version")) {
++      profile->ua_platform_version_ = *v;
++    }
++    if (const std::string* v = platform->FindString("architecture")) {
++      profile->ua_architecture_ = *v;
++    }
++    if (const std::string* v = platform->FindString("bitness")) {
++      profile->ua_bitness_ = *v;
++    }
++    if (const std::string* v = platform->FindString("model")) {
++      profile->ua_model_ = *v;
++    }
++    if (std::optional<bool> v = platform->FindBool("mobile")) {
++      profile->ua_mobile_ = *v;
++    }
++  }
++
+   return profile.release();
+ }
+ 
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index 0776033..575a00e 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -86,6 +86,23 @@ class BASE_EXPORT Profile {
+   }
+   const std::optional<std::string>& gpu_vendor() const { return gpu_vendor_; }
+ 
++  // Platform identity as reported through User-Agent Client Hints.
++  //
++  // These are the device's identity, not the browser's. The binary genuinely is
++  // the Chromium version it reports, so the brand list and version are left
++  // alone: claiming a different browser version would require behaving like
++  // that version, and every feature-detection difference would contradict it.
++  const std::optional<std::string>& ua_platform() const { return ua_platform_; }
++  const std::optional<std::string>& ua_platform_version() const {
++    return ua_platform_version_;
++  }
++  const std::optional<std::string>& ua_architecture() const {
++    return ua_architecture_;
++  }
++  const std::optional<std::string>& ua_bitness() const { return ua_bitness_; }
++  const std::optional<std::string>& ua_model() const { return ua_model_; }
++  std::optional<bool> ua_mobile() const { return ua_mobile_; }
++
+   // Identifier of the capture this profile was derived from, for diagnostics.
+   const std::string& source_id() const { return source_id_; }
+ 
+@@ -96,6 +113,12 @@ class BASE_EXPORT Profile {
+   std::optional<uint64_t> memory_total_bytes_;
+   std::optional<std::string> gpu_renderer_;
+   std::optional<std::string> gpu_vendor_;
++  std::optional<std::string> ua_platform_;
++  std::optional<std::string> ua_platform_version_;
++  std::optional<std::string> ua_architecture_;
++  std::optional<std::string> ua_bitness_;
++  std::optional<std::string> ua_model_;
++  std::optional<bool> ua_mobile_;
+   std::string source_id_;
+ };
+ 
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index 53e9d4d..5071b53 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -13,6 +13,7 @@
+ #include <vector>
+ 
+ #include "base/android/device_info.h"
++#include "base/apostate/profile.h"
+ #include "base/command_line.h"
+ #include "base/compiler_specific.h"
+ #include "base/feature_list.h"
+@@ -162,10 +163,12 @@ const blink::UserAgentBrandList GetUserAgentBrandList(
+   int major_version_number;
+   bool parse_result = base::StringToInt(major_version, &major_version_number);
+   DCHECK(parse_result);
+-  std::optional<std::string> brand;
+-#if !BUILDFLAG(CHROMIUM_BRANDING)
+-  brand = version_info::GetProductName();
+-#endif
++  // Apostate: upstream supplies the browser brand only on a Chrome-branded
++  // build, so a Chromium build emits a two-entry brand list with no browser
++  // entry at all. Real Chrome sends three. The absence is itself the tell, and
++  // it is one suppressed assignment rather than a branding requirement — no
++  // src-internal, no is_chrome_branded.
++  std::optional<std::string> brand = "Google Chrome";
+ 
+   std::string brand_version =
+       output_version_type == blink::UserAgentBrandVersionType::kFullVersion
+@@ -657,6 +660,27 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
+   metadata.mobile = GetMobileBitForUAMetadata();
+   metadata.platform = GetPlatformForUAMetadata();
+ 
++  // Apostate: apply the profile's platform identity here, where every consumer
++  // of this struct is downstream. It is computed once in the browser and
++  // pushed to renderers as a mojo copy, so overriding it reaches every
++  // Sec-CH-UA header and every navigator.userAgentData value, in window and
++  // worker scope alike, without a second patch anywhere.
++  //
++  // The brand list and version are deliberately untouched. This binary really
++  // is the Chromium version it reports; claiming another would require
++  // behaving like it, and every feature-detection difference would contradict
++  // the claim. What is being presented is a device, not a different browser.
++  const ::base::apostate::Profile* apostate_profile =
++      ::base::apostate::Profile::Get();
++  if (apostate_profile) {
++    if (apostate_profile->ua_platform().has_value()) {
++      metadata.platform = *apostate_profile->ua_platform();
++    }
++    if (apostate_profile->ua_mobile().has_value()) {
++      metadata.mobile = *apostate_profile->ua_mobile();
++    }
++  }
++
+   // For users providing a valid user-agent override via the command line:
+   // If kUACHOverrideBlank is enabled, set user-agent metadata with the
+   // default blank values, otherwise return the default UserAgentMetadata values
+@@ -684,6 +708,27 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
+   metadata.bitness = GetCpuBitness();
+   metadata.wow64 = IsWoW64();
+   metadata.platform_version = GetPlatformVersion();
++
++  // Apostate: high-entropy half of the same override.
++  //
++  // form_factors needs no handling here: it is computed above from
++  // metadata.mobile, which the low-entropy block has already corrected, so it
++  // follows the profile without a second assignment.
++  if (apostate_profile) {
++    if (apostate_profile->ua_platform_version().has_value()) {
++      metadata.platform_version = *apostate_profile->ua_platform_version();
++    }
++    if (apostate_profile->ua_architecture().has_value()) {
++      metadata.architecture = *apostate_profile->ua_architecture();
++    }
++    if (apostate_profile->ua_bitness().has_value()) {
++      metadata.bitness = *apostate_profile->ua_bitness();
++    }
++    if (apostate_profile->ua_model().has_value()) {
++      metadata.model = *apostate_profile->ua_model();
++    }
++  }
++
+   return metadata;
+ }
+ 

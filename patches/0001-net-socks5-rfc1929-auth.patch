@@ -1,0 +1,390 @@
+Subject: [PATCH] net: SOCKS5 username/password authentication (RFC 1929)
+
+Chromium's SOCKS5 client offers only "no authentication" — the greeting is the
+fixed constant {0x05, 0x01, 0x00} and DoGreetReadComplete rejects any method the
+proxy selects other than 0x00. A proxy requiring credentials therefore fails the
+connection outright.
+
+Adds RFC 1929 username/password authentication. When credentials are supplied
+the greeting offers both 0x00 and 0x02 and the proxy chooses, so behaviour
+against proxies that do not require authentication is unchanged. Without
+credentials the greeting is byte-identical to upstream.
+
+Credentials live in a struct passed to the socket rather than on ProxyServer:
+proxy identity is serialised into NetLog events, net-export dumps, socket pool
+group keys and histograms, and a credential inside it would reach all of them.
+
+Notes:
+  - The subnegotiation carries its own version (0x01), which is not the SOCKS
+    version. Checked separately.
+  - RFC 1929 encodes each field length in one octet, so credentials over 255
+    bytes cannot be encoded; rejected at construction rather than truncated.
+  - Method 0xFF ("no acceptable methods") now reports as an authentication
+    failure, which is what a proxy requiring credentials answers when none were
+    configured.
+  - Reuses the existing SOCKS_UNEXPECTED_AUTH and SOCKS_UNEXPECTED_VERSION
+    NetLog events. Dedicated auth phase events would need
+    net_log_event_type_list.h and are left to a follow-up.
+
+diff --git a/net/socket/socks5_client_socket.cc b/net/socket/socks5_client_socket.cc
+index 3eeeb7e..ca2b9ea 100644
+--- a/net/socket/socks5_client_socket.cc
++++ b/net/socket/socks5_client_socket.cc
+@@ -7,7 +7,9 @@
+ #include <stdint.h>
+ 
+ #include <array>
++#include <string>
+ #include <utility>
++#include <vector>
+ 
+ #include "base/compiler_specific.h"
+ #include "base/format_macros.h"
+@@ -31,6 +33,24 @@ const unsigned int SOCKS5ClientSocket::kReadHeaderSize = 5;
+ const uint8_t SOCKS5ClientSocket::kSOCKS5Version = 0x05;
+ const uint8_t SOCKS5ClientSocket::kTunnelCommand = 0x01;
+ const uint8_t SOCKS5ClientSocket::kNullByte = 0x00;
++const unsigned int SOCKS5ClientSocket::kAuthReadHeaderSize = 2;
++const uint8_t SOCKS5ClientSocket::kAuthMethodNone = 0x00;
++const uint8_t SOCKS5ClientSocket::kAuthMethodUserPass = 0x02;
++const uint8_t SOCKS5ClientSocket::kAuthMethodNoneAcceptable = 0xFF;
++const uint8_t SOCKS5ClientSocket::kAuthSubnegotiationVersion = 0x01;
++const uint8_t SOCKS5ClientSocket::kAuthStatusSuccess = 0x00;
++
++SOCKS5Credentials::SOCKS5Credentials(std::string username, std::string password)
++    : username(std::move(username)), password(std::move(password)) {}
++SOCKS5Credentials::~SOCKS5Credentials() = default;
++SOCKS5Credentials::SOCKS5Credentials(const SOCKS5Credentials&) = default;
++SOCKS5Credentials& SOCKS5Credentials::operator=(const SOCKS5Credentials&) =
++    default;
++
++bool SOCKS5Credentials::IsValid() const {
++  // RFC 1929 gives each field a single length octet.
++  return username.size() <= 255 && password.size() <= 255;
++}
+ 
+ static_assert(sizeof(struct in_addr) == 4, "incorrect system size of IPv4");
+ static_assert(sizeof(struct in6_addr) == 16, "incorrect system size of IPv6");
+@@ -38,13 +58,19 @@ static_assert(sizeof(struct in6_addr) == 16, "incorrect system size of IPv6");
+ SOCKS5ClientSocket::SOCKS5ClientSocket(
+     std::unique_ptr<StreamSocket> transport_socket,
+     const HostPortPair& destination,
+-    const NetworkTrafficAnnotationTag& traffic_annotation)
++    const NetworkTrafficAnnotationTag& traffic_annotation,
++    std::optional<SOCKS5Credentials> credentials)
+     : io_callback_(base::BindRepeating(&SOCKS5ClientSocket::OnIOComplete,
+                                        base::Unretained(this))),
+       transport_socket_(std::move(transport_socket)),
+       destination_(destination),
++      credentials_(std::move(credentials)),
+       net_log_(transport_socket_->NetLog()),
+-      traffic_annotation_(traffic_annotation) {}
++      traffic_annotation_(traffic_annotation) {
++  // An over-long credential cannot be encoded, and silently offering
++  // authentication we cannot complete would fail later and less clearly.
++  DCHECK(!credentials_.has_value() || credentials_->IsValid());
++}
+ 
+ SOCKS5ClientSocket::~SOCKS5ClientSocket() {
+   Disconnect();
+@@ -224,6 +250,20 @@ int SOCKS5ClientSocket::DoLoop(int last_io_result) {
+         net_log_.EndEventWithNetErrorCode(NetLogEventType::SOCKS5_GREET_READ,
+                                           rv);
+         break;
++      case STATE_AUTH_WRITE:
++        DCHECK_EQ(OK, rv);
++        rv = DoAuthWrite();
++        break;
++      case STATE_AUTH_WRITE_COMPLETE:
++        rv = DoAuthWriteComplete(rv);
++        break;
++      case STATE_AUTH_READ:
++        DCHECK_EQ(OK, rv);
++        rv = DoAuthRead();
++        break;
++      case STATE_AUTH_READ_COMPLETE:
++        rv = DoAuthReadComplete(rv);
++        break;
+       case STATE_HANDSHAKE_WRITE:
+         DCHECK_EQ(OK, rv);
+         net_log_.BeginEvent(NetLogEventType::SOCKS5_HANDSHAKE_WRITE);
+@@ -251,8 +291,45 @@ int SOCKS5ClientSocket::DoLoop(int last_io_result) {
+   return rv;
+ }
+ 
+-static constexpr std::array<uint8_t, 3> kSOCKS5GreetWriteData{
+-    0x05, 0x01, 0x00};  // no authentication
++scoped_refptr<DrainableIOBuffer> SOCKS5ClientSocket::BuildGreetWriteBuffer()
++    const {
++  std::vector<uint8_t> greeting;
++  greeting.push_back(kSOCKS5Version);
++  if (credentials_.has_value()) {
++    // Offer both, so a proxy that does not require authentication still
++    // completes and one that does can select it.
++    greeting.push_back(2);
++    greeting.push_back(kAuthMethodNone);
++    greeting.push_back(kAuthMethodUserPass);
++  } else {
++    greeting.push_back(1);
++    greeting.push_back(kAuthMethodNone);
++  }
++
++  auto buffer = base::MakeRefCounted<VectorIOBuffer>(std::move(greeting));
++  size_t size = buffer->size();
++  return base::MakeRefCounted<DrainableIOBuffer>(std::move(buffer), size);
++}
++
++scoped_refptr<DrainableIOBuffer> SOCKS5ClientSocket::BuildAuthWriteBuffer()
++    const {
++  DCHECK(credentials_.has_value());
++  DCHECK(credentials_->IsValid());
++
++  // RFC 1929: VER | ULEN | UNAME | PLEN | PASSWD
++  std::vector<uint8_t> request;
++  request.push_back(kAuthSubnegotiationVersion);
++  request.push_back(static_cast<uint8_t>(credentials_->username.size()));
++  request.insert(request.end(), credentials_->username.begin(),
++                 credentials_->username.end());
++  request.push_back(static_cast<uint8_t>(credentials_->password.size()));
++  request.insert(request.end(), credentials_->password.begin(),
++                 credentials_->password.end());
++
++  auto buffer = base::MakeRefCounted<VectorIOBuffer>(std::move(request));
++  size_t size = buffer->size();
++  return base::MakeRefCounted<DrainableIOBuffer>(std::move(buffer), size);
++}
+ 
+ int SOCKS5ClientSocket::DoGreetWrite() {
+   // Since we only have 1 byte to send the hostname length in, if the
+@@ -263,10 +340,7 @@ int SOCKS5ClientSocket::DoGreetWrite() {
+   }
+ 
+   if (!write_buf_) {
+-    auto greet_buffer =
+-        base::MakeRefCounted<WrappedIOBuffer>(kSOCKS5GreetWriteData);
+-    write_buf_ = base::MakeRefCounted<DrainableIOBuffer>(
+-        std::move(greet_buffer), greet_buffer->size());
++    write_buf_ = BuildGreetWriteBuffer();
+   }
+ 
+   next_state_ = STATE_GREET_WRITE_COMPLETE;
+@@ -323,13 +397,97 @@ int SOCKS5ClientSocket::DoGreetReadComplete(int result) {
+                                    "version", read_data[0]);
+     return ERR_SOCKS_CONNECTION_FAILED;
+   }
+-  if (read_data[1] != 0x00) {
+-    net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_AUTH,
+-                                   "method", read_data[1]);
++  const uint8_t method = read_data[1];
++  read_buf_.reset();
++
++  if (method == kAuthMethodNone) {
++    next_state_ = STATE_HANDSHAKE_WRITE;
++    return OK;
++  }
++
++  if (method == kAuthMethodUserPass && credentials_.has_value()) {
++    next_state_ = STATE_AUTH_WRITE;
++    return OK;
++  }
++
++  // Covers 0xFF ("no acceptable methods"), which is what a proxy requiring
++  // authentication answers when no credentials were configured, as well as any
++  // method the server selected that we did not offer.
++  net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_AUTH,
++                                 "method", method);
++  return ERR_SOCKS_CONNECTION_FAILED;
++}
++
++int SOCKS5ClientSocket::DoAuthWrite() {
++  if (!write_buf_) {
++    write_buf_ = BuildAuthWriteBuffer();
++  }
++
++  next_state_ = STATE_AUTH_WRITE_COMPLETE;
++  return transport_socket_->Write(write_buf_.get(),
++                                  write_buf_->BytesRemaining(), io_callback_,
++                                  traffic_annotation_);
++}
++
++int SOCKS5ClientSocket::DoAuthWriteComplete(int result) {
++  if (result < 0)
++    return result;
++
++  write_buf_->DidConsume(result);
++  if (write_buf_->BytesRemaining() == 0) {
++    write_buf_.reset();
++    next_state_ = STATE_AUTH_READ;
++  } else {
++    next_state_ = STATE_AUTH_WRITE;
++  }
++  return OK;
++}
++
++int SOCKS5ClientSocket::DoAuthRead() {
++  next_state_ = STATE_AUTH_READ_COMPLETE;
++  if (!read_buf_) {
++    read_buf_ = base::MakeRefCounted<GrowableIOBuffer>();
++    read_buf_->SetCapacity(kAuthReadHeaderSize);
++  }
++  return transport_socket_->Read(read_buf_.get(),
++                                 read_buf_->RemainingCapacity(), io_callback_);
++}
++
++int SOCKS5ClientSocket::DoAuthReadComplete(int result) {
++  if (result < 0)
++    return result;
++
++  if (result == 0) {
++    net_log_.AddEvent(
++        NetLogEventType::SOCKS_UNEXPECTEDLY_CLOSED_DURING_GREETING);
+     return ERR_SOCKS_CONNECTION_FAILED;
+   }
+ 
++  read_buf_->set_offset(read_buf_->offset() + result);
++  if (read_buf_->RemainingCapacity() > 0) {
++    next_state_ = STATE_AUTH_READ;
++    return OK;
++  }
++
++  base::span<uint8_t> read_data = read_buf_->span_before_offset();
++  const uint8_t version = read_data[0];
++  const uint8_t status = read_data[1];
+   read_buf_.reset();
++
++  // The subnegotiation carries its own version number, which RFC 1929 fixes at
++  // 0x01. It is not the SOCKS version.
++  if (version != kAuthSubnegotiationVersion) {
++    net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_VERSION,
++                                   "version", version);
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++
++  if (status != kAuthStatusSuccess) {
++    net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_AUTH,
++                                   "status", status);
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++
+   next_state_ = STATE_HANDSHAKE_WRITE;
+   return OK;
+ }
+diff --git a/net/socket/socks5_client_socket.h b/net/socket/socks5_client_socket.h
+index fe8da48..9966b5b 100644
+--- a/net/socket/socks5_client_socket.h
++++ b/net/socket/socks5_client_socket.h
+@@ -8,6 +8,9 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ 
++#include <optional>
++#include <string>
++
+ #include <memory>
+ #include <string>
+ 
+@@ -27,8 +30,28 @@ namespace net {
+ class DrainableIOBuffer;
+ class GrowableIOBuffer;
+ 
++// Username/password credentials for RFC 1929 authentication.
++//
++// Held here rather than on ProxyServer: proxy identity is serialised into
++// NetLog events, net-export dumps, socket pool keys and histograms, and a
++// credential inside it would reach all of them.
++struct NET_EXPORT_PRIVATE SOCKS5Credentials {
++  SOCKS5Credentials(std::string username, std::string password);
++  ~SOCKS5Credentials();
++  SOCKS5Credentials(const SOCKS5Credentials&);
++  SOCKS5Credentials& operator=(const SOCKS5Credentials&);
++
++  // RFC 1929 encodes each length in a single octet, so neither field may
++  // exceed 255 bytes.
++  bool IsValid() const;
++
++  std::string username;
++  std::string password;
++};
++
+ // This StreamSocket is used to setup a SOCKSv5 handshake with a socks proxy.
+-// Currently no SOCKSv5 authentication is supported.
++// Supports no authentication (RFC 1928 method 0x00) and username/password
++// authentication (RFC 1929, method 0x02) when credentials are supplied.
+ class NET_EXPORT_PRIVATE SOCKS5ClientSocket : public StreamSocket {
+  public:
+   // |destination| contains the hostname and port to which the socket above will
+@@ -37,9 +60,14 @@ class NET_EXPORT_PRIVATE SOCKS5ClientSocket : public StreamSocket {
+   // Although SOCKS 5 supports 3 different modes of addressing, we will
+   // always pass it a hostname. This means the DNS resolving is done
+   // proxy side.
++  // |credentials|, when present, causes the greeting to offer RFC 1929
++  // username/password authentication alongside "no authentication", and the
++  // proxy chooses. Without it the greeting is unchanged from upstream.
+   SOCKS5ClientSocket(std::unique_ptr<StreamSocket> transport_socket,
+                      const HostPortPair& destination,
+-                     const NetworkTrafficAnnotationTag& traffic_annotation);
++                     const NetworkTrafficAnnotationTag& traffic_annotation,
++                     std::optional<SOCKS5Credentials> credentials =
++                         std::nullopt);
+ 
+   SOCKS5ClientSocket(const SOCKS5ClientSocket&) = delete;
+   SOCKS5ClientSocket& operator=(const SOCKS5ClientSocket&) = delete;
+@@ -82,6 +110,10 @@ class NET_EXPORT_PRIVATE SOCKS5ClientSocket : public StreamSocket {
+     STATE_GREET_WRITE_COMPLETE,
+     STATE_GREET_READ,
+     STATE_GREET_READ_COMPLETE,
++    STATE_AUTH_WRITE,
++    STATE_AUTH_WRITE_COMPLETE,
++    STATE_AUTH_READ,
++    STATE_AUTH_READ_COMPLETE,
+     STATE_HANDSHAKE_WRITE,
+     STATE_HANDSHAKE_WRITE_COMPLETE,
+     STATE_HANDSHAKE_READ,
+@@ -99,9 +131,15 @@ class NET_EXPORT_PRIVATE SOCKS5ClientSocket : public StreamSocket {
+   static const unsigned int kGreetReadHeaderSize;
+   static const unsigned int kWriteHeaderSize;
+   static const unsigned int kReadHeaderSize;
++  static const unsigned int kAuthReadHeaderSize;
+   static const uint8_t kSOCKS5Version;
+   static const uint8_t kTunnelCommand;
+   static const uint8_t kNullByte;
++  static const uint8_t kAuthMethodNone;
++  static const uint8_t kAuthMethodUserPass;
++  static const uint8_t kAuthMethodNoneAcceptable;
++  static const uint8_t kAuthSubnegotiationVersion;
++  static const uint8_t kAuthStatusSuccess;
+ 
+   void DoCallback(int result);
+   void OnIOComplete(int result);
+@@ -116,10 +154,21 @@ class NET_EXPORT_PRIVATE SOCKS5ClientSocket : public StreamSocket {
+   int DoGreetReadComplete(int result);
+   int DoGreetWrite();
+   int DoGreetWriteComplete(int result);
++  int DoAuthWrite();
++  int DoAuthWriteComplete(int result);
++  int DoAuthRead();
++  int DoAuthReadComplete(int result);
+ 
+   // Creates a DrainableIOBuffer containing the SOCKS handshake.
+   scoped_refptr<DrainableIOBuffer> BuildHandshakeWriteBuffer() const;
+ 
++  // Creates the greeting, whose method list depends on whether credentials
++  // were supplied.
++  scoped_refptr<DrainableIOBuffer> BuildGreetWriteBuffer() const;
++
++  // Creates the RFC 1929 username/password request.
++  scoped_refptr<DrainableIOBuffer> BuildAuthWriteBuffer() const;
++
+   CompletionRepeatingCallback io_callback_;
+ 
+   // Stores the underlying socket.
+@@ -145,6 +194,9 @@ class NET_EXPORT_PRIVATE SOCKS5ClientSocket : public StreamSocket {
+ 
+   const HostPortPair destination_;
+ 
++  // Absent unless the proxy was configured with credentials.
++  const std::optional<SOCKS5Credentials> credentials_;
++
+   NetLogWithSource net_log_;
+ 
+   // Traffic annotation for socket control.

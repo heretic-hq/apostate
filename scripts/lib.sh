@@ -18,6 +18,17 @@ export DEPOT_TOOLS_UPDATE=0
 export DEPOT_TOOLS_METRICS=0
 export PATH="$DEPOT_TOOLS:$PATH"
 
+# Prefer the build tools the checkout pins through DEPS over depot_tools'
+# wrappers. Their versions are then fixed by CHROMIUM_VERSION rather than
+# floating with whatever depot_tools revision happens to be present, which is
+# what the build contract actually promises.
+case "$(uname -s)" in
+  Darwin) _bt_dir="mac_arm64" ;;
+  *)      _bt_dir="linux64" ;;
+esac
+GN="$SRC/buildtools/$_bt_dir/gn"
+NINJA="$SRC/third_party/ninja/ninja"
+
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m warn:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -28,4 +39,12 @@ target_default() {
     Linux-x86_64) echo "linux-x64" ;;
     *) die "unsupported host $(uname -s)-$(uname -m)" ;;
   esac
+}
+
+# Wait for a named script to finish on this host. Matches "bash <name>" rather
+# than the bare name, because a watcher whose own command line contains the
+# pattern matches itself and never returns.
+wait_for_script() {
+  local name="$1"
+  while pgrep -f "bash .*${name}" | grep -qv "^$$\$"; do sleep 30; done
 }

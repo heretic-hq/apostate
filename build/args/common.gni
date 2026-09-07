@@ -21,7 +21,11 @@ blink_symbol_level = 0
 
 # Keep the shipped feature set aligned with stock Chrome. Anything switched off
 # here is a capability a real Chrome has and ours would not.
-enable_nacl = false
+#
+# enable_nacl was here and is gone: NaCl was removed from Chromium, so the arg
+# is no longer declared and setting it did nothing. gn reports unknown args as a
+# warning rather than an error, so a stale arg can sit in a build file for years
+# looking load-bearing.
 proprietary_codecs = true
 ffmpeg_branding = "Chrome"
 

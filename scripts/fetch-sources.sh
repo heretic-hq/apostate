@@ -6,10 +6,24 @@ source "$(dirname "$0")/lib.sh"
 mkdir -p "$WORKSPACE"
 cd "$WORKSPACE"
 
-if [ ! -f .gclient ]; then
-  say "configuring gclient for chromium $CHROMIUM_VERSION"
-  gclient config --name src --unmanaged https://chromium.googlesource.com/chromium/src.git
-fi
+# Written directly rather than via `gclient config`, because the PGO profile is
+# an opt-in custom_var and an official build cannot configure without it. The
+# profile is pinned by the Chromium revision — its filename embeds the commit —
+# so fetching it keeps the build deterministic rather than compromising it.
+say "writing .gclient for chromium $CHROMIUM_VERSION"
+cat > .gclient <<'GCLIENT'
+solutions = [
+  {
+    "name": "src",
+    "url": "https://chromium.googlesource.com/chromium/src.git",
+    "managed": False,
+    "custom_deps": {},
+    "custom_vars": {
+      "checkout_pgo_profiles": True,
+    },
+  },
+]
+GCLIENT
 
 if [ ! -d "$SRC/.git" ]; then
   # Partial clone: skip blob history and fetch file contents on demand. A full

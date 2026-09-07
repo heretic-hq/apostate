@@ -11,8 +11,10 @@ OUT="$SRC/out/$TARGET"
 # saturated scheduler distorts its measurements.
 JOBS="${APOSTATE_JOBS:-$(python3 -c "import os;print(max(1,int(os.cpu_count()*0.75)))")}"
 
+[ -x "$NINJA" ] || die "no ninja at $NINJA; the checkout is incomplete"
+
 say "building $TARGET with $JOBS jobs"
-( cd "$SRC" && nice -n 10 autoninja -j "$JOBS" -C "out/$TARGET" chrome )
+( cd "$SRC" && nice -n 10 "$NINJA" -j "$JOBS" -C "out/$TARGET" chrome )
 
 manifest="$REPO_ROOT/build/MANIFEST.lock"
 {

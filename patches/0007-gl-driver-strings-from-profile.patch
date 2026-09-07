@@ -1,0 +1,137 @@
+Subject: [PATCH] gl: serve the profile's driver strings from the binding layer
+
+GL_RENDERER and GL_VENDOR have two independent consumers, and patching either
+one alone leaves the other describing the host's real hardware.
+
+GPUInfo reads them with a direct glGetString in the GPU process, which drives
+chrome://gpu and — more importantly — the driver-bug blocklist, whose decisions
+are keyed on exactly these strings. WebGL reads them through the command buffer
+decoder, and that is what UNMASKED_RENDERER_WEBGL returns to a page. A build
+that claims one GPU to JavaScript while making blocklist decisions for another
+is contradicting itself in a way that shows up as a different feature set, not
+just a different string.
+
+RealGLApi::glGetStringFn is the single point both paths pass through, and it
+already does this for GL_EXTENSIONS: the filtered-extension substitution
+immediately above is the same shape. So the two consumers agree by construction
+rather than by keeping two patches in sync.
+
+Deliberately not touched: WebGL's *masked* GL_RENDERER, which Blink answers with
+the constant "WebKit WebGL" whatever the hardware. Conflating the masked and
+unmasked paths would introduce a difference from stock Chrome rather than remove
+one.
+
+The substituted strings live in function-local statics because this returns a
+borrowed pointer that must outlive the call, and the profile is immutable for
+process lifetime.
+
+Ledger: webgl.unmasked-renderer, webgl.unmasked-vendor, gpuinfo.gl-renderer,
+coh.gpu-info-vs-webgl.
+
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index 2d479a8..8a64885 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -104,6 +104,15 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+     }
+   }
+ 
++  if (const DictValue* gpu = dict->FindDict("gpu")) {
++    if (const std::string* renderer = gpu->FindString("unmasked_renderer")) {
++      profile->gpu_renderer_ = *renderer;
++    }
++    if (const std::string* vendor = gpu->FindString("unmasked_vendor")) {
++      profile->gpu_vendor_ = *vendor;
++    }
++  }
++
+   return profile.release();
+ }
+ 
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index ff33d3d..0776033 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -70,6 +70,22 @@ class BASE_EXPORT Profile {
+     return memory_total_bytes_;
+   }
+ 
++  // GL_RENDERER and GL_VENDOR as the claimed device's driver reports them.
++  //
++  // These are consumed at the GL binding layer rather than in Blink, because
++  // two independent consumers read them — GPUInfo in the GPU process, which
++  // drives chrome://gpu and the blocklist, and WebGL's
++  // UNMASKED_RENDERER_WEBGL, which is what a page actually sees. Overriding
++  // either one alone leaves the other describing the host's real hardware.
++  //
++  // Note this does not touch WebGL's *masked* GL_RENDERER, which Blink answers
++  // with the constant "WebKit WebGL" regardless of hardware. Conflating the two
++  // would introduce a difference from stock Chrome rather than remove one.
++  const std::optional<std::string>& gpu_renderer() const {
++    return gpu_renderer_;
++  }
++  const std::optional<std::string>& gpu_vendor() const { return gpu_vendor_; }
++
+   // Identifier of the capture this profile was derived from, for diagnostics.
+   const std::string& source_id() const { return source_id_; }
+ 
+@@ -78,6 +94,8 @@ class BASE_EXPORT Profile {
+ 
+   std::optional<int> cpu_logical_cores_;
+   std::optional<uint64_t> memory_total_bytes_;
++  std::optional<std::string> gpu_renderer_;
++  std::optional<std::string> gpu_vendor_;
+   std::string source_id_;
+ };
+ 
+diff --git a/ui/gl/gl_gl_api_implementation.cc b/ui/gl/gl_gl_api_implementation.cc
+index 6e785fa..3ebdfb1 100644
+--- a/ui/gl/gl_gl_api_implementation.cc
++++ b/ui/gl/gl_gl_api_implementation.cc
+@@ -4,6 +4,9 @@
+ 
+ #include "ui/gl/gl_gl_api_implementation.h"
+ 
++#include "base/apostate/profile.h"
++#include "base/no_destructor.h"
++
+ #include <array>
+ #include <vector>
+ 
+@@ -247,6 +250,36 @@ const GLubyte* RealGLApi::glGetStringFn(GLenum name) {
+     InitializeFilteredExtensionsIfNeeded();
+     return reinterpret_cast<const GLubyte*>(filtered_exts_str_.c_str());
+   }
++
++  // Apostate: substitute the profile's driver strings here, at the binding
++  // layer, because this is the one point both consumers pass through.
++  //
++  // GPUInfo reads them via glGetString directly in the GPU process, driving
++  // chrome://gpu and the blocklist; WebGL reads them through the command
++  // buffer decoder, which is what UNMASKED_RENDERER_WEBGL returns to a page.
++  // Patching either site alone leaves the other describing the host's real
++  // hardware, and a claimed GPU whose blocklist decisions were made for a
++  // different one is its own contradiction.
++  //
++  // The strings are held in function-local statics because this returns a
++  // borrowed pointer that must outlive the call, and the profile is immutable
++  // for process lifetime.
++  if (name == GL_RENDERER || name == GL_VENDOR) {
++    if (const base::apostate::Profile* profile =
++            base::apostate::Profile::Get()) {
++      if (name == GL_RENDERER && profile->gpu_renderer().has_value()) {
++        static const base::NoDestructor<std::string> renderer(
++            *profile->gpu_renderer());
++        return reinterpret_cast<const GLubyte*>(renderer->c_str());
++      }
++      if (name == GL_VENDOR && profile->gpu_vendor().has_value()) {
++        static const base::NoDestructor<std::string> vendor(
++            *profile->gpu_vendor());
++        return reinterpret_cast<const GLubyte*>(vendor->c_str());
++      }
++    }
++  }
++
+   return GLApiBase::glGetStringFn(name);
+ }
+ 

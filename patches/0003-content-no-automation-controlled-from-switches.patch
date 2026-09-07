@@ -1,0 +1,80 @@
+Subject: [PATCH] content: do not enable AutomationControlled from launch switches
+
+WebRuntimeFeatures::EnableAutomationControlled is what makes
+navigator.webdriver true, and upstream turns it on from four separate places:
+three switch-table rows (--enable-automation, --headless,
+--remote-debugging-pipe) and a block matching --remote-debugging-port=0.
+
+All four describe how the browser was launched rather than the device it
+represents, and two of them are the defaults of the tools our users drive us
+with. Playwright connects over --remote-debugging-pipe; Puppeteer requests
+--remote-debugging-port=0. So in both default configurations the browser
+announces itself before any patch of ours is involved, and --headless=new sets
+the flag with no client attached at all.
+
+The commonly cited evasion, --disable-blink-features=AutomationControlled,
+disables the feature by name while leaving every one of these switches still
+setting it. Removing the assignments is the difference between suppressing a
+symptom and removing the cause.
+
+Removing the four call sites leaves no reference to EnableAutomationControlled
+in this file, so the upstream comment explaining the port-zero behaviour is
+replaced rather than left describing code that is gone.
+
+This does not disable the feature itself: a caller that explicitly sends
+Emulation.setAutomationOverride still gets it, which is correct, because that is
+a deliberate request rather than a side effect of a transport choice.
+
+Ledger: automation.navigator-webdriver.
+
+diff --git a/content/child/runtime_features.cc b/content/child/runtime_features.cc
+index 6eb5b8f..98a7971 100644
+--- a/content/child/runtime_features.cc
++++ b/content/child/runtime_features.cc
+@@ -392,9 +392,16 @@ void SetRuntimeFeaturesFromCommandLine(const base::CommandLine& command_line) {
+       {wrf::EnableTimerThrottlingForBackgroundTabs,
+        switches::kDisableBackgroundTimerThrottling, false},
+       // End of Stable Features
+-      {wrf::EnableAutomationControlled, switches::kEnableAutomation, true},
+-      {wrf::EnableAutomationControlled, switches::kHeadless, true},
+-      {wrf::EnableAutomationControlled, switches::kRemoteDebuggingPipe, true},
++      // Apostate: upstream enables AutomationControlled from three switches
++      // here, and from --remote-debugging-port=0 below. That feature is what
++      // makes navigator.webdriver true.
++      //
++      // All four describe how this browser was launched, not the device it
++      // represents. Two of them are the defaults of the tools our users drive
++      // us with — Playwright connects over --remote-debugging-pipe and
++      // Puppeteer over --remote-debugging-port=0 — and --headless sets it with
++      // no client attached at all. Leaving them in place would mean the normal
++      // way of using this browser announces itself.
+       {wrf::EnableFileSystem, switches::kDisableFileSystem, false},
+       {wrf::EnableNetInfoDownlinkMax,
+        switches::kEnableNetworkInformationDownlinkMax, true},
+@@ -435,22 +442,10 @@ void SetRuntimeFeaturesFromCommandLine(const base::CommandLine& command_line) {
+     }
+   }
+ 
+-  // Set EnableAutomationControlled if the caller passes
+-  // --remote-debugging-port=0 on the command line. This means
+-  // the caller has requested an ephemeral port which is how ChromeDriver
+-  // launches the browser by default.
+-  // If the caller provides a specific port number, this is
+-  // more likely for attaching a debugger, so we should leave
+-  // EnableAutomationControlled unset to ensure the browser behaves as it does
+-  // when not under automation control.
+-  if (command_line.HasSwitch(switches::kRemoteDebuggingPort)) {
+-    std::string port_str =
+-        command_line.GetSwitchValueASCII(::switches::kRemoteDebuggingPort);
+-    int port;
+-    if (base::StringToInt(port_str, &port) && port == 0) {
+-      WebRuntimeFeatures::EnableAutomationControlled(true);
+-    }
+-  }
++  // Apostate: upstream enabled AutomationControlled here when the caller passed
++  // --remote-debugging-port=0, the ephemeral port ChromeDriver requests by
++  // default. Removed along with the three switch rows above; see the comment
++  // there for why none of the four belong in this browser.
+ }
+ 
+ // Sets blink runtime features that depend on a combination

@@ -1,0 +1,1776 @@
+{
+  "valid": true,
+  "plugins": [
+    {
+      "ref": 1446158656,
+      "description": "Portable Document Format",
+      "filename": "internal-pdf-viewer",
+      "name": "PDF Viewer",
+      "mimes": [
+        -1248334925,
+        -1004735216
+      ]
+    },
+    {
+      "ref": 1010824838,
+      "description": "Portable Document Format",
+      "filename": "internal-pdf-viewer",
+      "name": "Chrome PDF Viewer",
+      "mimes": [
+        -1248334925,
+        -1004735216
+      ]
+    },
+    {
+      "ref": -1972253206,
+      "description": "Portable Document Format",
+      "filename": "internal-pdf-viewer",
+      "name": "Chromium PDF Viewer",
+      "mimes": [
+        -1248334925,
+        -1004735216
+      ]
+    },
+    {
+      "ref": -545395695,
+      "description": "Portable Document Format",
+      "filename": "internal-pdf-viewer",
+      "name": "Microsoft Edge PDF Viewer",
+      "mimes": [
+        -1248334925,
+        -1004735216
+      ]
+    },
+    {
+      "ref": 1114102244,
+      "description": "Portable Document Format",
+      "filename": "internal-pdf-viewer",
+      "name": "WebKit built-in PDF",
+      "mimes": [
+        -1248334925,
+        -1004735216
+      ]
+    }
+  ],
+  "mimes": [
+    {
+      "ref": -1248334925,
+      "description": "Portable Document Format",
+      "suffixes": "pdf",
+      "type": "application/pdf",
+      "plugin": 1446158656
+    },
+    {
+      "ref": -1004735216,
+      "description": "Portable Document Format",
+      "suffixes": "pdf",
+      "type": "text/pdf",
+      "plugin": 1446158656
+    }
+  ],
+  "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/152.0.0.0 Safari/537.36",
+  "tags": [
+    "Mac",
+    "Chrome",
+    "Desktop"
+  ],
+  "dnt": false,
+  "width": 756,
+  "height": 469,
+  "canvas": "1830b8ad780516c377a9cc05e86e33971744ef2f8e2b039cd97e8cb94beeb7cfcff43918f98fdf6ec0cebe4951da483797d055b8119774b80011f2439de5b82c757575757b81757575757575947b757575758694757c8394947b7579827b75947575759494757575947b75757575758f757575",
+  "webgl": "34ab8a1d6343ade38c43387c663335d479a8308764a62b1092f2046fff8b6c640b2086f2d69d2bc88165349e14e7ae5d8dddf70aaee035296621654cb32e15d0757575757b81757575757575947b757575758694757c8394947b7579827b75947575759494757575947b75757575758f757575",
+  "rectangles": "cb6e8808bc736ab49ae34333e58c9dc4fe141b39023dabd630089ef0c502ba8016ccbf652c685512e477560cf52c0a911fe13e02dd2cf3ceb44695679291fd1100000000d2c20000901b00001441ffff6ec9ffff33b700007d5000003054ffff3497fffffd9c0000027f0000fb74ffff536dffff4476000068a30000daa0ffff224fffff20460000caba00004dd4ffff073fffff661000004bc300003a0b00004c3effff5fd9ffff3dbc000043410000fe4cffff6aa5ffff31a6000019720000f469ffffac78ffffe7820000d9990000dd92ffffb756ffff3055000057b5000078c4ffff3d42ffffaf20000063c20000d1faffffe13cffff95e9fffff3bf0000933100001147ffff43b4ffff38ae000062640000fc5ffffffa84ffff9d8e0000338f0000a685ffff7e5fffffa56300009bae00000fb5ffffca46ffffbd3000001bc0000070eaffffd83cfffff5f9ffff4dc20000892100007242ffffa6c3ffff04b50000f65500002557ffff2692ffff519900008a830000",
+  "audio": "c66bf56ddabc2021b84d3ae2755d0ab05ff0c99e2c96a4a47ce951e4e926596d51c2dba18aff8e7133fbaa416ff7d38683fe80084d7f96bac2ff1ee102c9f44488888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888888",
+  "battery": "356eda536fffe8e45d4a1a1f07b7f46e39f2f69a81b0275460517b219714d8be86b6ef28ede02b68e68c836e5fa618ede76332ba5296548a4dc6c7b2bbbb73df1401016e8c2d0e",
+  "sensor": {
+    "OrientationQuaternionZ": "0",
+    "ReplaceGyroscope": "Disable",
+    "ReplaceGravity": "Disable",
+    "ReplaceAccelerometer": "Disable",
+    "ReplaceLinearAcceleration": "Disable",
+    "ReplaceOrientation": "Disable",
+    "GyroscopeX": "0",
+    "GyroscopeY": "0",
+    "GyroscopeZ": "0",
+    "GravityX": "0",
+    "GravityY": "0",
+    "GravityZ": "9.8",
+    "AccelerometerX": "0",
+    "AccelerometerY": "0",
+    "AccelerometerZ": "9.8",
+    "LinearAccelerationX": "0",
+    "LinearAccelerationY": "0",
+    "LinearAccelerationZ": "0"
+  },
+  "has_battery_api": true,
+  "has_battery_device": true,
+  "webgl_properties": {
+    "unmaskedVendor": "Google Inc. (Apple)",
+    "unmaskedRenderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Max, Unspecified Version)",
+    "vendor": "WebKit",
+    "renderer": "WebKit WebGL",
+    "shadingLanguage": "WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)",
+    "version": "WebGL 1.0 (OpenGL ES 2.0 Chromium)",
+    "maxAnisotropy": "16",
+    "aliasedLineWidthRange": {
+      "0": 1,
+      "1": 1
+    },
+    "aliasedPointSizeRange": {
+      "0": 1,
+      "1": 511
+    },
+    "alphaBits": "8",
+    "blueBits": "8",
+    "depthBits": "24",
+    "greenBits": "8",
+    "maxCombinedTextureImageUnits": "32",
+    "maxCubeMapTextureSize": "16384",
+    "maxFragmentUniformVectors": "1024",
+    "maxRenderBufferSize": "16384",
+    "maxTextureImageUnits": "16",
+    "maxTextureSize": "16384",
+    "maxVaryingVectors": "30",
+    "maxVertexAttribs": "16",
+    "maxVertexTextureImageUnits": "16",
+    "maxVertexUniformVectors": "1024",
+    "maxViewportDims": {
+      "0": 16384,
+      "1": 16384
+    },
+    "redBits": "8",
+    "stencilBits": "8",
+    "subpixelBits": "4",
+    "sampleBuffers": "1",
+    "samples": "4",
+    "stencilBackValueMask": "4294967295",
+    "stencilBackWritemask": "4294967295",
+    "stencilValueMask": "4294967295",
+    "stencilWritemask": "4294967295",
+    "webglContextAttributesDefaults": {
+      "alpha": true,
+      "antialias": true,
+      "depth": true,
+      "desynchronized": false,
+      "failIfMajorPerformanceCaveat": false,
+      "powerPreference": "default",
+      "premultipliedAlpha": true,
+      "preserveDrawingBuffer": false,
+      "stencil": false,
+      "xrCompatible": false
+    },
+    "extensions": "ANGLE_instanced_arrays,EXT_blend_minmax,EXT_clip_control,EXT_color_buffer_half_float,EXT_depth_clamp,EXT_disjoint_timer_query,EXT_float_blend,EXT_frag_depth,EXT_polygon_offset_clamp,EXT_shader_texture_lod,EXT_texture_compression_bptc,EXT_texture_compression_rgtc,EXT_texture_filter_anisotropic,EXT_texture_mirror_clamp_to_edge,EXT_sRGB,KHR_parallel_shader_compile,OES_element_index_uint,OES_fbo_render_mipmap,OES_standard_derivatives,OES_texture_float,OES_texture_float_linear,OES_texture_half_float,OES_texture_half_float_linear,OES_vertex_array_object,WEBGL_blend_func_extended,WEBGL_color_buffer_float,WEBGL_compressed_texture_astc,WEBGL_compressed_texture_etc,WEBGL_compressed_texture_etc1,WEBGL_compressed_texture_pvrtc,WEBGL_compressed_texture_s3tc,WEBGL_compressed_texture_s3tc_srgb,WEBGL_debug_renderer_info,WEBGL_debug_shaders,WEBGL_depth_texture,WEBGL_draw_buffers,WEBGL_lose_context,WEBGL_multi_draw,WEBGL_polygon_mode",
+    "precisionVertexShaderHighFloat": 23,
+    "rangeMinVertexShaderHighFloat": 127,
+    "rangeMaxVertexShaderHighFloat": 127,
+    "precisionVertexShaderMediumFloat": 23,
+    "rangeMinVertexShaderMediumFloat": 127,
+    "rangeMaxVertexShaderMediumFloat": 127,
+    "precisionVertexShaderLowFloat": 23,
+    "rangeMinVertexShaderLowFloat": 127,
+    "rangeMaxVertexShaderLowFloat": 127,
+    "precisionFragmentShaderHighFloat": 23,
+    "rangeMinFragmentShaderHighFloat": 127,
+    "rangeMaxFragmentShaderHighFloat": 127,
+    "precisionFragmentShaderMediumFloat": 23,
+    "rangeMinFragmentShaderMediumFloat": 127,
+    "rangeMaxFragmentShaderMediumFloat": 127,
+    "precisionFragmentShaderLowFloat": 23,
+    "rangeMinFragmentShaderLowFloat": 127,
+    "rangeMaxFragmentShaderLowFloat": 127,
+    "precisionVertexShaderHighInt": 0,
+    "rangeMinVertexShaderHighInt": 31,
+    "rangeMaxVertexShaderHighInt": 30,
+    "precisionVertexShaderMediumInt": 0,
+    "rangeMinVertexShaderMediumInt": 31,
+    "rangeMaxVertexShaderMediumInt": 30,
+    "precisionVertexShaderLowInt": 0,
+    "rangeMinVertexShaderLowInt": 31,
+    "rangeMaxVertexShaderLowInt": 30,
+    "precisionFragmentShaderHighInt": 0,
+    "rangeMinFragmentShaderHighInt": 31,
+    "rangeMaxFragmentShaderHighInt": 30,
+    "precisionFragmentShaderMediumInt": 0,
+    "rangeMinFragmentShaderMediumInt": 31,
+    "rangeMaxFragmentShaderMediumInt": 30,
+    "precisionFragmentShaderLowInt": 0,
+    "rangeMinFragmentShaderLowInt": 31,
+    "rangeMaxFragmentShaderLowInt": 30,
+    "shadingLanguage2": "WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.0 Chromium)",
+    "version2": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+    "maxVertexUniformComponents2": "4096",
+    "maxVertexUniformBlocks2": "16",
+    "maxVertexOutputComponents2": "120",
+    "maxVaryingComponents2": "120",
+    "maxTransformFeedbackInterleavedComponents2": "128",
+    "maxTransformFeedbackSeparateAttribs2": "4",
+    "maxTransformFeedbackSeparateComponents2": "4",
+    "maxFragmentUniformComponents2": "4096",
+    "maxFragmentUniformBlocks2": "16",
+    "maxFragmentInputComponents2": "120",
+    "minProgramTexelOffset2": "-8",
+    "maxProgramTexelOffset2": "7",
+    "maxDrawBuffers2": "8",
+    "maxColorAttachments2": "8",
+    "maxSamples2": "4",
+    "max3DTextureSize2": "2048",
+    "maxArrayTextureLayers2": "2048",
+    "maxClientWaitTimeoutWebgl2": "0",
+    "maxElementIndex2": "4294967294",
+    "maxServerWaitTimeout2": "0",
+    "stencilBackValueMask2": "4294967295",
+    "stencilBackWritemask2": "4294967295",
+    "stencilValueMask2": "4294967295",
+    "stencilWritemask2": "4294967295",
+    "maxTextureLodBias2": "15",
+    "maxUniformBufferBindings2": "32",
+    "maxUniformBlockSize2": "16384",
+    "uniformBufferOffsetAlignment2": "16",
+    "maxCombinedUniformBlocks2": "32",
+    "maxCombinedVertexUniformComponents2": "69632",
+    "maxCombinedFragmentUniformComponents2": "69632",
+    "maxElementsVertices2": "2147483647",
+    "maxElementsIndices2": "2147483647",
+    "aliasedLineWidthRange2": {
+      "0": 1,
+      "1": 1
+    },
+    "aliasedPointSizeRange2": {
+      "0": 1,
+      "1": 511
+    },
+    "alphaBits2": "8",
+    "blueBits2": "8",
+    "depthBits2": "24",
+    "greenBits2": "8",
+    "maxCombinedTextureImageUnits2": "32",
+    "maxCubeMapTextureSize2": "16384",
+    "maxFragmentUniformVectors2": "1024",
+    "maxRenderBufferSize2": "16384",
+    "maxTextureImageUnits2": "16",
+    "maxTextureSize2": "16384",
+    "maxVaryingVectors2": "30",
+    "maxVertexAttribs2": "16",
+    "maxVertexTextureImageUnits2": "16",
+    "maxVertexUniformVectors2": "1024",
+    "maxViewportDims2": {
+      "0": 16384,
+      "1": 16384
+    },
+    "redBits2": "8",
+    "stencilBits2": "8",
+    "subpixelBits2": "4",
+    "sampleBuffers2": "1",
+    "samples2": "4",
+    "webglContextAttributesDefaults2": {
+      "alpha": true,
+      "antialias": true,
+      "depth": true,
+      "desynchronized": false,
+      "failIfMajorPerformanceCaveat": false,
+      "powerPreference": "default",
+      "premultipliedAlpha": true,
+      "preserveDrawingBuffer": false,
+      "stencil": false,
+      "xrCompatible": false
+    },
+    "extensions2": "EXT_clip_control,EXT_color_buffer_float,EXT_color_buffer_half_float,EXT_conservative_depth,EXT_depth_clamp,EXT_disjoint_timer_query_webgl2,EXT_float_blend,EXT_polygon_offset_clamp,EXT_render_snorm,EXT_texture_compression_bptc,EXT_texture_compression_rgtc,EXT_texture_filter_anisotropic,EXT_texture_mirror_clamp_to_edge,EXT_texture_norm16,KHR_parallel_shader_compile,NV_shader_noperspective_interpolation,OES_draw_buffers_indexed,OES_sample_variables,OES_shader_multisample_interpolation,OES_texture_float_linear,WEBGL_blend_func_extended,WEBGL_clip_cull_distance,WEBGL_compressed_texture_astc,WEBGL_compressed_texture_etc,WEBGL_compressed_texture_etc1,WEBGL_compressed_texture_pvrtc,WEBGL_compressed_texture_s3tc,WEBGL_compressed_texture_s3tc_srgb,WEBGL_debug_renderer_info,WEBGL_debug_shaders,WEBGL_lose_context,WEBGL_multi_draw,WEBGL_polygon_mode,WEBGL_provoking_vertex,WEBGL_render_shared_exponent,WEBGL_stencil_texturing",
+    "precisionVertexShaderHighFloat2": 23,
+    "rangeMinVertexShaderHighFloat2": 127,
+    "rangeMaxVertexShaderHighFloat2": 127,
+    "precisionVertexShaderMediumFloat2": 23,
+    "rangeMinVertexShaderMediumFloat2": 127,
+    "rangeMaxVertexShaderMediumFloat2": 127,
+    "precisionVertexShaderLowFloat2": 23,
+    "rangeMinVertexShaderLowFloat2": 127,
+    "rangeMaxVertexShaderLowFloat2": 127,
+    "precisionFragmentShaderHighFloat2": 23,
+    "rangeMinFragmentShaderHighFloat2": 127,
+    "rangeMaxFragmentShaderHighFloat2": 127,
+    "precisionFragmentShaderMediumFloat2": 23,
+    "rangeMinFragmentShaderMediumFloat2": 127,
+    "rangeMaxFragmentShaderMediumFloat2": 127,
+    "precisionFragmentShaderLowFloat2": 23,
+    "rangeMinFragmentShaderLowFloat2": 127,
+    "rangeMaxFragmentShaderLowFloat2": 127,
+    "precisionVertexShaderHighInt2": 0,
+    "rangeMinVertexShaderHighInt2": 31,
+    "rangeMaxVertexShaderHighInt2": 30,
+    "precisionVertexShaderMediumInt2": 0,
+    "rangeMinVertexShaderMediumInt2": 31,
+    "rangeMaxVertexShaderMediumInt2": 30,
+    "precisionVertexShaderLowInt2": 0,
+    "rangeMinVertexShaderLowInt2": 31,
+    "rangeMaxVertexShaderLowInt2": 30,
+    "precisionFragmentShaderHighInt2": 0,
+    "rangeMinFragmentShaderHighInt2": 31,
+    "rangeMaxFragmentShaderHighInt2": 30,
+    "precisionFragmentShaderMediumInt2": 0,
+    "rangeMinFragmentShaderMediumInt2": 31,
+    "rangeMaxFragmentShaderMediumInt2": 30,
+    "precisionFragmentShaderLowInt2": 0,
+    "rangeMinFragmentShaderLowInt2": 31,
+    "rangeMaxFragmentShaderLowInt2": 30
+  },
+  "audio_properties": {
+    "BaseAudioContextSampleRate": 48000,
+    "AudioContextBaseLatency": 0.005333333333333333,
+    "AudioContextOutputLatency": 0,
+    "AudioDestinationNodeMaxChannelCount": 2,
+    "AnalyzerNodeFftSize": 2048,
+    "AnalyzerNodeFrequencyBinCount": 1024,
+    "AnalyzerNodeMinDecibels": -100,
+    "AnalyzerNodeMaxDecibels": -30,
+    "AnalyzerNodeSmoothingTimeConstant": 0.8,
+    "BiquadFilterNodeFrequencyDefaultValue": 350,
+    "BiquadFilterNodeFrequencyMaxValue": 24000,
+    "BiquadFilterNodeFrequencyMinValue": 0,
+    "BiquadFilterNodeDetuneDefaultValue": 0,
+    "BiquadFilterNodeDetuneMaxValue": 153600,
+    "BiquadFilterNodeDetuneMinValue": -153600,
+    "BiquadFilterNodeQDefaultValue": 1,
+    "BiquadFilterNodeQMaxValue": 3.4028234663852886e+38,
+    "BiquadFilterNodeQMinValue": -3.4028234663852886e+38,
+    "BiquadFilterNodeGainDefaultValue": 0,
+    "BiquadFilterNodeGainMaxValue": 1541.273681640625,
+    "BiquadFilterNodeGainMinValue": -3.4028234663852886e+38,
+    "BiquadFilterNodeType": "lowpass",
+    "AudioBufferSourceNodeDetuneDefaultValue": 0,
+    "AudioBufferSourceNodeDetuneMaxValue": 3.4028234663852886e+38,
+    "AudioBufferSourceNodeDetuneMinValue": -3.4028234663852886e+38,
+    "AudioBufferSourceNodePlaybackRateDefaultValue": 1,
+    "AudioBufferSourceNodePlaybackRateMaxValue": 3.4028234663852886e+38,
+    "AudioBufferSourceNodePlaybackRateMinValue": -3.4028234663852886e+38,
+    "ConstantSourceNodeOffsetDefaultValue": 1,
+    "ConstantSourceNodeOffsetMaxValue": 3.4028234663852886e+38,
+    "ConstantSourceNodeOffsetMinValue": -3.4028234663852886e+38,
+    "DelayNodeDelayTimeDefaultValue": 0,
+    "DelayNodeDelayTimeMaxValue": 1,
+    "DelayNodeDelayTimeMinValue": 0,
+    "DynamicsCompressorNodeThresholdDefaultValue": -24,
+    "DynamicsCompressorNodeThresholdMaxValue": 0,
+    "DynamicsCompressorNodeThresholdMinValue": -100,
+    "DynamicsCompressorNodeKneeDefaultValue": 30,
+    "DynamicsCompressorNodeKneeMaxValue": 40,
+    "DynamicsCompressorNodeKneeMinValue": 0,
+    "DynamicsCompressorNodeRatioDefaultValue": 12,
+    "DynamicsCompressorNodeRatioMaxValue": 20,
+    "DynamicsCompressorNodeRatioMinValue": 1,
+    "DynamicsCompressorNodeReduction": 0,
+    "DynamicsCompressorNodeAttackDefaultValue": 0.003000000026077032,
+    "DynamicsCompressorNodeAttackMaxValue": 1,
+    "DynamicsCompressorNodeAttackMinValue": 0,
+    "DynamicsCompressorNodeReleaseDefaultValue": 0.25,
+    "DynamicsCompressorNodeReleaseMaxValue": 1,
+    "DynamicsCompressorNodeReleaseMinValue": 0,
+    "GainNodeGainDefaultValue": 1,
+    "GainNodeGainMaxValue": 3.4028234663852886e+38,
+    "GainNodeGainMinValue": -3.4028234663852886e+38,
+    "OscillatorNodeFrequencyDefaultValue": 440,
+    "OscillatorNodeFrequencyMaxValue": 24000,
+    "OscillatorNodeFrequencyMinValue": -24000,
+    "OscillatorNodeDetuneDefaultValue": 0,
+    "OscillatorNodeDetuneMaxValue": 153600,
+    "OscillatorNodeDetuneMinValue": -153600,
+    "OscillatorNodeType": "sine",
+    "StereoPannerNodePanDefaultValue": 0,
+    "StereoPannerNodePanMaxValue": 1,
+    "StereoPannerNodePanMinValue": -1,
+    "AudioListenerPositionXDefaultValue": 0,
+    "AudioListenerPositionXMaxValue": 3.4028234663852886e+38,
+    "AudioListenerPositionXMinValue": -3.4028234663852886e+38,
+    "AudioListenerPositionYDefaultValue": 0,
+    "AudioListenerPositionYMaxValue": 3.4028234663852886e+38,
+    "AudioListenerPositionYMinValue": -3.4028234663852886e+38,
+    "AudioListenerPositionZDefaultValue": 0,
+    "AudioListenerPositionZMaxValue": 3.4028234663852886e+38,
+    "AudioListenerPositionZMinValue": -3.4028234663852886e+38,
+    "AudioListenerForwardXDefaultValue": 0,
+    "AudioListenerForwardXMaxValue": 3.4028234663852886e+38,
+    "AudioListenerForwardXMinValue": -3.4028234663852886e+38,
+    "AudioListenerForwardYDefaultValue": 0,
+    "AudioListenerForwardYMaxValue": 3.4028234663852886e+38,
+    "AudioListenerForwardYMinValue": -3.4028234663852886e+38,
+    "AudioListenerForwardZDefaultValue": -1,
+    "AudioListenerForwardZMaxValue": 3.4028234663852886e+38,
+    "AudioListenerForwardZMinValue": -3.4028234663852886e+38,
+    "AudioListenerUpXDefaultValue": 0,
+    "AudioListenerUpXMaxValue": 3.4028234663852886e+38,
+    "AudioListenerUpXMinValue": -3.4028234663852886e+38,
+    "AudioListenerUpYDefaultValue": 1,
+    "AudioListenerUpYMaxValue": 3.4028234663852886e+38,
+    "AudioListenerUpYMinValue": -3.4028234663852886e+38,
+    "AudioListenerUpZDefaultValue": 0,
+    "AudioListenerUpZMaxValue": 3.4028234663852886e+38,
+    "AudioListenerUpZMinValue": -3.4028234663852886e+38,
+    "PannerNodePositionXDefaultValue": 0,
+    "PannerNodePositionXMaxValue": 3.4028234663852886e+38,
+    "PannerNodePositionXMinValue": -3.4028234663852886e+38,
+    "PannerNodePositionYDefaultValue": 0,
+    "PannerNodePositionYMaxValue": 3.4028234663852886e+38,
+    "PannerNodePositionYMinValue": -3.4028234663852886e+38,
+    "PannerNodePositionZDefaultValue": 0,
+    "PannerNodePositionZMaxValue": 3.4028234663852886e+38,
+    "PannerNodePositionZMinValue": -3.4028234663852886e+38,
+    "PannerNodeOrientationXDefaultValue": 1,
+    "PannerNodeOrientationXMaxValue": 3.4028234663852886e+38,
+    "PannerNodeOrientationXMinValue": -3.4028234663852886e+38,
+    "PannerNodeOrientationYDefaultValue": 0,
+    "PannerNodeOrientationYMaxValue": 3.4028234663852886e+38,
+    "PannerNodeOrientationYMinValue": -3.4028234663852886e+38,
+    "PannerNodeOrientationZDefaultValue": 0,
+    "PannerNodeOrientationZMaxValue": 3.4028234663852886e+38,
+    "PannerNodeOrientationZMinValue": -3.4028234663852886e+38
+  },
+  "fonts": [
+    "Arial",
+    "Arial Black",
+    "Arial Hebrew",
+    "Arial Narrow",
+    "Arial Rounded MT Bold",
+    "Avenir",
+    "Avenir Next",
+    "Baskerville",
+    "Big Caslon",
+    "Bodoni 72",
+    "Book Antiqua",
+    "Bookman Old Style",
+    "Calibri",
+    "Cambria",
+    "Candara",
+    "Century Gothic",
+    "Chalkboard",
+    "Chalkduster",
+    "Cochin",
+    "Comic Sans MS",
+    "Consolas",
+    "Copperplate",
+    "Courier",
+    "Courier New",
+    "Didot",
+    "Futura",
+    "Garamond",
+    "Geneva",
+    "Georgia",
+    "Gill Sans",
+    "Helvetica",
+    "Helvetica Neue",
+    "Herculanum",
+    "Hoefler Text",
+    "Impact",
+    "Lucida Bright",
+    "Lucida Calligraphy",
+    "Lucida Console",
+    "Lucida Grande",
+    "Luminari",
+    "Marker Felt",
+    "Menlo",
+    "Monaco",
+    "Noteworthy",
+    "Optima",
+    "Palatino",
+    "Papyrus",
+    "Phosphate",
+    "PT Sans",
+    "Rockwell",
+    "San Francisco",
+    "Savoye LET",
+    "Segoe UI",
+    "Serif",
+    "SignPainter",
+    "Skia",
+    "Snell Roundhand",
+    "Symbol",
+    "Tahoma",
+    "Times",
+    "Times New Roman",
+    "Trebuchet MS",
+    "Verdana",
+    "Zapfino"
+  ],
+  "headers": [
+    "Host",
+    "Connection",
+    "Sec-Ch-Ua-Platform",
+    "Sec-Ch-Ua",
+    "Sec-Ch-Ua-Mobile",
+    "Content-Length",
+    "Cache-Control",
+    "X-Request-Id",
+    "Authorization",
+    "If-Range",
+    "X-Http-Method-Override",
+    "If-Match",
+    "Max-Forwards",
+    "X-Requested-With",
+    "Content-Type",
+    "Accept-Datetime",
+    "If-None-Match",
+    "X-Csrf-Token",
+    "If-Modified-Since",
+    "Range",
+    "If-Unmodified-Since",
+    "Origin",
+    "Referer",
+    "Save-Data",
+    "User-Agent",
+    "Accept",
+    "Sec-Fetch-Site",
+    "Sec-Fetch-Mode",
+    "Sec-Fetch-Dest",
+    "Accept-Encoding",
+    "Accept-Language"
+  ],
+  "lang": "en-US,en",
+  "native_code": "function Object() { [native code] }",
+  "css": {
+    "any-hover": "hover",
+    "any-pointer": "fine",
+    "color-gamut": "srgb",
+    "grid": "0",
+    "hover": "hover",
+    "orientation": "landscape",
+    "overflow-block": "scroll",
+    "pointer": "fine",
+    "prefers-color-scheme": "dark",
+    "prefers-contrast": "no-preference",
+    "prefers-reduced-motion": "no-preference",
+    "prefers-reduced-transparency": "no-preference",
+    "aspect-ratio": 1612,
+    "device-aspect-ratio": 1333,
+    "device-width": 800,
+    "device-height": 600,
+    "width": 756,
+    "height": 469,
+    "resolution": 96
+  },
+  "font_data2": {},
+  "media": {
+    "devices": [
+      {
+        "deviceId": "",
+        "groupId": "",
+        "kind": "audioinput",
+        "label": ""
+      },
+      {
+        "deviceId": "",
+        "groupId": "",
+        "kind": "videoinput",
+        "label": ""
+      },
+      {
+        "deviceId": "",
+        "groupId": "",
+        "kind": "audiooutput",
+        "label": ""
+      }
+    ],
+    "constraints": {
+      "aspectRatio": true,
+      "autoGainControl": true,
+      "brightness": true,
+      "channelCount": true,
+      "colorTemperature": true,
+      "contrast": true,
+      "deviceId": true,
+      "displaySurface": true,
+      "echoCancellation": true,
+      "exposureCompensation": true,
+      "exposureMode": true,
+      "exposureTime": true,
+      "facingMode": true,
+      "focusDistance": true,
+      "focusMode": true,
+      "frameRate": true,
+      "groupId": true,
+      "height": true,
+      "iso": true,
+      "latency": true,
+      "noiseSuppression": true,
+      "pan": true,
+      "pointsOfInterest": true,
+      "resizeMode": true,
+      "restrictOwnAudio": true,
+      "sampleRate": true,
+      "sampleSize": true,
+      "saturation": true,
+      "sharpness": true,
+      "suppressLocalAudioPlayback": true,
+      "tilt": true,
+      "torch": true,
+      "voiceIsolation": true,
+      "whiteBalanceMode": true,
+      "width": true,
+      "zoom": true
+    }
+  },
+  "speech": [],
+  "bluetooth": true,
+  "features": {
+    "SharedWorker": true,
+    "OrientationEvent": false,
+    "WebHID": true,
+    "Serial": true,
+    "NavigatorContentUtils": true,
+    "ContactsManager": false,
+    "ContactsManagerExtraProperties": false,
+    "WebNFC": false,
+    "BarcodeDetector": true,
+    "PictureInPictureAPI": true,
+    "EyeDropperAPI": true,
+    "GetDisplayMedia": true,
+    "FileSystemAccess": true,
+    "ContentIndex": false,
+    "CaptureHandle": true,
+    "DigitalGoodsV2_1": false,
+    "DigitalGoods": false,
+    "SerialPortForget": true,
+    "SerialPortConnected": false,
+    "AudioOutputDevices": true,
+    "OnDeviceChange": true,
+    "RegionCapture": true,
+    "DisplayCutoutAPI": false,
+    "FontAccess": true,
+    "FileSystemAccessLocal": true,
+    "FileSystemAccessOriginPrivate": true,
+    "CaptureController": true,
+    "ConditionalFocus": true,
+    "WebAppWindowControlsOverlay": true,
+    "DocumentPictureInPictureAPI": true,
+    "SmartCard": false,
+    "WebAppLaunchQueue": true,
+    "WebAppLaunchHandler": true,
+    "AttributionReporting": true,
+    "FencedFrames": true,
+    "FencedFramesAPIChanges": true,
+    "Fledge": true,
+    "PrivacySandboxAdsAPIs": true,
+    "SharedStorageAPI": true,
+    "TopicsAPI": true,
+    "TopicsDocumentAPI": true,
+    "TopicsXHR": true,
+    "CapturedSurfaceControl": false,
+    "ElementCapture": true,
+    "WebPrinting": false,
+    "PrivateNetworkAccessPermissionPrompt": true,
+    "ComputePressure": true,
+    "PermissionElement": false,
+    "SelectAudioOutput": false,
+    "FileSystemObserver": true,
+    "MediaStreamTrackWebSpeech": true,
+    "AIPromptAPI": true,
+    "AIPromptAPIForExtension": true,
+    "AIRewriterAPI": false,
+    "AIPromptAPIMultimodalInput": true,
+    "AISummarizationAPI": true,
+    "AIWriterAPI": false,
+    "ComputePressureOwnContributionEstimate": false,
+    "LanguageDetectionAPI": true,
+    "TranslationAPI": true,
+    "WebAppInstallation": false,
+    "AIProofreadingAPI": false,
+    "WebSpeechRecognitionContext": true,
+    "WindowControlsOverlay": true
+  },
+  "heap": "3760000000",
+  "heap_correction": -17337,
+  "storage": "10737418240",
+  "codecs": [
+    {
+      "supported": true,
+      "smooth": true,
+      "powerEfficient": true,
+      "contentType": "audio/ogg; codecs=vorbis"
+    },
+    {
+      "supported": true,
+      "smooth": true,
+      "powerEfficient": true,
+      "contentType": "audio/ogg; codecs=flac"
+    },
+    {
+      "supported": true,
+      "smooth": true,
+      "powerEfficient": true,
+      "contentType": "audio/mp4; codecs=\"mp4a.40.2\""
+    },
+    {
+      "supported": true,
+      "smooth": true,
+      "powerEfficient": true,
+      "contentType": "audio/mpeg; codecs=\"mp3\""
+    },
+    {
+      "supported": false,
+      "smooth": false,
+      "powerEfficient": false,
+      "contentType": "video/ogg; codecs=\"theora\""
+    },
+    {
+      "supported": true,
+      "smooth": true,
+      "powerEfficient": true,
+      "contentType": "video/mp4; codecs=\"avc1.42E01E\""
+    }
+  ],
+  "keyboard": [
+    "KeyK",
+    "k",
+    "KeyG",
+    "g",
+    "Digit2",
+    "2",
+    "Digit0",
+    "0",
+    "KeyV",
+    "v",
+    "KeyA",
+    "a",
+    "Backquote",
+    "`",
+    "KeyL",
+    "l",
+    "IntlBackslash",
+    "§",
+    "Quote",
+    "'",
+    "KeyW",
+    "w",
+    "Digit8",
+    "8",
+    "KeyM",
+    "m",
+    "KeyH",
+    "h",
+    "Period",
+    ".",
+    "Digit7",
+    "7",
+    "Digit1",
+    "1",
+    "KeyP",
+    "p",
+    "KeyD",
+    "d",
+    "KeyF",
+    "f",
+    "KeyO",
+    "o",
+    "KeyQ",
+    "q",
+    "KeyC",
+    "c",
+    "KeyN",
+    "n",
+    "BracketLeft",
+    "[",
+    "KeyZ",
+    "z",
+    "KeyY",
+    "y",
+    "Digit3",
+    "3",
+    "Digit6",
+    "6",
+    "Digit5",
+    "5",
+    "KeyX",
+    "x",
+    "Slash",
+    "/",
+    "Backslash",
+    "\\",
+    "Comma",
+    ",",
+    "Minus",
+    "-",
+    "Digit4",
+    "4",
+    "KeyB",
+    "b",
+    "KeyT",
+    "t",
+    "Digit9",
+    "9",
+    "KeyS",
+    "s",
+    "KeyI",
+    "i",
+    "KeyU",
+    "u",
+    "Equal",
+    "=",
+    "KeyJ",
+    "j",
+    "Semicolon",
+    ";",
+    "KeyR",
+    "r",
+    "BracketRight",
+    "]",
+    "KeyE",
+    "e"
+  ],
+  "webgpu": {
+    "isEnabled": true,
+    "highPerformance": {
+      "isFallbackAdapter": false,
+      "features": [
+        "depth32float-stencil8",
+        "rg11b10ufloat-renderable",
+        "bgra8unorm-storage",
+        "texture-formats-tier1",
+        "texture-compression-bc",
+        "dual-source-blending",
+        "core-features-and-limits",
+        "float32-filterable",
+        "indirect-first-instance",
+        "texture-compression-astc-sliced-3d",
+        "float32-blendable",
+        "subgroup-size-control",
+        "texture-compression-astc",
+        "texture-compression-etc2",
+        "depth-clip-control",
+        "texture-compression-bc-sliced-3d",
+        "clip-distances",
+        "shader-f16",
+        "texture-formats-tier2",
+        "timestamp-query",
+        "primitive-index",
+        "texture-component-swizzle",
+        "subgroups"
+      ],
+      "info": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "",
+        "description": "",
+        "subgroupMinSize": 32,
+        "subgroupMaxSize": 32,
+        "isFallbackAdapter": false
+      },
+      "limits": {
+        "maxTextureDimension1D": "16384",
+        "maxTextureDimension2D": "16384",
+        "maxTextureDimension3D": "2048",
+        "maxTextureArrayLayers": "2048",
+        "maxBindGroups": "4",
+        "maxBindGroupsPlusVertexBuffers": "24",
+        "maxBindingsPerBindGroup": "1000",
+        "maxDynamicUniformBuffersPerPipelineLayout": "10",
+        "maxDynamicStorageBuffersPerPipelineLayout": "8",
+        "maxSampledTexturesPerShaderStage": "48",
+        "maxSamplersPerShaderStage": "16",
+        "maxStorageBuffersPerShaderStage": "10",
+        "maxStorageTexturesPerShaderStage": "8",
+        "maxUniformBuffersPerShaderStage": "12",
+        "maxUniformBufferBindingSize": "65536",
+        "maxStorageBufferBindingSize": "4294967292",
+        "minUniformBufferOffsetAlignment": "256",
+        "minStorageBufferOffsetAlignment": "256",
+        "maxVertexBuffers": "8",
+        "maxBufferSize": "4294967292",
+        "maxVertexAttributes": "30",
+        "maxVertexBufferArrayStride": "2048",
+        "maxInterStageShaderVariables": "28",
+        "maxColorAttachments": "8",
+        "maxColorAttachmentBytesPerSample": "128",
+        "maxComputeWorkgroupStorageSize": "32768",
+        "maxComputeInvocationsPerWorkgroup": "1024",
+        "maxComputeWorkgroupSizeX": "1024",
+        "maxComputeWorkgroupSizeY": "1024",
+        "maxComputeWorkgroupSizeZ": "64",
+        "maxComputeWorkgroupsPerDimension": "65535",
+        "maxImmediateSize": "64",
+        "maxStorageBuffersInFragmentStage": "10",
+        "maxStorageTexturesInFragmentStage": "8",
+        "maxStorageBuffersInVertexStage": "10",
+        "maxStorageTexturesInVertexStage": "8"
+      },
+      "limits_gpudevice": {
+        "maxTextureDimension1D": "8192",
+        "maxTextureDimension2D": "8192",
+        "maxTextureDimension3D": "2048",
+        "maxTextureArrayLayers": "256",
+        "maxBindGroups": "4",
+        "maxBindGroupsPlusVertexBuffers": "24",
+        "maxBindingsPerBindGroup": "1000",
+        "maxDynamicUniformBuffersPerPipelineLayout": "8",
+        "maxDynamicStorageBuffersPerPipelineLayout": "4",
+        "maxSampledTexturesPerShaderStage": "16",
+        "maxSamplersPerShaderStage": "16",
+        "maxStorageBuffersPerShaderStage": "8",
+        "maxStorageTexturesPerShaderStage": "4",
+        "maxUniformBuffersPerShaderStage": "12",
+        "maxUniformBufferBindingSize": "65536",
+        "maxStorageBufferBindingSize": "134217728",
+        "minUniformBufferOffsetAlignment": "256",
+        "minStorageBufferOffsetAlignment": "256",
+        "maxVertexBuffers": "8",
+        "maxBufferSize": "268435456",
+        "maxVertexAttributes": "16",
+        "maxVertexBufferArrayStride": "2048",
+        "maxInterStageShaderVariables": "16",
+        "maxColorAttachments": "8",
+        "maxColorAttachmentBytesPerSample": "32",
+        "maxComputeWorkgroupStorageSize": "16384",
+        "maxComputeInvocationsPerWorkgroup": "256",
+        "maxComputeWorkgroupSizeX": "256",
+        "maxComputeWorkgroupSizeY": "256",
+        "maxComputeWorkgroupSizeZ": "64",
+        "maxComputeWorkgroupsPerDimension": "65535",
+        "maxImmediateSize": "64",
+        "maxStorageBuffersInFragmentStage": "8",
+        "maxStorageTexturesInFragmentStage": "4",
+        "maxStorageBuffersInVertexStage": "8",
+        "maxStorageTexturesInVertexStage": "4"
+      }
+    },
+    "lowPerformance": {
+      "isFallbackAdapter": false,
+      "features": [
+        "depth32float-stencil8",
+        "rg11b10ufloat-renderable",
+        "bgra8unorm-storage",
+        "texture-formats-tier1",
+        "texture-compression-bc",
+        "dual-source-blending",
+        "core-features-and-limits",
+        "float32-filterable",
+        "indirect-first-instance",
+        "texture-compression-astc-sliced-3d",
+        "float32-blendable",
+        "subgroup-size-control",
+        "texture-compression-astc",
+        "texture-compression-etc2",
+        "depth-clip-control",
+        "texture-compression-bc-sliced-3d",
+        "clip-distances",
+        "timestamp-query",
+        "shader-f16",
+        "texture-formats-tier2",
+        "primitive-index",
+        "texture-component-swizzle",
+        "subgroups"
+      ],
+      "info": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "",
+        "description": "",
+        "subgroupMinSize": 32,
+        "subgroupMaxSize": 32,
+        "isFallbackAdapter": false
+      },
+      "limits": {
+        "maxTextureDimension1D": "16384",
+        "maxTextureDimension2D": "16384",
+        "maxTextureDimension3D": "2048",
+        "maxTextureArrayLayers": "2048",
+        "maxBindGroups": "4",
+        "maxBindGroupsPlusVertexBuffers": "24",
+        "maxBindingsPerBindGroup": "1000",
+        "maxDynamicUniformBuffersPerPipelineLayout": "10",
+        "maxDynamicStorageBuffersPerPipelineLayout": "8",
+        "maxSampledTexturesPerShaderStage": "48",
+        "maxSamplersPerShaderStage": "16",
+        "maxStorageBuffersPerShaderStage": "10",
+        "maxStorageTexturesPerShaderStage": "8",
+        "maxUniformBuffersPerShaderStage": "12",
+        "maxUniformBufferBindingSize": "65536",
+        "maxStorageBufferBindingSize": "4294967292",
+        "minUniformBufferOffsetAlignment": "256",
+        "minStorageBufferOffsetAlignment": "256",
+        "maxVertexBuffers": "8",
+        "maxBufferSize": "4294967292",
+        "maxVertexAttributes": "30",
+        "maxVertexBufferArrayStride": "2048",
+        "maxInterStageShaderVariables": "28",
+        "maxColorAttachments": "8",
+        "maxColorAttachmentBytesPerSample": "128",
+        "maxComputeWorkgroupStorageSize": "32768",
+        "maxComputeInvocationsPerWorkgroup": "1024",
+        "maxComputeWorkgroupSizeX": "1024",
+        "maxComputeWorkgroupSizeY": "1024",
+        "maxComputeWorkgroupSizeZ": "64",
+        "maxComputeWorkgroupsPerDimension": "65535",
+        "maxImmediateSize": "64",
+        "maxStorageBuffersInFragmentStage": "10",
+        "maxStorageTexturesInFragmentStage": "8",
+        "maxStorageBuffersInVertexStage": "10",
+        "maxStorageTexturesInVertexStage": "8"
+      },
+      "limits_gpudevice": {
+        "maxTextureDimension1D": "8192",
+        "maxTextureDimension2D": "8192",
+        "maxTextureDimension3D": "2048",
+        "maxTextureArrayLayers": "256",
+        "maxBindGroups": "4",
+        "maxBindGroupsPlusVertexBuffers": "24",
+        "maxBindingsPerBindGroup": "1000",
+        "maxDynamicUniformBuffersPerPipelineLayout": "8",
+        "maxDynamicStorageBuffersPerPipelineLayout": "4",
+        "maxSampledTexturesPerShaderStage": "16",
+        "maxSamplersPerShaderStage": "16",
+        "maxStorageBuffersPerShaderStage": "8",
+        "maxStorageTexturesPerShaderStage": "4",
+        "maxUniformBuffersPerShaderStage": "12",
+        "maxUniformBufferBindingSize": "65536",
+        "maxStorageBufferBindingSize": "134217728",
+        "minUniformBufferOffsetAlignment": "256",
+        "minStorageBufferOffsetAlignment": "256",
+        "maxVertexBuffers": "8",
+        "maxBufferSize": "268435456",
+        "maxVertexAttributes": "16",
+        "maxVertexBufferArrayStride": "2048",
+        "maxInterStageShaderVariables": "16",
+        "maxColorAttachments": "8",
+        "maxColorAttachmentBytesPerSample": "32",
+        "maxComputeWorkgroupStorageSize": "16384",
+        "maxComputeInvocationsPerWorkgroup": "256",
+        "maxComputeWorkgroupSizeX": "256",
+        "maxComputeWorkgroupSizeY": "256",
+        "maxComputeWorkgroupSizeZ": "64",
+        "maxComputeWorkgroupsPerDimension": "65535",
+        "maxImmediateSize": "64",
+        "maxStorageBuffersInFragmentStage": "8",
+        "maxStorageTexturesInFragmentStage": "4",
+        "maxStorageBuffersInVertexStage": "8",
+        "maxStorageTexturesInVertexStage": "4"
+      }
+    },
+    "fallback": null,
+    "preferredCanvasFormat": "bgra8unorm"
+  },
+  "useragentdata": "eyJicmFuZHMiOlt7ImJyYW5kIjoiQ2hyb21pdW0iLCJ2ZXJzaW9uIjoiMTUyIn0seyJicmFuZCI6Ik5vdD9BX0JyYW5kIiwidmVyc2lvbiI6IjI0In0seyJicmFuZCI6Ikdvb2dsZSBDaHJvbWUiLCJ2ZXJzaW9uIjoiMTUyIn1dLCJtb2JpbGUiOmZhbHNlLCJmdWxsVmVyc2lvbiI6IjE1Mi4wLjc5NzcuNzYiLCJmdWxsVmVyc2lvbkxpc3QiOlt7ImJyYW5kIjoiQ2hyb21pdW0iLCJ2ZXJzaW9uIjoiMTUyLjAuNzk3Ny43NiJ9LHsiYnJhbmQiOiJOb3Q/QV9CcmFuZCIsInZlcnNpb24iOiIyNC4wLjAuMCJ9LHsiYnJhbmQiOiJHb29nbGUgQ2hyb21lIiwidmVyc2lvbiI6IjE1Mi4wLjc5NzcuNzYifV0sInBsYXRmb3JtIjoibWFjT1MiLCJwbGF0Zm9ybVZlcnNpb24iOiIyNi42LjIiLCJhcmNoaXRlY3R1cmUiOiJhcm0iLCJtb2RlbCI6IiIsImJpdG5lc3MiOiI2NCIsIndvdzY0IjpmYWxzZX0=",
+  "webrtc_codecs": {
+    "receiver": {
+      "video": {
+        "codecs": [
+          {
+            "clockRate": 90000,
+            "mimeType": "video/VP8"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/rtx"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/VP9",
+            "sdpFmtpLine": "profile-id=0"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/VP9",
+            "sdpFmtpLine": "profile-id=2"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/VP9",
+            "sdpFmtpLine": "profile-id=1"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/VP9",
+            "sdpFmtpLine": "profile-id=3"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=4d001f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=f4001f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=f4001f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/AV1",
+            "sdpFmtpLine": "level-idx=5;profile=0;tier=0"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/AV1",
+            "sdpFmtpLine": "level-idx=5;profile=1;tier=0"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64001f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=64001f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H265",
+            "sdpFmtpLine": "level-id=180;profile-id=1;tier-flag=0;tx-mode=SRST"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H265",
+            "sdpFmtpLine": "level-id=180;profile-id=2;tier-flag=0;tx-mode=SRST"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/red"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/ulpfec"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/flexfec-03",
+            "sdpFmtpLine": "repair-window=10000000"
+          }
+        ],
+        "extensions": [
+          {
+            "direction": "sendrecv",
+            "uri": "urn:ietf:params:rtp-hdrext:toffset"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "urn:3gpp:video-orientation"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.webrtc.org/experiments/rtp-hdrext/video-content-type"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.webrtc.org/experiments/rtp-hdrext/video-timing"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.webrtc.org/experiments/rtp-hdrext/color-space"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "urn:ietf:params:rtp-hdrext:sdes:mid"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id"
+          }
+        ]
+      },
+      "audio": {
+        "codecs": [
+          {
+            "clockRate": 48000,
+            "mimeType": "audio/opus",
+            "channels": 2,
+            "sdpFmtpLine": "minptime=10;useinbandfec=1"
+          },
+          {
+            "clockRate": 48000,
+            "mimeType": "audio/red",
+            "channels": 2
+          },
+          {
+            "clockRate": 8000,
+            "mimeType": "audio/G722",
+            "channels": 1
+          },
+          {
+            "clockRate": 8000,
+            "mimeType": "audio/PCMU",
+            "channels": 1
+          },
+          {
+            "clockRate": 8000,
+            "mimeType": "audio/PCMA",
+            "channels": 1
+          },
+          {
+            "clockRate": 8000,
+            "mimeType": "audio/CN",
+            "channels": 1
+          },
+          {
+            "clockRate": 48000,
+            "mimeType": "audio/telephone-event",
+            "channels": 1
+          },
+          {
+            "clockRate": 8000,
+            "mimeType": "audio/telephone-event",
+            "channels": 1
+          }
+        ],
+        "extensions": [
+          {
+            "direction": "sendrecv",
+            "uri": "urn:ietf:params:rtp-hdrext:ssrc-audio-level"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "urn:ietf:params:rtp-hdrext:sdes:mid"
+          }
+        ]
+      }
+    },
+    "sender": {
+      "video": {
+        "codecs": [
+          {
+            "clockRate": 90000,
+            "mimeType": "video/VP8"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/rtx"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=4d001f"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/AV1",
+            "sdpFmtpLine": "level-idx=5;profile=0;tier=0"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/VP9",
+            "sdpFmtpLine": "profile-id=0"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/VP9",
+            "sdpFmtpLine": "profile-id=2"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H264",
+            "sdpFmtpLine": "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640034"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/H265",
+            "sdpFmtpLine": "level-id=186;profile-id=1;tier-flag=0;tx-mode=SRST"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/red"
+          },
+          {
+            "clockRate": 90000,
+            "mimeType": "video/ulpfec"
+          }
+        ],
+        "extensions": [
+          {
+            "direction": "sendrecv",
+            "uri": "urn:ietf:params:rtp-hdrext:toffset"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "urn:3gpp:video-orientation"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.webrtc.org/experiments/rtp-hdrext/video-content-type"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.webrtc.org/experiments/rtp-hdrext/video-timing"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.webrtc.org/experiments/rtp-hdrext/color-space"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "urn:ietf:params:rtp-hdrext:sdes:mid"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id"
+          }
+        ]
+      },
+      "audio": {
+        "codecs": [
+          {
+            "clockRate": 48000,
+            "mimeType": "audio/opus",
+            "channels": 2,
+            "sdpFmtpLine": "minptime=10;useinbandfec=1"
+          },
+          {
+            "clockRate": 48000,
+            "mimeType": "audio/red",
+            "channels": 2
+          },
+          {
+            "clockRate": 8000,
+            "mimeType": "audio/G722",
+            "channels": 1
+          },
+          {
+            "clockRate": 8000,
+            "mimeType": "audio/PCMU",
+            "channels": 1
+          },
+          {
+            "clockRate": 8000,
+            "mimeType": "audio/PCMA",
+            "channels": 1
+          },
+          {
+            "clockRate": 8000,
+            "mimeType": "audio/CN",
+            "channels": 1
+          },
+          {
+            "clockRate": 48000,
+            "mimeType": "audio/telephone-event",
+            "channels": 1
+          },
+          {
+            "clockRate": 8000,
+            "mimeType": "audio/telephone-event",
+            "channels": 1
+          }
+        ],
+        "extensions": [
+          {
+            "direction": "sendrecv",
+            "uri": "urn:ietf:params:rtp-hdrext:ssrc-audio-level"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+          },
+          {
+            "direction": "sendrecv",
+            "uri": "urn:ietf:params:rtp-hdrext:sdes:mid"
+          }
+        ]
+      }
+    }
+  },
+  "systemcolors": {
+    "ActiveBorder": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "ActiveCaption": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "ActiveText": [
+      255,
+      0,
+      0,
+      255
+    ],
+    "AppWorkspace": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "Background": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "ButtonBorder": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "ButtonFace": [
+      239,
+      239,
+      239,
+      255
+    ],
+    "ButtonHighlight": [
+      239,
+      239,
+      239,
+      255
+    ],
+    "ButtonShadow": [
+      239,
+      239,
+      239,
+      255
+    ],
+    "ButtonText": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "Canvas": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "CanvasText": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "CaptionText": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "Field": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "FieldText": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "GrayText": [
+      128,
+      128,
+      128,
+      255
+    ],
+    "Highlight": [
+      128,
+      188,
+      254,
+      153
+    ],
+    "HighlightText": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "InactiveBorder": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "InactiveCaption": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "InactiveCaptionText": [
+      128,
+      128,
+      128,
+      255
+    ],
+    "InfoBackground": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "InfoText": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "LinkText": [
+      0,
+      0,
+      238,
+      255
+    ],
+    "Mark": [
+      255,
+      255,
+      0,
+      255
+    ],
+    "MarkText": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "Menu": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "MenuText": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "Scrollbar": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "ThreeDDarkShadow": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "ThreeDFace": [
+      239,
+      239,
+      239,
+      255
+    ],
+    "ThreeDHighlight": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "ThreeDLightShadow": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "ThreeDShadow": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "VisitedText": [
+      85,
+      26,
+      139,
+      255
+    ],
+    "Window": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "WindowFrame": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "WindowText": [
+      0,
+      0,
+      0,
+      255
+    ]
+  },
+  "systemfonts": {
+    "caption": {
+      "fontSize": "16px",
+      "fontFamily": "Arial",
+      "fontStyle": "normal",
+      "fontWeight": "400"
+    },
+    "icon": {
+      "fontSize": "16px",
+      "fontFamily": "Arial",
+      "fontStyle": "normal",
+      "fontWeight": "400"
+    },
+    "menu": {
+      "fontSize": "16px",
+      "fontFamily": "Arial",
+      "fontStyle": "normal",
+      "fontWeight": "400"
+    },
+    "message-box": {
+      "fontSize": "16px",
+      "fontFamily": "Arial",
+      "fontStyle": "normal",
+      "fontWeight": "400"
+    },
+    "small-caption": {
+      "fontSize": "16px",
+      "fontFamily": "Arial",
+      "fontStyle": "normal",
+      "fontWeight": "400"
+    },
+    "status-bar": {
+      "fontSize": "16px",
+      "fontFamily": "Arial",
+      "fontStyle": "normal",
+      "fontWeight": "400"
+    }
+  },
+  "customfeatures": {},
+  "hls": true,
+  "visitor_id": "acf0a7c786a5e7a1c533220359e049e0857d388a",
+  "date": 1788738074633,
+  "ChromeApp": "Enable",
+  "ChromeRuntime": "Disable",
+  "connection": {
+    "type": "wifi",
+    "downlinkMax": 100,
+    "effectiveType": "4g",
+    "rtt": 100,
+    "downlink": 1.5,
+    "saveData": false
+  },
+  "attr": {
+    "navigator.vendorSub": "",
+    "navigator.productSub": "20030107",
+    "navigator.vendor": "Google Inc.",
+    "navigator.appCodeName": "Mozilla",
+    "navigator.appName": "Netscape",
+    "navigator.appVersion": "5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/152.0.0.0 Safari/537.36",
+    "navigator.platform": "MacIntel",
+    "navigator.product": "Gecko",
+    "navigator.pdfViewerEnabled": 1,
+    "navigator.userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/152.0.0.0 Safari/537.36",
+    "screen.availHeight": 600,
+    "screen.availWidth": 800,
+    "screen.width": 800,
+    "screen.height": 600,
+    "screen.colorDepth": 24,
+    "screen.pixelDepth": 24,
+    "screen.availLeft": 0,
+    "screen.availTop": 0,
+    "outerHeight": 556,
+    "outerWidth": 756,
+    "hardwareConcurrency": 14,
+    "maxTouchPoints": 0,
+    "deviceMemory": 32,
+    "window.devicePixelRatio": 1
+  },
+  "orientation": {
+    "angle": 0,
+    "type": "landscape-primary"
+  },
+  "doNotTrack": null,
+  "touch_radius_nom": 0,
+  "touch_radius_denom": 192
+}

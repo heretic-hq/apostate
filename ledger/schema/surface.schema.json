@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/apostate/apostate/ledger/schema/surface.schema.json",
+  "title": "Surface ledger row",
+  "description": "One observable a detector can read. Rows are proposed into ledger/inbox/ and merged by the arbiter.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "observable", "category", "verdict", "evidence", "status"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$",
+      "description": "Stable slug, e.g. 'navigator.hardware-concurrency'. Never reused."
+    },
+    "observable": {
+      "type": "string",
+      "description": "Exactly how a detector reads this: a JS expression, HTTP header, or wire property."
+    },
+    "category": { "type": "string", "description": "Shard key. Carried over from resources/surfaces.json." },
+    "subsystem": {
+      "type": "string",
+      "enum": [
+        "automation-guard", "navigator-identity", "screen-geometry", "gpu-graphics",
+        "audio-media", "fonts-text", "v8-icu-intl", "webrtc-devices",
+        "storage-permissions", "speech-sensors", "network-proxy", "profile-loader"
+      ],
+      "description": "Patch-ownership unit. One owner per subsystem prevents patch collisions."
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["spoof", "inherit", "suppress", "out-of-scope", "escalate"],
+      "description": "spoof: value comes from the profile. inherit: host value is already correct. suppress: surface must not exist for this device. out-of-scope: requires a cited reason. escalate: unresolved, needs the arbiter."
+    },
+    "verdict_reason": { "type": "string", "description": "Required for out-of-scope and inherit." },
+    "profile_field": {
+      "type": ["string", "null"],
+      "description": "Corpus/profile field supplying the value. Required when verdict is 'spoof'. Each such field becomes one property of config/profile.schema.json."
+    },
+    "corpus_coverage": {
+      "type": "string",
+      "enum": ["present", "derivable", "absent"],
+      "description": "present: a corpus field holds it directly. derivable: computable from other corpus fields. absent: no ground truth — the row cannot reach V3."
+    },
+    "process": {
+      "type": "string",
+      "enum": ["renderer", "browser", "gpu", "network", "utility", "multiple"],
+      "description": "Which process actually produces the value. Determines the plumbing path."
+    },
+    "emitters": {
+      "type": "array",
+      "description": "Emitter index ids this surface joins to.",
+      "items": { "type": "string" }
+    },
+    "coherence_edges": {
+      "type": "array",
+      "description": "Coherence graph edge ids this row participates in.",
+      "items": { "type": "string" }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tier", "source"],
+        "properties": {
+          "tier": {
+            "type": "string",
+            "enum": ["T0", "T1", "T2", "T3"],
+            "description": "T0 measured, T1 primary, T2 secondary, T3 inference. See docs/METHODOLOGY.md §3."
+          },
+          "source": { "type": "string", "description": "Corpus row id, Chromium path:line, spec section, or URL." },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "verification_tier": {
+      "type": "string",
+      "enum": ["V0", "V1", "V2", "V3", "V4"],
+      "description": "The gate this row must pass to be considered done."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["proposed", "open", "resolved", "dropped"],
+      "description": "May only become 'resolved' on T0 or T1 evidence. T2 and T3 can open a row, never close one."
+    },
+    "patch_id": { "type": ["string", "null"], "description": "Entry in patches/series implementing this row." },
+    "notes": { "type": "string" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "verdict": { "const": "spoof" } }, "required": ["verdict"] },
+      "then": { "required": ["profile_field", "corpus_coverage"] }
+    },
+    {
+      "if": { "properties": { "verdict": { "enum": ["out-of-scope", "inherit"] } }, "required": ["verdict"] },
+      "then": { "required": ["verdict_reason"] }
+    },
+    {
+      "if": { "properties": { "status": { "const": "resolved" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "evidence": { "contains": { "properties": { "tier": { "enum": ["T0", "T1"] } }, "required": ["tier"] } }
+        }
+      }
+    }
+  ]
+}

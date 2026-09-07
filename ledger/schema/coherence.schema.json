@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/apostate/apostate/ledger/schema/coherence.schema.json",
+  "title": "Coherence graph edge",
+  "description": "A constraint between surfaces that must hold simultaneously. Most real detections are a broken edge rather than a wrong value, so edges are first-class rows with their own owner.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "members", "constraint", "evidence"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^coh\\.[a-z0-9]+(?:[.-][a-z0-9]+)*$" },
+    "members": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "type": "string" },
+      "description": "Surface ledger ids bound by this constraint."
+    },
+    "constraint": {
+      "type": "string",
+      "description": "The relation in plain language, e.g. 'navigator.platform, UA OS token and Client Hints platform must name the same OS'."
+    },
+    "check": {
+      "type": ["string", "null"],
+      "description": "Executable predicate over a collected fingerprint, used by the V3 conformance runner."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["fatal", "strong", "weak"],
+      "description": "fatal: a violation is decisive on its own. strong: decisive when corroborated. weak: never sufficient alone. Mirrors the ruling algebra so weak signals cannot accumulate into false certainty."
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tier", "source"],
+        "properties": {
+          "tier": { "type": "string", "enum": ["T0", "T1", "T2", "T3"] },
+          "source": { "type": "string" },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "status": { "type": "string", "enum": ["proposed", "open", "resolved", "dropped"] },
+    "notes": { "type": "string" }
+  }
+}

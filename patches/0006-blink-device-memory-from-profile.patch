@@ -1,0 +1,79 @@
+Subject: [PATCH] blink: derive deviceMemory from the device profile
+
+navigator.deviceMemory is not the profile's memory figure — it is that figure
+rounded to the nearer power of two and clamped to [2, 32] GiB on desktop, so the
+only values a real Chrome can report are 2, 4, 8, 16 and 32.
+
+That makes the bucketing observable, and it decides where the patch goes.
+Writing a chosen value straight into approximated_device_memory_gb_ would let an
+out-of-bucket number ship — a value no Chrome produces, and a worse tell than
+the host's real one. Supplying the *input* and letting Chromium's own arithmetic
+round it cannot fail that way.
+
+The same reasoning puts the patch in Initialize() rather than in the Blink
+accessor. ApproximatedDeviceMemory is a per-process static: the browser computes
+it for the Device-Memory request header and the renderer computes it
+independently for navigator.deviceMemory. Patching the input keeps those two in
+agreement in whichever process runs; a renderer-only override would make the
+header a server receives contradict the value JavaScript reports, which is
+trivially checked server-side and invisible from inside the renderer.
+
+Falls through to the host's real memory when no profile carries the field, per
+the loader's contract: an absent field stays inherited rather than defaulted.
+
+Ledger: navigator.device-memory, http.device-memory-header,
+coh.device-memory-header-vs-js.
+
+diff --git a/third_party/blink/common/device_memory/approximated_device_memory.cc b/third_party/blink/common/device_memory/approximated_device_memory.cc
+index 7fd53eb..284ab1d 100644
+--- a/third_party/blink/common/device_memory/approximated_device_memory.cc
++++ b/third_party/blink/common/device_memory/approximated_device_memory.cc
+@@ -4,12 +4,15 @@
+ 
+ #include "third_party/blink/public/common/device_memory/approximated_device_memory.h"
+ 
++#include "base/apostate/profile.h"
+ #include "base/byte_size.h"
+ #include "base/check_op.h"
+ #include "base/feature_list.h"
+ #include "base/system/sys_info.h"
+ #include "third_party/blink/public/common/features.h"
+ 
++#include <optional>
++
+ namespace blink {
+ 
+ // static
+@@ -21,7 +24,31 @@ void ApproximatedDeviceMemory::Initialize() {
+   if (approximated_device_memory_gb_ > 0.0)
+     return;
+   DCHECK_EQ(0, physical_memory_mb_);
+-  physical_memory_mb_ = ::base::SysInfo::AmountOfTotalPhysicalMemory().InMiB();
++
++  // Apostate: feed the profile's real installed memory into the existing
++  // computation rather than overriding the value it produces.
++  //
++  // The bucketing below is observable: legal desktop results are exactly
++  // {2, 4, 8, 16, 32} GiB, because the figure is rounded to the nearer power of
++  // two and clamped. Writing a chosen value straight into
++  // approximated_device_memory_gb_ would let an out-of-bucket number ship,
++  // which no real Chrome can produce. Supplying the input and letting Chromium
++  // round it cannot.
++  //
++  // This runs in whichever process asks. That matters: the browser computes
++  // this for the Device-Memory request header and the renderer computes it
++  // independently for navigator.deviceMemory, so patching the input here keeps
++  // the two in agreement, whereas a renderer-only override would make the
++  // header contradict JavaScript.
++  const ::base::apostate::Profile* profile = ::base::apostate::Profile::Get();
++  std::optional<uint64_t> claimed =
++      profile ? profile->memory_total_bytes() : std::nullopt;
++  if (claimed.has_value()) {
++    physical_memory_mb_ = static_cast<int64_t>(*claimed / 1024 / 1024);
++  } else {
++    physical_memory_mb_ = ::base::SysInfo::AmountOfTotalPhysicalMemory().InMiB();
++  }
++
+   CalculateAndSetApproximatedDeviceMemory();
+ }
+ 

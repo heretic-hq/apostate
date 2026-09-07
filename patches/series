@@ -3,3 +3,4 @@
 0003-content-no-automation-controlled-from-switches.patch
 0004-base-device-profile-loader.patch
 0005-chrome-propagate-profile-to-children.patch
+0006-blink-device-memory-from-profile.patch

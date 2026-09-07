@@ -1,0 +1,12 @@
+import("//apostate/common.gni")
+
+target_os = "linux"
+target_cpu = "x64"
+
+# Hermetic sysroot: the container's own libraries must never participate, or the
+# build stops being reproducible across hosts.
+use_sysroot = true
+
+# Chromium's bundled toolchain only. Never the system compiler.
+is_clang = true
+use_lld = true

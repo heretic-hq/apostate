@@ -1,0 +1,10 @@
+import("//apostate/common.gni")
+
+target_os = "mac"
+target_cpu = "arm64"
+
+# macOS cannot be containerised, so the SDK is the reproducibility boundary and
+# scripts/bootstrap.sh asserts it rather than building against whatever is
+# installed.
+mac_sdk_min = "15.0"
+use_lld = true

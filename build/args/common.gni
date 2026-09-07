@@ -1,0 +1,30 @@
+# GN args shared by every Apostate target.
+#
+# These are the settings that make a build reproducible and make the binary
+# resemble a real Chrome rather than a developer build. Target-specific files
+# import this and add only what differs.
+
+# Real Chrome is an official build. Beyond size and speed, an unofficial build
+# differs observably — different optimisation, different symbol handling — which
+# makes it wrong under axiom A2 before we patch anything.
+is_official_build = true
+is_debug = false
+
+# Official builds select chrome_pgo_phase = 2 automatically, and the profile is
+# pinned through DEPS. Do not disable PGO to shorten builds: the resulting
+# timing profile is itself a fingerprint surface.
+
+# Reproducibility. The checkout path must not be able to change the output.
+strip_absolute_paths_from_debug_symbols = true
+symbol_level = 0
+blink_symbol_level = 0
+
+# Keep the shipped feature set aligned with stock Chrome. Anything switched off
+# here is a capability a real Chrome has and ours would not.
+enable_nacl = false
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+
+# No developer-only surfaces in a shipped binary.
+dcheck_always_on = false
+enable_dsyms = false

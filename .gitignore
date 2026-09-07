@@ -27,6 +27,5 @@ venv/
 # Third-party fingerprint corpora are never redistributed from this repository.
 /resources/fingerprints/raw/vendor/
 
-# Our own captures. Held back until we decide which device profiles ship
-# publicly — a published profile is one many people will present as their own.
-/resources/fingerprints/raw/*.json
+# Our own captures ARE the ground truth and are committed. Only vendor material
+# is excluded (above).

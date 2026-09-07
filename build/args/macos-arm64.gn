@@ -1,5 +1,3 @@
-import("//apostate/common.gni")
-
 target_os = "mac"
 target_cpu = "arm64"
 

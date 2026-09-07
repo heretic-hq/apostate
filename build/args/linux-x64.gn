@@ -1,5 +1,3 @@
-import("//apostate/common.gni")
-
 target_os = "linux"
 target_cpu = "x64"
 

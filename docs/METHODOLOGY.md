@@ -72,20 +72,42 @@ against a real device.
 Stated honestly, because building on an assumed corpus is the expensive
 mistake.
 
-| Class | Real captures | Tier | Notes |
-|-------|---------------|------|-------|
-| Android mobile | **2,995** | T0 | Chrome 132–146, 87 GPU families. Complete value coverage. |
-| macOS desktop | 0 | — | Capturable: real hardware on hand |
-| Windows desktop | 0 | — | Requires real hardware; VM captures carry their own tells |
-| iOS | 0 | — | |
+Ground truth here means **captures we took ourselves**, with the pipeline in
+`capture/`, on devices whose owner consented. That is the only class of
+evidence admitted at T0.
+
+| Class | Own captures | Notes |
+|-------|--------------|-------|
+| macOS desktop | 0 | Hardware on hand; blocked on the capture pipeline |
+| Windows desktop | 0 | Hardware pending |
+| Android mobile | 0 | |
+| iOS | 0 | |
 
 The three files in `resources/fingerprints/` are **schema templates, not
 captures** — see `resources/fingerprints/PROVENANCE.md`. They must never be
 cited as T0.
 
-Where a class has no ground truth, that is recorded as a gap and the
-corresponding ledger rows stay open. A profile is never shipped for a device
-class we cannot verify against.
+So the corpus is empty, and building it is the project's first task rather than
+an assumed input. Two sources, in order:
+
+1. **Devices we control.** Captured directly, full provenance, highest
+   confidence.
+2. **Consented community contributions.** A public capture page where a person
+   chooses to submit their own device profile. This scales with adoption, it is
+   the honest way to build breadth, and it is the same tool as (1) so the data
+   is directly comparable.
+
+### On third-party corpora
+
+Fingerprint datasets belonging to commercial vendors are **not redistributed by
+this project and are not admitted as T0**, regardless of how they were
+obtained. This is partly a licensing question and partly a quality one: such
+sets typically store digests rather than renders, so they can verify a value but
+never reconstruct one, and reconstruction is exactly what replay requires.
+
+Where such a set is consulted privately it may inform *priors* — which GPU
+renderer strings occur in the wild, how a field is distributed — and those
+priors are recorded as T2. They never close a ledger row and they never ship.
 
 ## 5. The registries
 

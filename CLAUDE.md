@@ -29,6 +29,9 @@ unmodified one, because incoherence is itself the signal.
   answer them. Tiers are defined in `docs/METHODOLOGY.md` §3.
 - **Never treat `resources/fingerprints/*.json` as ground truth.** They are
   templates. See the `PROVENANCE.md` beside them.
+- **Never commit or ship a third-party fingerprint corpus**, and never cite one
+  as T0. Vendor datasets may inform priors at T2 and stay out of the tree. T0
+  means a capture we took ourselves, with consent, using `capture/`.
 - **Never introduce a new observable.** A patch that fixes one surface while
   adding a command-line switch the page can see, a novel mojo interface, an
   unusual process name, or a timing change is a net loss. Cross-process
@@ -46,7 +49,8 @@ unmodified one, because incoherence is itself the signal.
 build/        Pinned versions and GN args. The build contract — see docs/BUILD.md
 patches/      The fork. One patch per concern, ordered by patches/series
 config/       profile.schema.json — DERIVED from the ledger, not hand-written
-corpus/       Oracle builder. Turns the raw capture set into a queryable DB
+capture/      The capture pipeline. Also the V3 conformance harness
+corpus/       Oracle builder. Turns our captures into a queryable DB
 ledger/       Surface ledger, emitter index, coherence graph, and their schemas
 resources/    surfaces.json (input map) and fingerprint templates
 scripts/      Every operational step. Nothing is done by hand

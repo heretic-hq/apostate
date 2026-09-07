@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/apostate/apostate/capture/schema/capture.schema.json",
+  "title": "Native capture",
+  "description": "Lossless record of what a real device emitted. Raw measurements are stored; digests are derived off-device. Every probe carries its own success state so a failure can never be mistaken for a measurement.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["capture_version", "context", "probes"],
+  "properties": {
+    "capture_version": { "type": "integer", "const": 1 },
+
+    "context": {
+      "type": "object",
+      "description": "Provenance. A capture without this is not evidence.",
+      "additionalProperties": false,
+      "required": ["taken_at", "ua", "collector_sha256"],
+      "properties": {
+        "taken_at": { "type": "string", "format": "date-time" },
+        "label": { "type": "string", "description": "Human name for the device, e.g. 'apple-m4-max'" },
+        "ua": { "type": "string" },
+        "collector_sha256": { "type": "string", "description": "Hash of collector.js that produced this. Captures from different collector versions are not comparable." },
+        "device_pixel_ratio": { "type": "number" },
+        "headed": { "type": ["boolean", "null"], "description": "Whether a real window was on screen. Null when undeterminable." },
+        "automation_suspected": {
+          "type": "boolean",
+          "description": "True if any automation-shaped signal was present (navigator.webdriver, CDP artifacts, headless UA token). A capture with this set is not T0."
+        },
+        "automation_signals": { "type": "array", "items": { "type": "string" } },
+        "notes": { "type": "string" }
+      }
+    },
+
+    "probes": {
+      "type": "object",
+      "description": "One entry per measured surface, keyed by probe id.",
+      "additionalProperties": { "$ref": "#/$defs/probe" }
+    },
+
+    "repeat": {
+      "type": "object",
+      "description": "Second reading of every deterministic probe, taken in the same session. Divergence here means the field is not stable on real hardware and cannot be treated as a fixed value.",
+      "additionalProperties": { "$ref": "#/$defs/probe" }
+    }
+  },
+
+  "$defs": {
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok"],
+      "properties": {
+        "ok": { "type": "boolean", "description": "False means the probe failed. `value` is then null and `error` explains. Never substitute a plausible value." },
+        "value": { "description": "The raw measurement. Any JSON type. Null when ok is false." },
+        "error": { "type": ["string", "null"], "description": "Exception message or reason the probe could not run." },
+        "encoding": {
+          "type": "string",
+          "enum": ["json", "base64", "float32-array", "uint8-array"],
+          "description": "How `value` is stored. Binary payloads are base64 so nothing is lost to JSON number coercion."
+        },
+        "duration_ms": { "type": "number" }
+      }
+    }
+  }
+}

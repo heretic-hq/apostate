@@ -1,0 +1,134 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Apostate — device capture</title>
+<style>
+  :root { color-scheme: light dark; --fg:#111; --bg:#fafafa; --mut:#666; --ok:#0a7; --bad:#c33; --line:#ddd; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#e8e8e8; --bg:#141414; --mut:#999; --line:#333; } }
+  body { margin:0; padding:24px; font:15px/1.55 system-ui,-apple-system,sans-serif; color:var(--fg); background:var(--bg); }
+  main { max-width:640px; margin:0 auto; }
+  h1 { font-size:19px; margin:0 0 4px; }
+  p.sub { color:var(--mut); margin:0 0 24px; }
+  label { display:block; font-weight:600; margin:16px 0 6px; }
+  input { width:100%; box-sizing:border-box; padding:10px; font:inherit; border:1px solid var(--line); border-radius:7px; background:transparent; color:inherit; }
+  button { margin-top:18px; width:100%; padding:13px; font:600 15px system-ui; border:0; border-radius:7px; background:var(--fg); color:var(--bg); cursor:pointer; }
+  button[disabled] { opacity:.5; cursor:default; }
+  #bar { height:5px; background:var(--line); border-radius:3px; overflow:hidden; margin-top:18px; display:none; }
+  #bar i { display:block; height:100%; width:0; background:var(--ok); transition:width .15s; }
+  #log { margin-top:14px; font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--mut); max-height:240px; overflow:auto; }
+  .fail { color:var(--bad); }
+  .ok { color:var(--ok); }
+  .warn { border:1px solid var(--bad); border-radius:7px; padding:12px; margin-top:18px; color:var(--bad); font-size:13px; display:none; }
+</style>
+
+<main>
+  <h1>Device capture</h1>
+  <p class="sub">Records what this device's browser emits. Nothing is uploaded until you press the button, and the data goes only to the machine serving this page.</p>
+
+  <div class="warn" id="autowarn"></div>
+
+  <label for="label">Device name</label>
+  <input id="label" placeholder="e.g. apple-m4-max, thinkpad-t14-win11" autocomplete="off">
+
+  <button id="go">Run capture</button>
+
+  <div id="bar"><i></i></div>
+  <div id="log"></div>
+</main>
+
+<script src="collector.js"></script>
+<script>
+(async function () {
+  var log = document.getElementById("log");
+  var bar = document.getElementById("bar");
+  var fill = bar.querySelector("i");
+  var go = document.getElementById("go");
+  var labelEl = document.getElementById("label");
+
+  function line(msg, cls) {
+    var d = document.createElement("div");
+    if (cls) d.className = cls;
+    d.textContent = msg;
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  // Hash the collector source into every capture. Two captures from different
+  // collector versions measured different things and are not comparable.
+  try {
+    var src = await (await fetch("collector.js")).text();
+    var buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(src));
+    window.__APOSTATE_COLLECTOR_SHA256 = Array.from(new Uint8Array(buf))
+      .map(function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+  } catch (e) {
+    window.__APOSTATE_COLLECTOR_SHA256 = "unknown";
+  }
+
+  if (navigator.webdriver || /Headless/i.test(navigator.userAgent)) {
+    var w = document.getElementById("autowarn");
+    w.style.display = "block";
+    w.textContent = "This browser reports as automated or headless. A capture taken here is not ground truth — open this page in a normal browser window instead.";
+  }
+
+  // ?auto=1&label=name runs without interaction. Used by the V3 conformance
+  // runner, which launches Apostate at this page and diffs the result against a
+  // reference capture. Not the path for taking ground truth: a capture worth
+  // trusting is one a person took in a window they can see.
+  var params = new URLSearchParams(location.search);
+  if (params.get("label")) labelEl.value = params.get("label");
+
+  go.onclick = async function () {
+    go.disabled = true;
+    bar.style.display = "block";
+    log.textContent = "";
+
+    var result;
+    try {
+      result = await ApostateCollector.collect(labelEl.value.trim() || null, function (done, total, id) {
+        fill.style.width = (done / total * 100) + "%";
+      });
+    } catch (e) {
+      line("collector failed: " + (e.message || e), "fail");
+      go.disabled = false;
+      return;
+    }
+
+    var failed = Object.keys(result.probes).filter(function (k) { return !result.probes[k].ok; });
+    var okCount = Object.keys(result.probes).length - failed.length;
+    line(okCount + " probes measured", "ok");
+    failed.forEach(function (k) { line("FAILED  " + k + ": " + result.probes[k].error, "fail"); });
+
+    // Report which deterministic fields disagreed between the two reads. On real
+    // hardware these should be identical; anything listed here is a field whose
+    // natural variance we need to know before treating a difference as a defect.
+    var drift = Object.keys(result.repeat).filter(function (k) {
+      var a = result.probes[k], b = result.repeat[k];
+      return a.ok && b.ok && JSON.stringify(a.value) !== JSON.stringify(b.value);
+    });
+    if (drift.length) {
+      line("unstable across repeat read: " + drift.join(", "), "fail");
+    } else {
+      line("all deterministic probes stable across repeat read", "ok");
+    }
+
+    try {
+      var res = await fetch("/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(result)
+      });
+      var body = await res.json();
+      if (!res.ok) throw new Error(body.error || res.status);
+      line("saved: " + body.path, "ok");
+    } catch (e) {
+      line("upload failed: " + (e.message || e), "fail");
+      line("capture kept in window.__lastCapture", "");
+      window.__lastCapture = result;
+    }
+    go.disabled = false;
+    document.documentElement.dataset.captureDone = "1";
+  };
+
+  if (params.get("auto") === "1") go.onclick();
+})();
+</script>

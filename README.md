@@ -24,10 +24,15 @@ browser reproduces what that device actually emitted. There is no per-call
 randomness anywhere in the binary. Variation happens by choosing a different
 device, which is what variation means on the open internet.
 
-That approach only works with real captures behind it. The corpus is 2,995
-measured Android devices spanning Chrome 132–146 and 155 distinct GPU
-renderers. Desktop coverage does not exist yet, and is tracked as a gap rather
-than filled with invented values.
+That approach only works with real captures behind it, so the capture pipeline
+comes before the patches. Every profile Apostate ships is measured from a real
+device with its owner's consent, using the tool in `capture/` — which is also
+the harness that verifies the browser against it. Coverage we do not have is
+tracked as a gap rather than filled with invented values.
+
+We do not redistribute fingerprint datasets belonging to anyone else. Breadth
+comes from devices we control and from people who choose to contribute their
+own profile.
 
 ## Design rules
 

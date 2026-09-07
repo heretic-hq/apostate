@@ -11,3 +11,4 @@
 0011-base-icu-timezone-from-profile.patch
 0012-ui-color-scheme-and-highlight-from-profile.patch
 0013-accept-languages-from-profile.patch
+0014-headless-accept-languages.patch

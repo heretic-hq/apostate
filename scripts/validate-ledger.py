@@ -121,6 +121,70 @@ def validate(value, schema, root, path, errors):
     return errors
 
 
+def cross_references(root: pathlib.Path):
+    """Check that ids referenced between ledger files actually exist.
+
+    A schema validates each row alone, so it cannot see a dangling reference.
+    Independent workers producing rows in parallel is exactly the situation that
+    generates them, which is why this runs as part of the gate rather than as a
+    later cleanup.
+    """
+    def load(rel):
+        f = root / rel
+        if not f.exists():
+            return []
+        return [json.loads(l) for l in f.read_text().splitlines() if l.strip()]
+
+    surfaces = load("ledger/surfaces.jsonl")
+    emitters = load("ledger/emitters.jsonl")
+    coherence = load("ledger/coherence.jsonl")
+
+    sids = {r["id"] for r in surfaces}
+    eids = {r["id"] for r in emitters}
+    errors = []
+
+    for s in surfaces:
+        for e in s.get("emitters", []):
+            if e not in eids:
+                errors.append(f"surface {s['id']}: unknown emitter '{e}'")
+        for c in s.get("coherence_edges", []):
+            if c not in {r["id"] for r in coherence}:
+                errors.append(f"surface {s['id']}: unknown coherence edge '{c}'")
+
+    for e in emitters:
+        for s in e.get("surfaces", []):
+            if s not in sids:
+                errors.append(f"emitter {e['id']}: unknown surface '{s}'")
+        for u in e.get("upstream_of", []):
+            if u not in eids:
+                errors.append(f"emitter {e['id']}: unknown upstream emitter '{u}'")
+
+    # Coherence members may name surfaces not yet mapped — that is a backlog
+    # signal rather than an error, so it is reported without failing the gate.
+    pending = set()
+    for c in coherence:
+        for m in c.get("members", []):
+            if m not in sids:
+                pending.add(m)
+
+    # A spoof verdict must name at least one emitter, or nothing can implement it.
+    for s in surfaces:
+        if s.get("verdict") == "spoof" and not s.get("emitters"):
+            errors.append(f"surface {s['id']}: verdict 'spoof' with no emitter identified")
+
+    # Every spoofed surface needs a source of truth among its emitters, not only
+    # a waypoint — patching a forwarder leaves the real value in place elsewhere.
+    by_id = {e["id"]: e for e in emitters}
+    for s in surfaces:
+        if s.get("verdict") != "spoof":
+            continue
+        linked = [by_id[e] for e in s.get("emitters", []) if e in by_id]
+        if linked and not any(e.get("is_source_of_truth") for e in linked):
+            errors.append(f"surface {s['id']}: no emitter marked is_source_of_truth")
+
+    return errors, sorted(pending)
+
+
 def main() -> int:
     failures = 0
     checked = 0
@@ -146,6 +210,16 @@ def main() -> int:
                 print(f"  FAIL {rel}:{lineno}: {err}")
             failures += len(errors)
         print(f"  ok   {rel}")
+
+    errors, pending = cross_references(ROOT)
+    for err in errors:
+        print(f"  FAIL {err}")
+    failures += len(errors)
+
+    if pending:
+        print(f"\n  {len(pending)} coherence member(s) not yet mapped (backlog, not a failure):")
+        for m in pending:
+            print(f"    - {m}")
 
     print(f"\n{checked} row(s) checked, {failures} failure(s)")
     return 1 if failures else 0

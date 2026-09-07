@@ -210,6 +210,47 @@ goes through the same factory.
 tolerate association churn across migrations, and what the added handshake
 latency costs on transition. Neither blocks the design.
 
+## The same gap leaks the real IP through WebRTC
+
+This is not a fingerprinting mismatch. It is a deanonymisation, and it is live
+in stock Chromium today.
+
+`services/network/p2p/socket.cc:145-161` — **verified** — dispatches on socket
+type. Every TCP variant is constructed with the
+`ProxyResolvingClientSocketFactory`; `P2PSocketUdp` is not, and
+`services/network/p2p/socket_udp.cc` contains **zero** occurrences of the word
+proxy. So:
+
+- TCP STUN and TCP/TLS TURN are proxied correctly, SOCKS5 included, with
+  hostnames passed for proxy-side resolution and therefore no DNS leak.
+- **UDP STUN and TURN go direct.** Not a fallback to TCP, not a failure — the
+  capability does not exist. With `--proxy-server=socks5://…` configured, a page
+  that offers any public STUN server receives a server-reflexive candidate
+  carrying the machine's real public address.
+
+mDNS does not help: candidate obfuscation applies only to local addresses, so it
+never touches a reflexive one. And candidate *metadata* survives sanitisation
+regardless — `priority`, `foundation`, `network-id` and `network-cost` are
+written into the SDP verbatim, so a page that learns no address still learns
+interface count, interface rank, link type and whether a VPN is present.
+
+Separately, `P2PSocketManager::GetDefaultLocalAddress` learns the default route
+by opening a datagram socket from the **plain** socket factory and connecting it
+to a hardcoded `8.8.8.8:53`. That happens per session whether or not any page
+uses WebRTC, and it does not honour the proxy either.
+
+### Why it belongs to this subsystem
+
+Same root cause as the missing HTTP/3, same fix. The SOCKS5 UDP ASSOCIATE
+transport designed above is substituted at `socket_udp.cc` rather than at the
+QUIC session pool, and both leaks close together. Recorded as
+`coh.webrtc-udp-proxy-bypass`, severity fatal.
+
+The interim posture is `disable_non_proxied_udp`, which is leak-free because it
+removes UDP entirely — but a candidate set with no UDP at all is itself a
+class-level tell, so it trades a deanonymisation for a fingerprint. That is the
+right trade to make until the transport exists, and the wrong one to keep.
+
 ## Target behaviour
 
 ```text

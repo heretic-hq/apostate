@@ -113,12 +113,19 @@ is contradicted by real allocation behaviour.
 
 Weaker than the asymmetry above suggests, and the reason matters for the product.
 
-`base::SysInfo::NumberOfProcessors` uses `sysconf` for the count of max
-available logical processors and has **no cgroup or CFS-quota handling** —
-**verified**, there is none anywhere in `base/system/`. So stock Chrome in a
-container limited to two CPUs on a thirty-two core host reports thirty-two while
-achieving two-core parallelism. That contradiction exists in unmodified Chrome,
-on real users' machines, with nothing spoofed.
+`base::SysInfo::NumberOfProcessors` starts from `sysconf(_SC_NPROCESSORS_CONF)`
+and, on Linux only, narrows the result by the process's CPU **affinity mask**
+via `sched_getaffinity`. There is no CFS-quota handling anywhere in
+`base/system/`.
+
+That distinction matters and an earlier version of this document missed it. A
+container started with `--cpuset-cpus` restricts the affinity mask, so Chrome
+reports the restricted count correctly. A container started with `--cpus`, which
+is the common form, sets a CFS *quota* and leaves the mask untouched — so Chrome
+reports every host core while achieving a fraction of that parallelism. The
+contradiction is real but narrower than first claimed: it needs quota-limited
+containers, loaded machines, or thermal throttling rather than any container at
+all.
 
 The same holds for a VM with CPU limits, a loaded machine, a thermally throttled
 laptop, or a browser with busy background tabs. A detector ringing on "reported

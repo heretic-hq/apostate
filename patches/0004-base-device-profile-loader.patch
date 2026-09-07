@@ -1,0 +1,440 @@
+Subject: [PATCH] base: device profile loader, and wire hardwareConcurrency to it
+
+The spine every spoofed surface depends on. This is the first increment: the
+profile itself, plus one value carried through it end to end to prove the path.
+
+Availability is the design constraint, not secrecy. A value read before the
+profile is parsed is the host's real value, and a process that never receives
+the profile reports the host's real value — both are page-observable and neither
+is visible in the surface the profile was meant to fix. content_main_runner
+initialises field trials before mojo, so a mojo-delivered profile cannot serve a
+read that happens before mojo exists. The command line is the only channel
+present at process start, and switches are not readable by web content, so
+carrying it there discloses nothing to a page.
+
+It lives in base/ because base/ is the first consumer — SysInfo — and base
+cannot depend on content or chrome. That also makes it reachable from every
+process type without a layering violation.
+
+Every getter returns nullopt when the profile is absent or does not carry the
+field, and callers fall through to the real value. A profile that does not
+describe a surface must leave it inherited: an invented default is wrong in a
+way no consumer can detect, which is worse than the host's true value.
+
+hardwareConcurrency is patched at base::SysInfo::NumberOfProcessors rather than
+at NavigatorConcurrentHardware, because thread pools size from this function.
+Overriding only the Blink accessor would report the profile's core count while
+the process kept running with the host's, and a worker scaling curve would
+contradict the claim. Patching the source makes the claim true instead of merely
+reported. The real count is split into NumberOfProcessorsImpl so the clamp can
+ask for it without re-entering the override.
+
+The claim is clamped to the host rather than refused. Claiming fewer cores than
+the host has is achievable; claiming more is contradicted by measurement
+whatever the function returns, and refusing to launch would trade a weak,
+rarely probed signal for a hard usability failure.
+
+Memory is parsed but not yet consumed: navigator.deviceMemory needs the value
+rounded the way Blink rounds it, which is the next increment.
+
+Known limits of this increment, recorded rather than glossed: the profile is
+carried inline on the command line, which is fine for scalars and will not hold
+the font lists and WebGL tables a full profile needs — that wants the shared
+memory handle the field trial machinery already uses. And the switch is not yet
+propagated to child processes, so this reaches the browser process only.
+
+diff --git a/base/BUILD.gn b/base/BUILD.gn
+index ddcc03b..87e4cdc 100644
+--- a/base/BUILD.gn
++++ b/base/BUILD.gn
+@@ -1666,6 +1666,8 @@ component("base") {
+     "process/process_metrics.h",
+     "scoped_native_library.cc",
+     "scoped_native_library.h",
++    "apostate/profile.cc",
++    "apostate/profile.h",
+     "system/sys_info.cc",
+     "system/sys_info.h",
+     "system/sys_info_internal.h",
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+new file mode 100644
+index 0000000..72a5da4
+--- /dev/null
++++ b/base/apostate/profile.cc
+@@ -0,0 +1,113 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#include "base/apostate/profile.h"
++
++#include <memory>
++#include <utility>
++
++#include "base/base64.h"
++#include "base/base_switches.h"
++#include "base/command_line.h"
++#include "base/json/json_reader.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/values.h"
++
++namespace base::apostate {
++
++namespace {
++
++// Owned for process lifetime. Written once during InitializeFromCommandLine and
++// read without locking thereafter, which is only sound because initialisation
++// happens before any consumer runs.
++const Profile* g_profile = nullptr;
++const Profile* g_profile_for_testing = nullptr;
++
++}  // namespace
++
++Profile::Profile() = default;
++Profile::~Profile() = default;
++
++// static
++const Profile* Profile::Get() {
++  if (g_profile_for_testing) {
++    return g_profile_for_testing;
++  }
++  return g_profile;
++}
++
++// static
++void Profile::SetForTesting(const Profile* profile) {
++  g_profile_for_testing = profile;
++}
++
++// static
++Profile* Profile::ParseOrNull(const std::string& encoded) {
++  std::string json;
++  if (!Base64Decode(encoded, &json)) {
++    LOG(ERROR) << "apostate: profile switch is not valid base64; ignoring";
++    return nullptr;
++  }
++
++  // Strict RFC parsing: a profile is machine-generated, so comments and
++  // trailing commas would only mask a generator bug.
++  std::optional<DictValue> dict = JSONReader::ReadDict(json, JSON_PARSE_RFC);
++  if (!dict) {
++    LOG(ERROR) << "apostate: profile is not a JSON object; ignoring";
++    return nullptr;
++  }
++
++  auto profile = std::make_unique<Profile>();
++
++  if (const std::string* id = dict->FindString("id")) {
++    profile->source_id_ = *id;
++  }
++
++  // Absent fields stay absent. A profile that does not describe a surface must
++  // leave it inherited rather than have a default invented here, because an
++  // invented value is wrong in a way no consumer can detect.
++  if (const DictValue* cpu = dict->FindDict("cpu")) {
++    if (std::optional<int> cores = cpu->FindInt("logical_cores")) {
++      if (*cores > 0) {
++        profile->cpu_logical_cores_ = *cores;
++      } else {
++        LOG(ERROR) << "apostate: cpu.logical_cores must be positive; ignoring";
++      }
++    }
++  }
++
++  if (const DictValue* memory = dict->FindDict("memory")) {
++    // JSON numbers are doubles, and installed memory exceeds 2^53 in no
++    // realistic case, but a double still cannot represent an arbitrary uint64.
++    // Reading it as a double and converting is honest about the precision the
++    // wire format actually has.
++    if (std::optional<double> total = memory->FindDouble("total_bytes")) {
++      if (*total > 0) {
++        profile->memory_total_bytes_ = static_cast<uint64_t>(*total);
++      } else {
++        LOG(ERROR) << "apostate: memory.total_bytes must be positive; ignoring";
++      }
++    }
++  }
++
++  return profile.release();
++}
++
++// static
++void Profile::InitializeFromCommandLine() {
++  if (g_profile) {
++    return;
++  }
++
++  const CommandLine* command_line = CommandLine::ForCurrentProcess();
++  if (!command_line->HasSwitch(switches::kApostateProfile)) {
++    return;
++  }
++
++  g_profile = ParseOrNull(
++      command_line->GetSwitchValueASCII(switches::kApostateProfile));
++}
++
++}  // namespace base::apostate
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+new file mode 100644
+index 0000000..3d896d8
+--- /dev/null
++++ b/base/apostate/profile.h
+@@ -0,0 +1,87 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_APOSTATE_PROFILE_H_
++#define BASE_APOSTATE_PROFILE_H_
++
++#include <cstdint>
++#include <optional>
++#include <string>
++
++#include "base/base_export.h"
++
++namespace base::apostate {
++
++// The device profile this process is presenting.
++//
++// Lives in base/ because the values it carries are consumed by base/ itself —
++// SysInfo is the first consumer — and base cannot depend on content or chrome.
++// That also makes it reachable from every process type without a layering
++// violation.
++//
++// Availability is the whole design constraint. A value read before the profile
++// is parsed is the host's real value, and a process that never receives the
++// profile reports the host's real value; both are observable from a page and
++// neither is visible in the surface the profile was meant to fix. So the
++// profile arrives on the command line, which is the only channel present before
++// anything else runs. Mojo is initialised after field trials and is therefore
++// too late — see docs/subsystems/profile-loader.md.
++//
++// Every getter returns nullopt when no profile is configured or when the
++// profile does not carry that field. Callers must fall through to the real
++// value rather than substituting a default: a made-up value is worse than the
++// host's, because it is wrong in a way nothing can predict.
++class BASE_EXPORT Profile {
++ public:
++  // Parses the profile from the current process's command line. Idempotent, and
++  // safe to call before most of base is initialised. Must be called before any
++  // consumer reads a value; consumers that run earlier will see no profile.
++  static void InitializeFromCommandLine();
++
++  // Null when this process has no profile. Never owns; valid for process
++  // lifetime.
++  static const Profile* Get();
++
++  // Overrides the profile for tests. Passing nullptr clears it.
++  static void SetForTesting(const Profile* profile);
++
++  Profile();
++  ~Profile();
++
++  Profile(const Profile&) = delete;
++  Profile& operator=(const Profile&) = delete;
++
++  // Number of logical processors the profile claims.
++  //
++  // A claim above the host's real count is permitted but weakly detectable: a
++  // worker scaling curve plateaus at the host's real capacity whatever this
++  // says. Claims at or below it are free. The loader clamps rather than
++  // refusing, because a browser that will not launch is a worse trade than a
++  // rarely probed weak signal.
++  std::optional<int> cpu_logical_cores() const { return cpu_logical_cores_; }
++
++  // Total physical memory in bytes.
++  //
++  // Note this is the *real* installed figure, not the value navigator.deviceMemory
++  // reports. Blink rounds to a power of two and clamps to [2, 32] GiB on
++  // desktop, so storing the bucketed value directly would let an out-of-bucket
++  // number ship. Reproducing Chromium's own rounding from a real figure cannot.
++  std::optional<uint64_t> memory_total_bytes() const {
++    return memory_total_bytes_;
++  }
++
++  // Identifier of the capture this profile was derived from, for diagnostics.
++  const std::string& source_id() const { return source_id_; }
++
++ private:
++  static Profile* ParseOrNull(const std::string& encoded);
++
++  std::optional<int> cpu_logical_cores_;
++  std::optional<uint64_t> memory_total_bytes_;
++  std::string source_id_;
++};
++
++}  // namespace base::apostate
++
++#endif  // BASE_APOSTATE_PROFILE_H_
+diff --git a/base/base_switches.h b/base/base_switches.h
+index 27c457c..eb95c45 100644
+--- a/base/base_switches.h
++++ b/base/base_switches.h
+@@ -11,6 +11,14 @@
+ 
+ namespace switches {
+ 
++// Apostate: the device profile this process presents, as base64-encoded JSON.
++//
++// Carried on the command line because it must be readable before anything else
++// runs: mojo is initialised after field trials, and a value read before the
++// profile arrives is the host's real value. Command-line switches are not
++// readable by web content, so carrying it here discloses nothing to a page.
++inline constexpr char kApostateProfile[] = "apostate-profile";
++
+ // Delays execution of TaskPriority::BEST_EFFORT tasks until shutdown.
+ inline constexpr char kDisableBestEffortTasks[] = "disable-best-effort-tasks";
+ 
+diff --git a/base/system/sys_info.h b/base/system/sys_info.h
+index 5190e2a..3e8eddb 100644
+--- a/base/system/sys_info.h
++++ b/base/system/sys_info.h
+@@ -66,6 +66,12 @@ class BASE_EXPORT SysInfo {
+   // a cached value must be returned.
+   static int NumberOfProcessors();
+ 
++  // Apostate: the host's real logical processor count, ignoring any profile.
++  // NumberOfProcessors() consults the device profile and clamps its claim to
++  // this, so the clamp needs a way to ask for the real figure without
++  // re-entering the override.
++  static int NumberOfProcessorsImpl();
++
+   // Returns the number of the most efficient logical processors for the current
+   // application. This is typically e-cores on Intel hybrid architecture, or
+   // LITTLE cores on ARM bit.LITTLE architecture.
+diff --git a/base/system/sys_info_posix.cc b/base/system/sys_info_posix.cc
+index 5460a7f..a77c353 100644
+--- a/base/system/sys_info_posix.cc
++++ b/base/system/sys_info_posix.cc
+@@ -31,6 +31,8 @@
+ #include "base/strings/string_util.h"
+ #include "base/strings/stringprintf.h"
+ #include "base/strings/utf_string_conversions.h"
++#include "base/apostate/profile.h"
++#include "base/logging.h"
+ #include "base/system/sys_info_internal.h"
+ #include "base/threading/scoped_blocking_call.h"
+ #include "build/build_config.h"
+@@ -113,6 +115,33 @@ namespace base {
+ #if !BUILDFLAG(IS_OPENBSD)
+ // static
+ int SysInfo::NumberOfProcessors() {
++  // Apostate: patched here rather than at NavigatorConcurrentHardware, because
++  // thread pools size from this function. Overriding only the Blink accessor
++  // would report the profile's core count while the process kept running with
++  // the host's, so a worker scaling curve would contradict the claim. Patching
++  // the source makes the claim true instead of merely reported.
++  //
++  // The claim is clamped to the host's real capacity rather than refused.
++  // Claiming fewer cores than the host has is achievable; claiming more is
++  // contradicted by measurement whatever this returns, and refusing to launch
++  // would trade a weak, rarely probed signal for a hard usability failure.
++  if (const apostate::Profile* profile = apostate::Profile::Get()) {
++    if (std::optional<int> claimed = profile->cpu_logical_cores()) {
++      static int clamped = [claimed] {
++        const int real = NumberOfProcessorsImpl();
++        if (*claimed > real) {
++          LOG(WARNING) << "apostate: profile claims " << *claimed
++                       << " logical cores but the host has " << real
++                       << "; clamping, since measured parallelism cannot "
++                          "exceed the host";
++          return real;
++        }
++        return *claimed;
++      }();
++      return clamped;
++    }
++  }
++
+ #if BUILDFLAG(IS_MAC)
+   std::optional<int> number_of_physical_cores =
+       internal::NumberOfProcessorsWhenCpuSecurityMitigationEnabled();
+@@ -125,46 +154,51 @@ int SysInfo::NumberOfProcessors() {
+   // doesn't work on some platforms. The Mac-specific code above is not
+   // included because changing the value at runtime is the best way to unittest
+   // its behavior.
+-  static int cached_num_cpus = [] {
+-    // sysconf returns the number of "logical" (not "physical") processors on
+-    // both Mac and Linux.  So we get the number of max available "logical"
+-    // processors.
+-    //
+-    // Note that the number of "currently online" processors may be fewer than
+-    // the returned value of NumberOfProcessors(). On some platforms, the kernel
+-    // may make some processors offline intermittently, to save power when
+-    // system loading is low.
+-    //
+-    // One common use case that needs to know the processor count is to create
+-    // optimal number of threads for optimization. It should make plan according
+-    // to the number of "max available" processors instead of "currently online"
+-    // ones. The kernel should be smart enough to make all processors online
+-    // when it has sufficient number of threads waiting to run.
+-    long res = sysconf(_SC_NPROCESSORS_CONF);
+-    if (res == -1) {
+-      // `res` can be -1 if this function is invoked under the sandbox, which
+-      // should never happen.
+-      NOTREACHED();
+-    }
++  static int cached_num_cpus = [] { return NumberOfProcessorsImpl(); }();
++  return cached_num_cpus;
++}
++
++// Apostate: the host's real logical processor count, split out of
++// NumberOfProcessors so the profile clamp above can consult it without
++// re-entering the override.
++// static
++int SysInfo::NumberOfProcessorsImpl() {
++  // sysconf returns the number of "logical" (not "physical") processors on
++  // both Mac and Linux.  So we get the number of max available "logical"
++  // processors.
++  //
++  // Note that the number of "currently online" processors may be fewer than
++  // the returned value of NumberOfProcessors(). On some platforms, the kernel
++  // may make some processors offline intermittently, to save power when
++  // system loading is low.
++  //
++  // One common use case that needs to know the processor count is to create
++  // optimal number of threads for optimization. It should make plan according
++  // to the number of "max available" processors instead of "currently online"
++  // ones. The kernel should be smart enough to make all processors online
++  // when it has sufficient number of threads waiting to run.
++  long res = sysconf(_SC_NPROCESSORS_CONF);
++  if (res == -1) {
++    // `res` can be -1 if this function is invoked under the sandbox, which
++    // should never happen.
++    NOTREACHED();
++  }
+ 
+-    int num_cpus = static_cast<int>(res);
++  int num_cpus = static_cast<int>(res);
+ 
+ #if BUILDFLAG(IS_LINUX)
+-    // Restrict the CPU count based on the process's CPU affinity mask, if
+-    // available.
+-    cpu_set_t* cpu_set = CPU_ALLOC(num_cpus);
+-    size_t cpu_set_size = CPU_ALLOC_SIZE(num_cpus);
+-    int ret = sched_getaffinity(0, cpu_set_size, cpu_set);
+-    if (ret == 0) {
+-      num_cpus = CPU_COUNT_S(cpu_set_size, cpu_set);
+-    }
+-    CPU_FREE(cpu_set);
++  // Restrict the CPU count based on the process's CPU affinity mask, if
++  // available.
++  cpu_set_t* cpu_set = CPU_ALLOC(num_cpus);
++  size_t cpu_set_size = CPU_ALLOC_SIZE(num_cpus);
++  int ret = sched_getaffinity(0, cpu_set_size, cpu_set);
++  if (ret == 0) {
++    num_cpus = CPU_COUNT_S(cpu_set_size, cpu_set);
++  }
++  CPU_FREE(cpu_set);
+ #endif  // BUILDFLAG(IS_LINUX)
+ 
+-    return num_cpus;
+-  }();
+-
+-  return cached_num_cpus;
++  return num_cpus;
+ }
+ #endif  // !BUILDFLAG(IS_OPENBSD)
+ 

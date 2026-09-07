@@ -12,8 +12,12 @@ if [ ! -f .gclient ]; then
 fi
 
 if [ ! -d "$SRC/.git" ]; then
-  say "cloning chromium (large; expect a long first run)"
-  git clone -q https://chromium.googlesource.com/chromium/src.git "$SRC"
+  # Partial clone: skip blob history and fetch file contents on demand. A full
+  # Chromium clone downloads decades of every file's history that no build ever
+  # reads. Tags still resolve, so the pinned version checks out normally.
+  say "cloning chromium (partial clone; large but far smaller than full history)"
+  git clone -q --filter=blob:none \
+    https://chromium.googlesource.com/chromium/src.git "$SRC"
 fi
 
 say "checking out $CHROMIUM_VERSION"

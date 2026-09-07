@@ -86,6 +86,16 @@ scoreboard: launch with profile P, collect, diff against P's corpus row.
 Report results as they are. A patch that compiles is not a patch that works,
 and a V3 diff with three red fields is reported as three red fields.
 
+## Working mode
+
+Run the agreed plan to completion without checking in between steps, and
+parallelize wherever the work allows. Stop for the user only when a finding
+forces a **material decision** — something that changes scope, architecture, or
+whether the product is viable. Progress updates, permission to continue, and
+confirmation of an obvious next step are not material decisions.
+
+When genuinely blocked, ask with a recommendation rather than a survey.
+
 ## Parallel work
 
 Delegated units return JSON validating against a schema in `ledger/schema/`,

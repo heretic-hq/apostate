@@ -10,3 +10,4 @@
 0010-display-screen-geometry-from-profile.patch
 0011-base-icu-timezone-from-profile.patch
 0012-ui-color-scheme-and-highlight-from-profile.patch
+0013-accept-languages-from-profile.patch

@@ -1,0 +1,135 @@
+Subject: [PATCH] Accept-Languages from the profile, in both processes
+
+navigator.languages and the Accept-Language header derive different shapes from
+a single pref, in different processes: the renderer gets the bare comma list,
+while the network service expands it and adds q-weights. Our own captures show
+both shapes — ["en-US","en"] against "en-US,en;q=0.9" — so a patch that reached
+only one would make the header contradict JavaScript.
+
+Both read sites are patched rather than the pref itself. Overriding the pref
+would be a single point and reach both, but prefs persist: it would write the
+presented identity into the user's profile directory on disk, which is a leak
+that outlives the session and defeats the point of presenting anything.
+
+The header substitution happens before expansion, so the result still goes
+through Chromium's own q-weighting. Writing a finished header would be a second
+implementation of that, and another opportunity for the two processes to
+disagree.
+
+Ledger: navigator.languages, http.accept-language.
+
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index af28053..245a4b5 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -170,6 +170,12 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+     }
+   }
+ 
++  if (const DictValue* locale2 = dict->FindDict("locale")) {
++    if (const std::string* v = locale2->FindString("accept_languages")) {
++      profile->accept_languages_ = *v;
++    }
++  }
++
+   if (const DictValue* theme = dict->FindDict("theme")) {
+     if (std::optional<bool> v = theme->FindBool("prefers_dark")) {
+       profile->prefers_dark_ = *v;
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index 4c856b5..e14ab52 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -153,6 +153,17 @@ class BASE_EXPORT Profile {
+   // light mode differs on all of them.
+   std::optional<bool> prefers_dark() const { return prefers_dark_; }
+ 
++  // Accept-Languages, as the pref stores it: a comma-separated list such as
++  // "en-US,en".
++  //
++  // Two consumers derive different shapes from this one string —
++  // navigator.languages takes the bare list, while the Accept-Language header
++  // is expanded and q-weighted — so the profile stores the input rather than
++  // either output.
++  const std::optional<std::string>& accept_languages() const {
++    return accept_languages_;
++  }
++
+   // The platform's selection highlight, as CSS reports it, in 0xAARRGGBB so a
+   // partly transparent value round-trips.
+   //
+@@ -192,6 +203,7 @@ class BASE_EXPORT Profile {
+   std::optional<int> screen_color_depth_;
+   std::optional<std::string> timezone_;
+   std::optional<bool> prefers_dark_;
++  std::optional<std::string> accept_languages_;
+   std::optional<uint32_t> css_highlight_argb_;
+   std::optional<uint32_t> css_highlight_text_argb_;
+   std::string source_id_;
+diff --git a/chrome/browser/net/profile_network_context_service.cc b/chrome/browser/net/profile_network_context_service.cc
+index c9ae7f5..8d3d928 100644
+--- a/chrome/browser/net/profile_network_context_service.cc
++++ b/chrome/browser/net/profile_network_context_service.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/net/profile_network_context_service.h"
+ 
++#include "base/apostate/profile.h"
++
+ #include <memory>
+ #include <string>
+ #include <string_view>
+@@ -209,8 +211,17 @@ std::vector<std::string> TranslateStringArray(const base::ListValue& list) {
+ }
+ 
+ std::string ComputeAcceptLanguageFromPref(const std::string& language_pref) {
+-  std::string accept_languages_str =
+-      net::HttpUtil::ExpandLanguageList(language_pref);
++  // Apostate: substitute the profile's list before expansion, so the header
++  // still goes through Chromium's own q-weighting. Writing a finished header
++  // would be a second implementation of that, and a chance to disagree with
++  // navigator.languages in a way the two-process split already makes easy.
++  std::string source = language_pref;
++  if (const base::apostate::Profile* apostate_profile =
++          base::apostate::Profile::Get();
++      apostate_profile && apostate_profile->accept_languages().has_value()) {
++    source = *apostate_profile->accept_languages();
++  }
++  std::string accept_languages_str = net::HttpUtil::ExpandLanguageList(source);
+   return net::HttpUtil::GenerateAcceptLanguageHeader(accept_languages_str);
+ }
+ 
+diff --git a/chrome/browser/renderer_preferences_util.cc b/chrome/browser/renderer_preferences_util.cc
+index 032b72f..468e600 100644
+--- a/chrome/browser/renderer_preferences_util.cc
++++ b/chrome/browser/renderer_preferences_util.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "chrome/browser/renderer_preferences_util.h"
+ 
++#include "base/apostate/profile.h"
++
+ #include <stdint.h>
+ 
+ #include <string>
+@@ -190,8 +192,19 @@ void UpdateFromSystemSettings(blink::RendererPreferences* prefs,
+                  &prefs->webrtc_udp_min_port, &prefs->webrtc_udp_max_port);
+   prefs->webrtc_local_ips_allowed_urls = GetLocalIpsAllowedUrls(
+       pref_service->GetList(prefs::kWebRtcLocalIpsAllowedUrls));
+-  prefs->accept_languages = GetLanguageListForProfile(
+-      profile, pref_service->GetString(language::prefs::kAcceptLanguages));
++  // Apostate: navigator.languages and the Accept-Language header derive
++  // different shapes from one pref, in different processes — the bare list here
++  // and an expanded, q-weighted string in the network service. Both read sites
++  // are patched rather than the pref itself, because writing the pref would
++  // persist the presented identity into the user's profile directory on disk.
++  if (const base::apostate::Profile* apostate_profile =
++          base::apostate::Profile::Get();
++      apostate_profile && apostate_profile->accept_languages().has_value()) {
++    prefs->accept_languages = *apostate_profile->accept_languages();
++  } else {
++    prefs->accept_languages = GetLanguageListForProfile(
++        profile, pref_service->GetString(language::prefs::kAcceptLanguages));
++  }
+ #if !BUILDFLAG(IS_MAC)
+   prefs->plugin_fullscreen_allowed =
+       pref_service->GetBoolean(prefs::kFullscreenAllowed);

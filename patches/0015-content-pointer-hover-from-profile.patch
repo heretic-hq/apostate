@@ -1,0 +1,123 @@
+Subject: [PATCH] content: pointer and hover capability from the profile
+
+Headless has no input device, so it reports none — and a page sees
+(any-pointer: none) and (any-hover: none). No desktop machine reports that. It
+is a headless tell that survives every other spoof, because it describes
+hardware the browser genuinely cannot find rather than a value it chose.
+
+Conformance found it: the real Mac reports hover and fine, our build reported
+none for both.
+
+All four values are set together from one profile field, because they are not
+independent. A device with a fine pointer has hover, and reporting a primary
+type absent from the available set would be its own contradiction — so the
+profile carries the capability and the patch derives the four.
+
+Ledger: css.any-pointer, css.any-hover, css.pointer, css.hover.
+
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index 245a4b5..0c28f3c 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -176,6 +176,20 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+     }
+   }
+ 
++  if (const DictValue* input = dict->FindDict("input")) {
++    if (const std::string* v = input->FindString("pointer_type")) {
++      if (*v == "fine" || *v == "coarse" || *v == "none") {
++        profile->pointer_type_ = *v;
++      } else {
++        LOG(ERROR) << "apostate: input.pointer_type must be fine, coarse or "
++                      "none; ignoring";
++      }
++    }
++    if (std::optional<bool> v = input->FindBool("hover")) {
++      profile->has_hover_ = *v;
++    }
++  }
++
+   if (const DictValue* theme = dict->FindDict("theme")) {
+     if (std::optional<bool> v = theme->FindBool("prefers_dark")) {
+       profile->prefers_dark_ = *v;
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index e14ab52..0fad4c3 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -164,6 +164,17 @@ class BASE_EXPORT Profile {
+     return accept_languages_;
+   }
+ 
++  // Pointing device capability: "fine", "coarse" or "none".
++  //
++  // Headless has no input device at all, so it reports none — and a desktop
++  // operating system with no pointer and no hover is a contradiction no real
++  // machine produces. Every desktop profile must claim a fine pointer with
++  // hover; a phone claims coarse without.
++  const std::optional<std::string>& pointer_type() const {
++    return pointer_type_;
++  }
++  std::optional<bool> has_hover() const { return has_hover_; }
++
+   // The platform's selection highlight, as CSS reports it, in 0xAARRGGBB so a
+   // partly transparent value round-trips.
+   //
+@@ -204,6 +215,8 @@ class BASE_EXPORT Profile {
+   std::optional<std::string> timezone_;
+   std::optional<bool> prefers_dark_;
+   std::optional<std::string> accept_languages_;
++  std::optional<std::string> pointer_type_;
++  std::optional<bool> has_hover_;
+   std::optional<uint32_t> css_highlight_argb_;
+   std::optional<uint32_t> css_highlight_text_argb_;
+   std::string source_id_;
+diff --git a/content/browser/web_contents/slow_web_preference_cache.cc b/content/browser/web_contents/slow_web_preference_cache.cc
+index ff82883..40ad7f6 100644
+--- a/content/browser/web_contents/slow_web_preference_cache.cc
++++ b/content/browser/web_contents/slow_web_preference_cache.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "content/browser/web_contents/slow_web_preference_cache.h"
+ 
++#include "base/apostate/profile.h"
++
+ #include "base/command_line.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/no_destructor.h"
+@@ -183,6 +185,36 @@ bool SlowWebPreferenceCache::Update() {
+   primary_hover_type_ =
+       static_cast<blink::mojom::HoverType>(ui::GetPrimaryHoverType());
+ 
++  // Apostate: headless has no input device, so these come back as "none" and
++  // the page sees (any-pointer: none) and (any-hover: none). No desktop machine
++  // reports that — it is a headless tell that survives every other spoof,
++  // because it describes hardware the browser genuinely cannot find.
++  //
++  // All four values are set together from one field. They are not independent:
++  // a device with a fine pointer has hover, and reporting a primary type absent
++  // from the available set would be its own contradiction.
++  if (const base::apostate::Profile* profile = base::apostate::Profile::Get()) {
++    if (profile->pointer_type().has_value()) {
++      const std::string& type = *profile->pointer_type();
++      if (type == "fine") {
++        available_pointer_types_ = ui::POINTER_TYPE_FINE;
++        primary_pointer_type_ = blink::mojom::PointerType::kPointerFineType;
++      } else if (type == "coarse") {
++        available_pointer_types_ = ui::POINTER_TYPE_COARSE;
++        primary_pointer_type_ = blink::mojom::PointerType::kPointerCoarseType;
++      } else {
++        available_pointer_types_ = ui::POINTER_TYPE_NONE;
++        primary_pointer_type_ = blink::mojom::PointerType::kPointerNone;
++      }
++    }
++    if (profile->has_hover().has_value()) {
++      const bool hover = *profile->has_hover();
++      available_hover_types_ = hover ? ui::HOVER_TYPE_HOVER : ui::HOVER_TYPE_NONE;
++      primary_hover_type_ = hover ? blink::mojom::HoverType::kHoverHoverType
++                                  : blink::mojom::HoverType::kHoverNone;
++    }
++  }
++
+   pointer_events_max_touch_points_ = ui::MaxTouchPoints();
+ 
+   number_of_cpu_cores_ = base::SysInfo::NumberOfProcessors();

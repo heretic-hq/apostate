@@ -90,6 +90,17 @@ def build(capture):
     if langs:
         put("locale", "accept_languages", ",".join(langs))
 
+    # Pointer and hover are capability facts about the device, and headless
+    # reports none for both — so a profile derived from a headless capture would
+    # carry that tell forward. Taken from the capture as measured; a capture
+    # that says none was itself taken without an input device.
+    pointer = media.get("any-pointer") or []
+    put("input", "pointer_type",
+        "fine" if "fine" in pointer else "coarse" if "coarse" in pointer else None)
+    hover = media.get("any-hover") or []
+    if hover:
+        put("input", "hover", "hover" in hover)
+
     scheme = media.get("prefers-color-scheme") or []
     if scheme:
         put("theme", "prefers_dark", "dark" in scheme)

@@ -146,6 +146,24 @@
           "type": "integer"
         }
       }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pointer_type": {
+          "type": "string",
+          "enum": [
+            "fine",
+            "coarse",
+            "none"
+          ],
+          "description": "Headless reports none, and a desktop with no pointer and no hover is a contradiction no real machine produces. Desktop profiles claim fine with hover."
+        },
+        "hover": {
+          "type": "boolean"
+        }
+      }
     }
   }
 }

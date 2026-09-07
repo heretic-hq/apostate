@@ -34,6 +34,10 @@
   "timezone": "Asia/Bangkok",
   "accept_languages": "en-US,en"
  },
+ "input": {
+  "pointer_type": "fine",
+  "hover": true
+ },
  "theme": {
   "prefers_dark": true,
   "highlight_argb": 3434338303,

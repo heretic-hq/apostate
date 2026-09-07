@@ -46,6 +46,12 @@ VOLATILE_PATHS = {
     ("screen.geometry", "innerHeight"),
     ("screen.geometry", "screenX"),
     ("screen.geometry", "screenY"),
+    # Measured, not assumed: two captures of the same MacBook five hours apart
+    # reported availHeight 1001 and 1003. The macOS dock inset moves with dock
+    # state, so an exact match cannot be required. The inset must still be
+    # plausible for the claimed OS — see coh.screen-avail-inset.
+    ("screen.geometry", "availHeight"),
+    ("screen.geometry", "availWidth"),
 }
 
 
@@ -65,6 +71,26 @@ def measured_volatility(capture):
         if json.dumps(first["value"], sort_keys=True) != json.dumps(second["value"], sort_keys=True):
             unstable.add(pid)
     return unstable
+
+
+# Headers whose value describes the capture server rather than the browser.
+# Their presence and position in the order are device signal; their contents are
+# not, and comparing them makes two captures of one machine differ because they
+# were taken against different ports.
+ENVIRONMENT_HEADERS = {"host", "referer", "origin", "connection", "content-length",
+                       "cookie", "if-none-match", "if-modified-since"}
+
+
+def normalise_headers(value):
+    """Blank environment-dependent header values, keeping names and order."""
+    if not isinstance(value, dict) or "headers" not in value:
+        return value
+    out = dict(value)
+    out["headers"] = [
+        [k, "<environment>" if k.lower() in ENVIRONMENT_HEADERS else v]
+        for k, v in value["headers"]
+    ]
+    return out
 
 
 def diff(a, b, path=()):
@@ -141,8 +167,12 @@ def main() -> int:
             errored.append((pid, f"subject probe failed: {s.get('error')}"))
             continue
 
+        rv, sv = r["value"], s["value"]
+        if pid == "headers.echo":
+            rv, sv = normalise_headers(rv), normalise_headers(sv)
+
         mismatches = [
-            m for m in diff(r["value"], s["value"])
+            m for m in diff(rv, sv)
             if (pid, ".".join(m[0])) not in volatile_paths
         ]
         if mismatches:

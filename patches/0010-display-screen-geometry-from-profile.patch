@@ -1,0 +1,169 @@
+Subject: [PATCH] display: screen geometry from the device profile
+
+Nothing a page reads about the display originates in the renderer. ScreenInfo is
+assembled in the browser process and shipped over mojo inside VisualProperties,
+and the renderer-side funnel every Blink reader passes through is a waypoint
+rather than a source — so this is the point where one change reaches screen.*,
+the CSS display media features and the DPR client hint together.
+
+That last one matters: the DPR header repeats the deviceMemory pattern, computed
+in the browser for navigations and in the renderer for subresources. Both read
+device_scale_factor from this struct, so patching here keeps them in agreement
+instead of requiring two patches to stay in step.
+
+depth_per_component follows depth rather than being carried separately in the
+profile. Chromium uses depth as an HDR flag with only 24 and 30 valid, and the
+same fact drives CSS color, dynamic-range and color-gamut — a profile that set
+the two independently could describe a display that cannot exist. The parser
+rejects any other colour depth for the same reason.
+
+available_rect is stored rather than derived from the screen size. Its inset is
+the OS window furniture, and we measured it moving between sessions on one
+machine as the macOS dock changed state, so it cannot be computed — only kept
+plausible for the claimed platform.
+
+Ledger: screen.dimensions, screen.avail-dimensions, screen.color-depth,
+screen.device-pixel-ratio, http.dpr-header, css.media display features.
+
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index 0a74db4..adce0ad 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -137,6 +137,33 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+     }
+   }
+ 
++  if (const DictValue* screen = dict->FindDict("screen")) {
++    if (std::optional<int> v = screen->FindInt("width")) {
++      profile->screen_width_ = *v;
++    }
++    if (std::optional<int> v = screen->FindInt("height")) {
++      profile->screen_height_ = *v;
++    }
++    if (std::optional<int> v = screen->FindInt("avail_width")) {
++      profile->screen_avail_width_ = *v;
++    }
++    if (std::optional<int> v = screen->FindInt("avail_height")) {
++      profile->screen_avail_height_ = *v;
++    }
++    if (std::optional<double> v = screen->FindDouble("device_pixel_ratio")) {
++      profile->device_scale_factor_ = static_cast<float>(*v);
++    }
++    if (std::optional<int> v = screen->FindInt("color_depth")) {
++      // Only 24 and 30 exist upstream; anything else could not come from a
++      // real display and would be a value no Chrome reports.
++      if (*v == 24 || *v == 30) {
++        profile->screen_color_depth_ = *v;
++      } else {
++        LOG(ERROR) << "apostate: screen.color_depth must be 24 or 30; ignoring";
++      }
++    }
++  }
++
+   if (const DictValue* browser = dict->FindDict("browser")) {
+     if (const std::string* v = browser->FindString("user_agent")) {
+       profile->user_agent_ = *v;
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index c84de33..dc2b9e9 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -115,6 +115,28 @@ class BASE_EXPORT Profile {
+   }
+   const std::optional<std::string>& user_agent() const { return user_agent_; }
+ 
++  // Display geometry, in physical pixels, as the claimed device reports it.
++  //
++  // Consumed where ScreenInfo is built in the browser process, because nothing
++  // a page reads about the display originates in the renderer — it arrives over
++  // mojo inside VisualProperties, and the renderer-side funnel is a waypoint.
++  //
++  // available_* is the work area: screen minus the OS window furniture. Its
++  // inset varies with dock and taskbar state on a real machine, so it is stored
++  // rather than derived, but it must stay plausible for the claimed OS.
++  std::optional<int> screen_width() const { return screen_width_; }
++  std::optional<int> screen_height() const { return screen_height_; }
++  std::optional<int> screen_avail_width() const { return screen_avail_width_; }
++  std::optional<int> screen_avail_height() const {
++    return screen_avail_height_;
++  }
++  std::optional<float> device_scale_factor() const {
++    return device_scale_factor_;
++  }
++  // 24 or 30 only. Chromium uses this as an HDR flag rather than a true bit
++  // depth, and the same fact drives CSS color, dynamic-range and color-gamut.
++  std::optional<int> screen_color_depth() const { return screen_color_depth_; }
++
+   // Identifier of the capture this profile was derived from, for diagnostics.
+   const std::string& source_id() const { return source_id_; }
+ 
+@@ -133,6 +155,12 @@ class BASE_EXPORT Profile {
+   std::optional<bool> ua_mobile_;
+   std::optional<std::string> navigator_platform_;
+   std::optional<std::string> user_agent_;
++  std::optional<int> screen_width_;
++  std::optional<int> screen_height_;
++  std::optional<int> screen_avail_width_;
++  std::optional<int> screen_avail_height_;
++  std::optional<float> device_scale_factor_;
++  std::optional<int> screen_color_depth_;
+   std::string source_id_;
+ };
+ 
+diff --git a/ui/display/display_util.cc b/ui/display/display_util.cc
+index ed7e6c1..79a8665 100644
+--- a/ui/display/display_util.cc
++++ b/ui/display/display_util.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "ui/display/display_util.h"
+ 
++#include "base/apostate/profile.h"
++
+ #include "base/notreached.h"
+ #include "build/build_config.h"
+ #include "ui/display/display.h"
+@@ -48,6 +50,44 @@ void DisplayUtil::DisplayToScreenInfo(ScreenInfo* screen_info,
+   screen_info->orientation_type = GetOrientationTypeForDesktop(display);
+ #endif
+ 
++  // Apostate: apply the profile here, where ScreenInfo is assembled.
++  //
++  // Nothing a page reads about the display originates in the renderer — this
++  // struct is built in the browser process and shipped over mojo inside
++  // VisualProperties, and the renderer-side funnel every Blink reader passes
++  // through is a waypoint, not a source. Overriding here therefore reaches
++  // screen.*, the CSS display media features and the DPR client hint together,
++  // because all three read this one struct.
++  //
++  // depth_per_component follows depth rather than being carried separately:
++  // Chromium uses depth as an HDR flag with only 24 and 30 valid, and a profile
++  // that set the two independently could describe a display that cannot exist.
++  if (const base::apostate::Profile* profile = base::apostate::Profile::Get()) {
++    gfx::Rect rect = screen_info->rect;
++    gfx::Rect available = screen_info->available_rect;
++
++    if (profile->screen_width().has_value() &&
++        profile->screen_height().has_value()) {
++      rect = gfx::Rect(rect.x(), rect.y(), *profile->screen_width(),
++                       *profile->screen_height());
++      screen_info->rect = rect;
++    }
++    if (profile->screen_avail_width().has_value() &&
++        profile->screen_avail_height().has_value()) {
++      available =
++          gfx::Rect(available.x(), available.y(), *profile->screen_avail_width(),
++                    *profile->screen_avail_height());
++      screen_info->available_rect = available;
++    }
++    if (profile->device_scale_factor().has_value()) {
++      screen_info->device_scale_factor = *profile->device_scale_factor();
++    }
++    if (profile->screen_color_depth().has_value()) {
++      screen_info->depth = *profile->screen_color_depth();
++      screen_info->depth_per_component = *profile->screen_color_depth() / 3;
++    }
++  }
++
+   // TODO(crbug.com/1194700 and crbug.com/1182855): Use cross-process screen
+   // info caches, not local-process info, for child frames and Mac's shim.
+   auto* screen = Screen::Get();

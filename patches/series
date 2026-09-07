@@ -7,3 +7,5 @@
 0007-gl-driver-strings-from-profile.patch
 0008-embedder-support-platform-identity.patch
 0009-close-platform-identity-triangle.patch
+0010-display-screen-geometry-from-profile.patch
+0011-base-icu-timezone-from-profile.patch

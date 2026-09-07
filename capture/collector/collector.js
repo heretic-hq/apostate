@@ -900,7 +900,14 @@
         device_pixel_ratio: global.devicePixelRatio,
         headed: typeof global.outerWidth === "number" && global.outerWidth > 0 ? true : null,
         automation_suspected: sig.length > 0,
-        automation_signals: sig
+        automation_signals: sig,
+        // Recorded because its absence silently guts a capture. Every
+        // secure-context-gated API — crypto.subtle, userAgentData,
+        // mediaDevices, storage, getBattery, keyboard, getScreenDetails,
+        // WebGPU — reports "unsupported" over plain HTTP to a non-localhost
+        // origin, and the result looks like a device that lacks them rather
+        // than like a capture taken through the wrong URL.
+        secure_context: !!global.isSecureContext
       },
       probes: probes,
       repeat: repeat

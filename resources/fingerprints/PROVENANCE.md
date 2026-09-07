@@ -46,3 +46,35 @@ one identical fingerprint. They have been removed. They described a schema this
 project no longer targets, and contaminated data left in the tree eventually
 gets cited no matter what a README says. The lessons they taught are recorded as
 the design rules in `capture/README.md`.
+
+## The reference capture
+
+`raw/m4-max-chrome-20260907T191008Z.json` is the current reference for the
+Apple M4 Max. It is the first capture in this project with **36/36 probes
+measured and no failures**, and it supersedes the earlier `apple-m4-max-*`
+files, which are kept for history but should not be used as a reference: every
+one of them is missing `screen.details`, and the `api.surface` probe in all of
+them measured a misspelled interface name.
+
+Two things about it are worth knowing before comparing anything against it.
+
+**It must be reached over a secure context.** Eleven probes depend on
+secure-context-gated APIs — `crypto.subtle`, `userAgentData`, `mediaDevices`,
+`storage`, `getBattery`, `keyboard`, `getScreenDetails` and WebGPU among them.
+Over plain HTTP to a non-localhost origin every one reports "unsupported", and
+the result is a capture that reads as a device missing half its APIs rather than
+as a capture taken through the wrong URL. Four such captures were taken before
+this was understood; the collector now refuses outright rather than produce
+one, and records `context.secure_context` in every capture it does produce.
+For a remote receiver, forward the port and browse to `localhost` rather than
+to the machine's address.
+
+**It records the battery in the plugged-in state**: `charging: true`,
+`level: 1`, `chargingTime: 0`, `dischargingTime: null` (Infinity, as JSON).
+That is byte-identical to what a machine with no battery reports, because
+`mojom::BatteryStatus` has exactly those defaults and `BatteryStatusService`
+returns them when the fetcher fails. A plugged-in laptop and a battery-less
+server are therefore indistinguishable on this API, which is why this profile
+can be served from a host that has no battery at all. A capture of the same
+machine *on* battery is a separate reference and is not interchangeable with
+this one.

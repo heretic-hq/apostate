@@ -84,6 +84,23 @@
     bar.style.display = "block";
     log.textContent = "";
 
+    // Refuse outright outside a secure context. Eleven probes depend on
+    // secure-context-gated APIs, and over plain HTTP to a non-localhost origin
+    // every one of them reports "unsupported" — producing a capture that looks
+    // like a device missing half its APIs rather than like a capture taken
+    // through the wrong URL. This has already cost one round trip.
+    if (!window.isSecureContext) {
+      line("REFUSED: this page is not a secure context.", "fail");
+      line("Origin: " + location.origin, "fail");
+      line("", "");
+      line("Reach it over https://, or as http://localhost or http://127.0.0.1.", "");
+      line("For a remote receiver, forward the port instead of browsing to the IP:", "");
+      line("    ssh -N -L " + (location.port || "80") + ":127.0.0.1:" + (location.port || "80") + " <host>", "");
+      line("then open http://localhost:" + (location.port || "80") + "/ here.", "");
+      go.disabled = false;
+      return;
+    }
+
     // Ask for window-management before any probe runs. screen.details is the
     // only source of the OS display label, HDR headroom and colour primaries,
     // and the probe refuses to prompt itself because a permission dialog in the

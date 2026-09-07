@@ -192,8 +192,18 @@ leakage, and proxy cache headers.
 
 Owns: `storage.estimate`, quota, permission states, incognito detection.
 
+Detail: `subsystems/profile-persistence.md`.
+
 Trap: our capture shows `Notification.permission` and the Permissions API as
 separate reads. They must agree, and disagreement is a known headless tell.
+
+Trap: a non-persistent automation context *is* an off-the-record profile —
+`Target.createBrowserContext`, which Playwright's `newContext()` calls, goes
+through `GetOffTheRecordProfile`. Off-the-record quota is derived from physical
+memory rather than disk, so before patch 0022 it reported the host's RAM and
+bypassed `navigator.deviceMemory` entirely. Note the 10 GiB cap hides this on
+hosts above roughly 50 GiB, which is why it survived several captures
+unnoticed.
 
 ## 12. Speech & Sensors
 

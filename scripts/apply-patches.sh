@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Apply patches/series in order. Refuses on fuzz: a patch that applies at an
-# offset has landed somewhere we did not verify, and in this project a patch in
-# the wrong place is a wrong value shipped silently.
+# Apply patches/series in order.
+#
+# git apply matches context exactly and never fuzzes, which is the property we
+# want: a patch that applied at an offset would have landed somewhere nobody
+# verified, and here a patch in the wrong place is a wrong value shipped
+# silently.
 source "$(dirname "$0")/lib.sh"
 
 SERIES="$REPO_ROOT/patches/series"
@@ -20,8 +23,11 @@ while IFS= read -r line; do
   patch_file="$REPO_ROOT/patches/$line"
   [ -f "$patch_file" ] || die "missing patch: $line"
   printf '  %s\n' "$line"
-  git -C "$SRC" apply --whitespace=error --no-fuzz "$patch_file" \
-    || die "failed to apply $line (no fuzz allowed — rebase the patch instead)"
+  # git apply requires exact context and has no fuzz mode at all, unlike
+  # patch(1) — so strictness is the default rather than something to request.
+  # An earlier version passed --no-fuzz, which git apply does not accept.
+  git -C "$SRC" apply --whitespace=error "$patch_file" \
+    || die "failed to apply $line — rebase the patch against $CHROMIUM_VERSION"
   count=$((count + 1))
 done < "$SERIES"
 

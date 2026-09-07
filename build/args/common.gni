@@ -15,7 +15,12 @@ is_debug = false
 # timing profile is itself a fingerprint surface.
 
 # Reproducibility. The checkout path must not be able to change the output.
-strip_absolute_paths_from_debug_symbols = true
+#
+# strip_absolute_paths_from_debug_symbols is deliberately NOT set here. On Linux,
+# and on Apple whenever enable_dsyms is false, Chromium forces it true and does
+# not expose it in declare_args() at all — so setting it has no effect and gn
+# warns. Both our targets get the behaviour by default; verified in
+# build/config/compiler/compiler.gni at the pinned revision.
 symbol_level = 0
 blink_symbol_level = 0
 

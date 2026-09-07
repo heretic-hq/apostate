@@ -16,12 +16,16 @@ manifest_outputs() {
   grep -A20 '\[outputs\]' "$1" | grep -v '^\[outputs\]' | grep -v '^$'
 }
 
+# Only the manifest's output hashes may reach stdout. Silencing build.sh alone
+# was not enough: apply-patches and configure also print, and their output ended
+# up in the comparison, which reported a mismatch that was never about the
+# binaries.
 run_once() {
-  rm -rf "$SRC/out/$TARGET"
-  "$REPO_ROOT/scripts/apply-patches.sh"
-  "$REPO_ROOT/scripts/configure.sh" "$TARGET"
-  "$REPO_ROOT/scripts/build.sh" "$TARGET" >/dev/null
-  grep -A20 '\[outputs\]' "$REPO_ROOT/build/MANIFEST.lock" | grep -v '^\[outputs\]'
+  rm -rf "$SRC/out/$TARGET" >&2
+  "$REPO_ROOT/scripts/apply-patches.sh" >&2
+  "$REPO_ROOT/scripts/configure.sh" "$TARGET" >&2
+  "$REPO_ROOT/scripts/build.sh" "$TARGET" >&2
+  manifest_outputs "$REPO_ROOT/build/MANIFEST.lock"
 }
 
 if [ "$AGAINST_MANIFEST" = "1" ]; then

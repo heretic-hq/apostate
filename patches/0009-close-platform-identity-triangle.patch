@@ -1,0 +1,135 @@
+Subject: [PATCH] Close the platform identity triangle: navigator.platform and UA
+
+Patch 0008 gave the Client Hints family the profile's platform, and measuring it
+showed why that is not sufficient on its own: userAgentData reported macOS while
+navigator.platform reported "Linux x86_64" and the UA string still carried
+"X11; Linux x86_64". A browser contradicting itself that way is more detectable
+than one claiming nothing, so these three surfaces have to move together.
+
+navigator.platform is patched at GetReducedNavigatorPlatform, the compile-time
+constant NavigatorBase::platform returns. That covers worker scope for free,
+because worker_navigator.h declares no platform member and inherits the same
+constant — whereas the CDP override lives on Window only. Reading
+navigator.platform inside a Worker therefore refutes any tool spoofing it
+through Emulation, and patching the constant has no such asymmetry. This is the
+clearest case in the project for source patching over CDP.
+
+The UA string is replaced whole rather than assembled from parts. The OS token,
+the AppleWebKit version and the trailing Safari token vary together by platform,
+and rebuilding them from fields would be a second and worse implementation of
+something the capture already records verbatim. GetUserAgentInternal is upstream
+of the header, navigator.userAgent and the worker snapshot alike.
+
+Ledger: navigator.platform, navigator.user-agent, coh.ua-platform-agreement.
+
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index ff7be12..0a74db4 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -132,6 +132,15 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+     if (std::optional<bool> v = platform->FindBool("mobile")) {
+       profile->ua_mobile_ = *v;
+     }
++    if (const std::string* v = platform->FindString("navigator_platform")) {
++      profile->navigator_platform_ = *v;
++    }
++  }
++
++  if (const DictValue* browser = dict->FindDict("browser")) {
++    if (const std::string* v = browser->FindString("user_agent")) {
++      profile->user_agent_ = *v;
++    }
+   }
+ 
+   return profile.release();
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index 575a00e..c84de33 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -103,6 +103,18 @@ class BASE_EXPORT Profile {
+   const std::optional<std::string>& ua_model() const { return ua_model_; }
+   std::optional<bool> ua_mobile() const { return ua_mobile_; }
+ 
++  // navigator.platform, and the full User-Agent string.
++  //
++  // Both must agree with ua_platform() above. They are separate emitters —
++  // navigator.platform is a compile-time constant in Blink and the UA string is
++  // assembled in the browser — so a profile that sets one and not the others
++  // produces a browser that contradicts itself, which is more detectable than
++  // one that claims nothing.
++  const std::optional<std::string>& navigator_platform() const {
++    return navigator_platform_;
++  }
++  const std::optional<std::string>& user_agent() const { return user_agent_; }
++
+   // Identifier of the capture this profile was derived from, for diagnostics.
+   const std::string& source_id() const { return source_id_; }
+ 
+@@ -119,6 +131,8 @@ class BASE_EXPORT Profile {
+   std::optional<std::string> ua_bitness_;
+   std::optional<std::string> ua_model_;
+   std::optional<bool> ua_mobile_;
++  std::optional<std::string> navigator_platform_;
++  std::optional<std::string> user_agent_;
+   std::string source_id_;
+ };
+ 
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index 5071b53..54d6892 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -217,6 +217,21 @@ const blink::UserAgentBrandList GetUserAgentBrandFullVersionListInternal(
+ // Internal function to handle return the full or "reduced" user agent string,
+ // depending on the Reduce User-Agent reduction phase features.
+ std::string GetUserAgentInternal() {
++  // Apostate: the profile's user agent replaces the whole string rather than
++  // being assembled from parts. The OS token, the AppleWebKit version and the
++  // trailing Safari token all vary together by platform, and rebuilding them
++  // from fields would be a second, worse implementation of something the
++  // capture already recorded verbatim.
++  //
++  // This is upstream of every consumer — the header, navigator.userAgent, and
++  // the worker snapshot — so there is no second site.
++  if (const ::base::apostate::Profile* apostate_profile =
++          ::base::apostate::Profile::Get()) {
++    if (apostate_profile->user_agent().has_value()) {
++      return *apostate_profile->user_agent();
++    }
++  }
++
+   std::string product = GetProductAndVersion();
+   // Apostate: upstream prefixes the product token with "Headless" whenever the
+   // --headless switch is present. That token describes how this browser was
+diff --git a/third_party/blink/renderer/core/execution_context/navigator_base.cc b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+index cccfafe..0bbbde5 100644
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/core/execution_context/navigator_base.h"
+ 
++#include "base/apostate/profile.h"
++
+ #include "base/feature_list.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/common/features.h"
+@@ -24,6 +26,19 @@ namespace blink {
+ namespace {
+ 
+ String GetReducedNavigatorPlatform() {
++  // Apostate: this constant is what NavigatorBase::platform returns for both
++  // Navigator and WorkerNavigator — worker_navigator.h declares no platform
++  // member of its own. Patching here therefore covers worker scope, which the
++  // CDP override at navigator.cc does not: reading navigator.platform inside a
++  // Worker refutes any tool that spoofs it through Emulation, and is exactly
++  // the asymmetry source patching avoids.
++  if (const ::base::apostate::Profile* profile =
++          ::base::apostate::Profile::Get()) {
++    if (profile->navigator_platform().has_value()) {
++      return String::FromUtf8(*profile->navigator_platform());
++    }
++  }
++
+ #if BUILDFLAG(IS_ANDROID)
+   return "Linux armv81";
+ #elif BUILDFLAG(IS_MAC)

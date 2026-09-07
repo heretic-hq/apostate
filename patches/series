@@ -6,3 +6,4 @@
 0006-blink-device-memory-from-profile.patch
 0007-gl-driver-strings-from-profile.patch
 0008-embedder-support-platform-identity.patch
+0009-close-platform-identity-triangle.patch

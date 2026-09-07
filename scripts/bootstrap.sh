@@ -21,7 +21,14 @@ case "$(uname -s)" in
     command -v xcodebuild >/dev/null || die "Xcode command line tools not installed"
     sdk="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null || true)"
     [ -n "$sdk" ] || die "no macOS SDK found"
-    say "macOS SDK $sdk  (pinned floor in build/args/macos-arm64.gn)"
+    # Actually enforce the floor. macOS cannot be containerised, so the SDK is
+    # the reproducibility boundary and building against whatever happens to be
+    # installed is how a mac build silently stops matching the Linux one.
+    floor="$(sed -n 's/^ *mac_sdk_min *= *"\(.*\)".*/\1/p' "$REPO_ROOT/build/args/macos-arm64.gn")"
+    [ -n "$floor" ] || die "mac_sdk_min not found in build/args/macos-arm64.gn"
+    lowest="$(printf '%s\n%s\n' "$floor" "$sdk" | sort -V | head -1)"
+    [ "$lowest" = "$floor" ] || die "macOS SDK $sdk is below the pinned floor $floor"
+    say "macOS SDK $sdk  (floor $floor, from build/args/macos-arm64.gn)"
     ;;
   Linux)
     command -v python3 >/dev/null || die "python3 missing"

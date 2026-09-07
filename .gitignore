@@ -1,7 +1,10 @@
 # Internal-facing material. Never committed — this repo's history is public.
 .internal/
 
-# Build artifacts and toolchains (all reproducible from build/ pins)
+# Build artifacts and toolchains (all reproducible from build/ pins).
+# .workspace holds the checkout and toolchain — ~36GB of generated content,
+# none of it ours. The earlier rules were root-anchored and did not match it.
+/.workspace/
 /src/
 /depot_tools/
 /out/

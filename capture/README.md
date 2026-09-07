@@ -43,8 +43,7 @@ These exist because the collector that produced the Apple fingerprints in
 schema/capture.schema.json   Native lossless capture format
 collector/                   The measurement page. No dependencies, no build step
 server/receive.py            Local receiver; writes raw captures to disk
-derive/stability.py          Diffs repeat captures to establish per-field variance
-derive/conform.py            Diffs an Apostate capture against a reference capture (V3)
+derive/conform.py            Diffs one capture against another — the V3 gate
 ```
 
 ## Taking a capture
@@ -62,6 +61,22 @@ Then load it into the oracle:
 ```sh
 python3 corpus/build_oracle.py --src resources/fingerprints/raw
 ```
+
+## Measuring variance
+
+`conform.py` is also how a field's natural variance gets established: point it
+at two captures of the *same* device and everything it reports is variance
+rather than defect. There is no separate tool, because "does this device match
+itself" and "does Apostate match this device" are the same comparison.
+
+This is not optional rigour. A single capture cannot distinguish spoofing from
+variance, having nothing to measure variance against — we withdrew a finding
+that way, after two captures of one MacBook five hours apart reported different
+`availHeight` values because the dock had moved.
+
+Measured so far on an M4 Max, stock Chrome 152: 29/29 probes conform within a
+session, and 29/29 across separate launches five hours apart, canvas, WebGL and
+audio renders byte-identical throughout.
 
 ## Format
 

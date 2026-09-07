@@ -51,6 +51,9 @@ def build(capture):
     profile = {"id": ctx.get("label") or "unnamed",
                "source_capture": ctx.get("taken_at")}
 
+    def warn(msg):
+        print(f"WARNING: {msg}", file=sys.stderr)
+
     def put(section, key, value):
         if value is None or value == "":
             return
@@ -58,11 +61,35 @@ def build(capture):
 
     put("cpu", "logical_cores", nav.get("hardwareConcurrency"))
 
-    # deviceMemory is Chromium's bucketed output, not installed RAM. Recording
-    # it as the exact bucket is honest: the real figure is not recoverable from
-    # the capture, and any value inside the bucket reproduces it.
+    # deviceMemory is Chromium's bucketed output, not installed RAM: it rounds to
+    # a power of two and saturates, so every machine above the top bucket reports
+    # the same number. The real figure is not recoverable from any probe we have.
+    #
+    # This used to be harmless. The claim in the old comment here — "any value
+    # inside the bucket reproduces it" — was true while the only consumer was
+    # ApproximatedDeviceMemory, which re-buckets and so cannot tell the
+    # difference. It stopped being true when the incognito storage quota started
+    # reading the same field: that path multiplies by a ratio in [0.15, 0.2] and
+    # divides by three, and a bucketed input produces a quota no machine of the
+    # real size reports.
+    #
+    # Measured: the reference M4 Max reports deviceMemory 32, so this wrote
+    # 32 GiB. Its real incognito quota is 10 GiB, which requires a pool of at
+    # least 10 GiB, which requires at least ~50 GiB of installed RAM. The
+    # machine has more memory than this field can express, and the profile said
+    # 32.
+    #
+    # So it is written, because it is the best the capture can give, and flagged
+    # loudly, because it is a lower bound rather than a measurement.
     if nav.get("deviceMemory"):
-        put("memory", "total_bytes", int(nav["deviceMemory"]) * 1024**3)
+        gib = int(nav["deviceMemory"])
+        put("memory", "total_bytes", gib * 1024**3)
+        warn(f"memory.total_bytes = {gib} GiB is deviceMemory's bucket, NOT "
+             f"installed RAM. deviceMemory saturates, so the real machine may "
+             f"have more. Replace it with the true installed figure before "
+             f"using this profile: the incognito storage quota is derived from "
+             f"it and a bucketed value produces a quota no real machine of that "
+             f"size reports.")
 
     put("platform", "name", high.get("platform"))
     put("platform", "version", high.get("platformVersion"))

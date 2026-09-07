@@ -19,6 +19,7 @@ import json
 import pathlib
 import re
 import socket
+import ssl
 import sys
 import threading
 
@@ -156,7 +157,13 @@ def main() -> None:
     ap.add_argument("--bind", default="0.0.0.0")
     ap.add_argument("--once", action="store_true",
                     help="exit after the first capture is stored")
+    ap.add_argument("--cert", type=pathlib.Path,
+                    help="TLS certificate chain (enables https)")
+    ap.add_argument("--key", type=pathlib.Path, help="TLS private key")
     args = ap.parse_args()
+
+    if bool(args.cert) != bool(args.key):
+        sys.exit("--cert and --key must be given together")
 
     if not (COLLECTOR_DIR / "collector.js").exists():
         sys.exit(f"collector not found at {COLLECTOR_DIR}")
@@ -170,9 +177,34 @@ def main() -> None:
     # store a capture and hang, which is the opposite of the point.
     srv.daemon_threads = True
     srv.exit_after_capture = args.once
+
+    scheme = "http"
+    if args.cert:
+        # TLS is terminated here rather than behind a reverse proxy, and that is
+        # deliberate. /echo is a probe: it reports the request's header names in
+        # arrival order with original casing, which is how the field-trial
+        # testing config divergence was found. Every mainstream reverse proxy
+        # parses headers into a map before forwarding, which loses order and
+        # canonicalises casing — it would answer the probe with a description of
+        # the proxy instead of the browser.
+        #
+        # Serving HTTP/1.1 over TLS also keeps the header names mixed-case, so
+        # captures taken here stay comparable with every capture taken over
+        # plain HTTP/1.1 before it. An h2 edge would lowercase them all and
+        # reorder pseudo-headers, which is a legitimate thing to measure but a
+        # different thing, and it would silently invalidate the reference set.
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certfile=str(args.cert), keyfile=str(args.key))
+        ctx.set_alpn_protocols(["http/1.1"])
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        scheme = "https"
+
     print(f"capture receiver on :{args.port}   writing to {Handler.out_dir}")
-    print(f"  this machine   http://localhost:{args.port}/")
-    print(f"  other devices  http://{lan_ip()}:{args.port}/")
+    print(f"  this machine   {scheme}://localhost:{args.port}/")
+    print(f"  other devices  {scheme}://{lan_ip()}:{args.port}/")
+    if scheme == "http":
+        print("  NOTE: plain http is a secure context only on localhost; a "
+              "capture taken over http to any other host loses 11 probes.")
     print("\nOpen in a normal browser window. Ctrl-C to stop.")
     try:
         srv.serve_forever()

@@ -7,9 +7,18 @@ Free and open source. No paid tier, no licence key, no gated builds.
 
 ## Status
 
-Early. The build pipeline, methodology and ground-truth corpus are in place;
-the patch set is not. Nothing here is usable yet — watch releases rather than
-cloning expectantly.
+Early, and honest about it. The build is reproducible, the surface map is
+complete across twelve subsystems, and thirteen patches are in the tree — but
+conformance against a real device currently sits at 8 of 30 probes. Fonts,
+audio, the WebGL parameter tables and much else still report the host.
+
+Nothing here is usable yet. Watch releases rather than cloning expectantly.
+
+What does work end to end: a Linux host can present a coherent macOS identity
+across `navigator.platform`, `userAgentData`, every Client Hint and the User-Agent
+string, with CPU count, device memory, GPU strings, screen geometry, timezone and
+colour scheme following the same profile. 30 mapped surfaces are implemented and
+verified by capture.
 
 ## What makes it different
 

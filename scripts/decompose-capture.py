@@ -100,6 +100,9 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("capture", type=pathlib.Path)
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("corpus/blocks"))
+    ap.add_argument("--allow-foreign-brand", action="store_true",
+                    help="capture is from another Chromium browser: take only "
+                         "the hardware blocks, never the platform block")
     args = ap.parse_args()
 
     cap = json.loads(args.capture.read_text())
@@ -116,6 +119,35 @@ def main() -> int:
         print("REFUSED: capture was not taken in a secure context. Every "
               "secure-context-gated probe in it reads 'unsupported'.", file=sys.stderr)
         return 2
+    # The binary we ship is Chrome-branded Chromium and says so in its brand
+    # list, so a capture from another Chromium-derived browser cannot supply a
+    # platform block: the profile would claim Chrome while its Client Hints
+    # named a different vendor, which is a flat contradiction a page reads in
+    # one call. Edge, Brave, Opera and Vivaldi all present as Chromium plus
+    # their own brand.
+    #
+    # The hardware-shaped blocks are a different question. A GPU block is ANGLE
+    # over the same driver whatever Chromium wrapped it, and a screen is a
+    # screen. Those are probably portable — but probably is not measured, so
+    # they are only emitted on request and are stamped with the browser they
+    # came from, never silently.
+    brands = ((probe(cap, "navigator.userAgentData") or {}).get("low") or {}).get("brands") or []
+    names = [b.get("brand") for b in brands]
+    foreign = [n for n in names
+               if n and n not in ("Chromium", "Google Chrome")
+               and "Not" not in n and "Brand" not in n]
+    if foreign and not args.allow_foreign_brand:
+        print("REFUSED: capture is from %s, not Google Chrome (brands: %s)."
+              % (", ".join(foreign), ", ".join(n for n in names if n)), file=sys.stderr)
+        print("  Our binary reports 'Google Chrome', so a platform block from this",
+              file=sys.stderr)
+        print("  capture would contradict the profile it is used in.", file=sys.stderr)
+        print("  Re-capture in Google Chrome, or pass --allow-foreign-brand to take",
+              file=sys.stderr)
+        print("  only the hardware blocks (gpu, display, hardware, locale, theme).",
+              file=sys.stderr)
+        return 2
+
     failed = [k for k, v in cap["probes"].items() if not v.get("ok")]
     if failed:
         print("REFUSED: %d probe(s) failed; a partial capture makes partial "
@@ -126,6 +158,8 @@ def main() -> int:
     written = []
 
     for block, pids in BLOCK_PROBES.items():
+        if foreign and block == "platform":
+            continue
         content = {}
         for pid in pids:
             v = probe(cap, pid)
@@ -153,6 +187,9 @@ def main() -> int:
             "source_taken_at": ctx.get("taken_at"),
             "browser_version": (probe(cap, "navigator.userAgentData") or {})
                                .get("high", {}).get("uaFullVersion"),
+            "captured_browser": (foreign[0] if foreign else "Google Chrome"),
+            "captured_platform": ((probe(cap, "navigator.userAgentData") or {})
+                                  .get("high") or {}).get("platform"),
             "content_sha256": sha(content),
             "identity_sha256": sha(ident),
             "content": content,

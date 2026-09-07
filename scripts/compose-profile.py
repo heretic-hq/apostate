@@ -43,8 +43,9 @@ def load_all():
     for kind in KINDS:
         d = BLOCKS / kind
         out[kind] = sorted(
-            (json.loads(f.read_text()) | {"_path": str(f)})
-            for f in d.glob("*.json")
+            ((json.loads(f.read_text()) | {"_path": str(f)})
+             for f in d.glob("*.json")),
+            key=lambda b: (b.get("label", ""), b.get("content_sha256", "")),
         ) if d.is_dir() else []
     return out
 
@@ -63,7 +64,10 @@ def compatible(chosen):
     plat = platform_of(chosen["platform"])
     if not plat:
         return False, "platform block does not declare an OS"
-    for kind in ("gpu", "display", "hardware", "locale"):
+    # Derived from KINDS rather than listed, because listing it is how the
+    # theme block escaped the check when it was added as the sixth kind: the
+    # rule was written for five and silently kept passing four.
+    for kind in (k for k in KINDS if k != "platform"):
         b = chosen[kind]
         bp = b.get("captured_platform") or platform_of(b)
         if bp and bp != plat:

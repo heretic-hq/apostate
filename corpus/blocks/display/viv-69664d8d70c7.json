@@ -1,52 +1,52 @@
 {
   "block": "display",
-  "label": "m4-max-chrome",
-  "source_capture": "m4-max-chrome-20260907T191217Z.json",
-  "source_taken_at": "2026-09-07T19:12:16.869Z",
-  "browser_version": "152.0.7977.83",
-  "captured_browser": "Google Chrome",
-  "captured_platform": "macOS",
-  "content_sha256": "04935b095c036d9e4e8fb31e9c1526df1632e34464a43d33f83e212e740656ce",
-  "identity_sha256": "04935b095c036d9e4e8fb31e9c1526df1632e34464a43d33f83e212e740656ce",
+  "label": "viv",
+  "source_capture": "viv-20260907T204612Z.json",
+  "source_taken_at": "2026-09-07T20:46:11.948Z",
+  "browser_version": "152.0.4191.66",
+  "captured_browser": "Microsoft Edge",
+  "captured_platform": "Windows",
+  "content_sha256": "69664d8d70c7d33bdf3c106c018ae9aa02f533739ff76b7a562874de1bbfd443",
+  "identity_sha256": "69664d8d70c7d33bdf3c106c018ae9aa02f533739ff76b7a562874de1bbfd443",
   "content": {
     "screen.geometry": {
-      "width": 1728,
-      "height": 1117,
-      "availWidth": 1728,
-      "availHeight": 1003,
+      "width": 1920,
+      "height": 1080,
+      "availWidth": 1920,
+      "availHeight": 1032,
       "availLeft": 0,
-      "availTop": 33,
-      "colorDepth": 30,
-      "pixelDepth": 30,
+      "availTop": 0,
+      "colorDepth": 24,
+      "pixelDepth": 24,
       "orientation": {
         "angle": 0,
         "type": "landscape-primary"
       },
       "isExtended": false,
-      "devicePixelRatio": 2,
-      "outerWidth": 1728,
-      "outerHeight": 1000,
-      "innerWidth": 1728,
-      "innerHeight": 913,
+      "devicePixelRatio": 1,
+      "outerWidth": 1920,
+      "outerHeight": 1032,
+      "innerWidth": 1912,
+      "innerHeight": 948,
       "screenX": 0,
-      "screenY": 33
+      "screenY": 0
     },
     "screen.details": {
       "screenCount": 1,
       "currentIsPrimary": true,
       "screens": [
         {
-          "label": "Built-in Retina Display",
+          "label": "F270i-A",
           "isPrimary": true,
-          "isInternal": true,
-          "devicePixelRatio": 2,
-          "width": 1728,
-          "height": 1117,
-          "availWidth": 1728,
-          "availHeight": 1003,
+          "isInternal": false,
+          "devicePixelRatio": 1,
+          "width": 1920,
+          "height": 1080,
+          "availWidth": 1920,
+          "availHeight": 1032,
           "left": 0,
           "top": 0,
-          "colorDepth": 30,
+          "colorDepth": 24,
           "hdrHeadroom": null
         }
       ]
@@ -65,15 +65,13 @@
         "fine"
       ],
       "color-gamut": [
-        "srgb",
-        "p3"
+        "srgb"
       ],
       "display-mode": [
         "browser"
       ],
       "dynamic-range": [
-        "standard",
-        "high"
+        "standard"
       ],
       "scripting": [
         "enabled"
@@ -91,7 +89,6 @@
     "media.devices": {
       "counts": {
         "audioinput": 1,
-        "videoinput": 1,
         "audiooutput": 1
       },
       "hasLabels": false,

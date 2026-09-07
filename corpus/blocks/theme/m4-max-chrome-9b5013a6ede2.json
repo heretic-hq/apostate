@@ -4,6 +4,8 @@
   "source_capture": "m4-max-chrome-20260907T191217Z.json",
   "source_taken_at": "2026-09-07T19:12:16.869Z",
   "browser_version": "152.0.7977.83",
+  "captured_browser": "Google Chrome",
+  "captured_platform": "macOS",
   "content_sha256": "9b5013a6ede29a5f106a7b113cdc3fed894e143a181cbc7504cfcb05d92dafcd",
   "identity_sha256": "9b5013a6ede29a5f106a7b113cdc3fed894e143a181cbc7504cfcb05d92dafcd",
   "content": {

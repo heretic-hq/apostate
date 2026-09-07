@@ -169,13 +169,46 @@ is done proxy side."* Preserve that for UDP by sending `ATYP=DOMAINNAME` with th
 hostname, avoiding a DNS leak and keeping TCP and QUIC semantically identical.
 Note the 255-byte hostname cap enforced at line 260 applies equally.
 
-**Open question requiring a prototype rather than a decision on paper.** Chromium's
-QUIC binds to a peer address and `QuicConnection` tracks it for path validation
-and connection migration. With proxy-side DNS the client never learns the origin
-IP, so the socket's peer is the relay while the SOCKS header carries the real
-destination. Whether QUIC's migration and path-validation logic tolerates that
-cleanly is not answerable by reading; it needs a spike before the design is
-fixed.
+### Peer address, migration, and the bypass hazard
+
+This was recorded as an open question needing a prototype. Reading the pinned
+tree settled the architecture; what remains open is empirical rather than
+structural.
+
+Chromium's QUIC reconnects on network change through
+`QuicChromiumClientSession::Migrate(new_network, ToIPEndPoint(connection()->peer_address()), ...)`
+— **verified**, `net/quic/quic_chromium_client_session.cc:2451`. Migration
+therefore targets whatever the connection believes its peer to be.
+
+**That makes the choice of peer address a security decision, not a modelling
+one.** If the QUIC connection's peer address were the origin, then on the first
+network change Chromium would open a fresh socket **directly to the origin**,
+bypassing the proxy entirely and leaking the real client address. Every network
+transition would silently deproxy the session.
+
+So the peer address must be the relay's `BND.ADDR:BND.PORT`. The QUIC session
+believes it is talking to the relay, which is true at the transport layer, and
+the origin lives inside the SOCKS datagram header where it belongs. Migration
+then reconnects to the relay, which is the correct behaviour.
+
+The substitution point follows: `QuicSessionPool::CreateSocket` and
+`ConnectAndConfigureSocket` (`net/quic/quic_session_pool.h:478,437`) — **verified**
+— are the single factory through which both initial connection and migration
+obtain a `DatagramClientSocket`. Substituting there covers migration for free
+rather than requiring a second code path.
+
+One consequence needs handling rather than discovering later. RFC 1928 binds a
+UDP association to the client address and port given in the request, and the
+association lives only as long as its TCP control connection. On migration the
+client's source address changes, so the replacement socket needs a **new
+association** — a new control connection and a new UDP ASSOCIATE — not merely a
+new UDP socket. A `Socks5DatagramClientSocket` that establishes its association
+during `Connect()` gets this right automatically, precisely because migration
+goes through the same factory.
+
+**Still empirical, and still wants a prototype:** whether relays in practice
+tolerate association churn across migrations, and what the added handshake
+latency costs on transition. Neither blocks the design.
 
 ## Target behaviour
 

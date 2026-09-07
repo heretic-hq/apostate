@@ -165,6 +165,27 @@ machine differed because they had used different ports. The main-thread echo had
 been normalised months of iterations earlier and the worker variant was added
 later without it.
 
+### Same-OS presentation has no structural ceiling
+
+The cross-platform ceiling is entirely a cross-platform phenomenon, and that was
+tested rather than assumed.
+
+A Linux host was made to present a *different Linux device* — eight cores rather
+than thirty-two, 16GB rather than 32, 2560x1440 rather than 800x600, an NVIDIA
+RTX 3060 rather than SwiftShader, Europe/Warsaw with Polish language
+preferences, dark mode, a fine pointer with hover — and the result diffed
+against the same host's own unprofiled capture.
+
+**Every field that differed was one the profile set.** Fonts, canvas, client
+rects, codecs, audio render, WebGPU, keyboard layout, media devices, speech
+voices and WebRTC capabilities all conform exactly. Those are precisely the
+surfaces that were unreachable across platforms.
+
+So the ~192 structurally blocked fields in the cross-OS case are not a property
+of the approach; they are the cost of asking a host to produce resources it does
+not have. Presenting a device of the same platform family leaves nothing
+leaking.
+
 ### Measured: what a profile can and cannot reach across platforms
 
 A Linux host was made to present a macOS M4 Max, and the result diffed against

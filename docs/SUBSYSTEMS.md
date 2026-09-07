@@ -33,7 +33,7 @@ correct, passes casual inspection, and leaks. Patching only the second leaves
 `GPUInfo` disagreeing with WebGL, which is a coherence break of its own.
 
 So every ledger row needs its emitter identified as a *source* rather than a
-waypoint, and both must be handled where two exist. Note also line 4122: the
+waypoint, and both must be handled where two exist. Note also line 4107: the
 *masked* `GL_RENDERER` already returns the constant `"WebKit WebGL"`, so the
 masked and unmasked paths are separate and must not be conflated.
 

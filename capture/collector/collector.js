@@ -522,11 +522,38 @@
     Object.keys(Q).forEach(function (feat) {
       out[feat] = Q[feat].filter(function (v) { return matchMedia("(" + feat + ":" + v + ")").matches; });
     });
-    ["color", "color-index", "monochrome", "device-pixel-ratio", "resolution"].forEach(function (f) {
+    // Integer equality only ever finds integer values, so every fractional
+    // device-pixel-ratio reported null. These are range features: bisect on
+    // min-* instead, which is also how a detector reads them without ever
+    // touching window.devicePixelRatio.
+    ["color", "color-index", "monochrome"].forEach(function (f) {
       var v = null;
       for (var i = 0; i <= 64; i++) { if (matchMedia("(" + f + ":" + i + ")").matches) { v = i; break; } }
       out[f] = v;
     });
+
+    function bisect(query, lo, hi, unit, iterations) {
+      // WebKit-prefixed features take the prefix before "min", not after:
+      // -webkit-min-device-pixel-ratio, never min--webkit-device-pixel-ratio.
+      var minName = query.indexOf("-webkit-") === 0
+          ? "-webkit-min-" + query.slice(8)
+          : "min-" + query;
+      if (!matchMedia("(" + minName + ":" + lo + (unit || "") + ")").matches) return null;
+      for (var i = 0; i < iterations; i++) {
+        var mid = (lo + hi) / 2;
+        if (matchMedia("(" + minName + ":" + mid + (unit || "") + ")").matches) {
+          lo = mid;
+        } else {
+          hi = mid;
+        }
+      }
+      return lo;
+    }
+    // 40 iterations resolves far below any value a display reports, which is
+    // the point: the precision recoverable this way is the fingerprint.
+    out["-webkit-device-pixel-ratio"] =
+        bisect("-webkit-device-pixel-ratio", 0, 16, "", 40);
+    out["resolution"] = bisect("resolution", 0, 2000, "dppx", 40);
     return out;
   });
 
@@ -764,6 +791,66 @@
     var res = await fetch("/echo", { headers: { "X-Apostate-Probe": "1" } });
     must(res.ok, "echo endpoint returned " + res.status);
     return await res.json();
+  });
+
+  probe("headers.echo_worker", { deterministic: true }, async function () {
+    // Whether a worker-initiated fetch carries Client Hints cannot be answered
+    // from the renderer's own view; only the server sees what arrived. A
+    // difference against headers.echo is a real divergence between scopes.
+    must(global.Worker, "Worker unsupported");
+    var echoUrl = new URL("/echo", location.href).href;
+    var src = "self.onmessage=function(e){" +
+      "fetch(e.data).then(function(r){return r.json()}).then(function(j){postMessage(j)})" +
+      ".catch(function(err){postMessage({__error:String(err&&err.message||err)})})};";
+    var url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+    try {
+      var w = new Worker(url);
+      var result = await new Promise(function (resolve, reject) {
+        var t = setTimeout(function () { reject(new Error("worker fetch timed out")); }, 5000);
+        w.onmessage = function (e) { clearTimeout(t); resolve(e.data); };
+        w.onerror = function (e) { clearTimeout(t); reject(new Error(e.message || "worker error")); };
+        w.postMessage(echoUrl);
+      });
+      w.terminate();
+      return result;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  });
+
+  probe("screen.details", { deterministic: true }, async function () {
+    // getScreenDetails exposes the OS display label, HDR headroom and colour
+    // primaries that no other API surfaces, and its devicePixelRatio is the raw
+    // scale factor rather than the zoom-multiplied one.
+    must(global.getScreenDetails, "getScreenDetails unsupported");
+    var state = navigator.permissions
+      ? (await navigator.permissions.query({ name: "window-management" })).state
+      : "unknown";
+    if (state !== "granted") {
+      // Requesting would prompt, and a prompt during capture changes what is
+      // being measured. Report the gap instead of silently returning nothing.
+      throw new Error("window-management permission is '" + state + "'; grant it and re-capture");
+    }
+    var details = await global.getScreenDetails();
+    return {
+      screenCount: details.screens.length,
+      currentIsPrimary: details.currentScreen.isPrimary,
+      screens: details.screens.map(function (s) {
+        return {
+          label: s.label, isPrimary: s.isPrimary, isInternal: s.isInternal,
+          devicePixelRatio: s.devicePixelRatio,
+          width: s.width, height: s.height,
+          availWidth: s.availWidth, availHeight: s.availHeight,
+          left: s.left, top: s.top, colorDepth: s.colorDepth,
+          hdrHeadroom: typeof s.highDynamicRangeHeadroom === "number"
+            ? s.highDynamicRangeHeadroom : null,
+          redPrimaryX: s.redPrimaryX, redPrimaryY: s.redPrimaryY,
+          greenPrimaryX: s.greenPrimaryX, greenPrimaryY: s.greenPrimaryY,
+          bluePrimaryX: s.bluePrimaryX, bluePrimaryY: s.bluePrimaryY,
+          whitePointX: s.whitePointX, whitePointY: s.whitePointY
+        };
+      })
+    };
   });
 
   // ---------------------------------------------------------------- context

@@ -20,6 +20,7 @@ import pathlib
 import re
 import socket
 import sys
+import threading
 
 COLLECTOR_DIR = pathlib.Path(__file__).resolve().parent.parent / "collector"
 MAX_BODY = 64 * 1024 * 1024  # captures carry raw PNG and audio payloads
@@ -113,6 +114,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         summarise(capture, path)
         self._json(200, {"ok": True, "path": str(path)})
 
+        if self.server.exit_after_capture:
+            # Scripted runs otherwise have to kill this process by name, and a
+            # pattern that matches "receive.py" also matches the ssh command
+            # line invoking it — which kills the caller's own session. Exiting
+            # on our own removes the need for any pkill at all.
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+
 
 def summarise(capture: dict, path: pathlib.Path) -> None:
     probes = capture.get("probes") or {}
@@ -146,6 +154,8 @@ def main() -> None:
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("resources/fingerprints/raw"))
     ap.add_argument("--port", type=int, default=8777)
     ap.add_argument("--bind", default="0.0.0.0")
+    ap.add_argument("--once", action="store_true",
+                    help="exit after the first capture is stored")
     args = ap.parse_args()
 
     if not (COLLECTOR_DIR / "collector.js").exists():
@@ -155,12 +165,19 @@ def main() -> None:
     Handler.out_dir.mkdir(parents=True, exist_ok=True)
 
     srv = http.server.ThreadingHTTPServer((args.bind, args.port), Handler)
+    # Request threads are non-daemon by default, so serve_forever() returning
+    # is not enough to end the process — it waits for them. --once would then
+    # store a capture and hang, which is the opposite of the point.
+    srv.daemon_threads = True
+    srv.exit_after_capture = args.once
     print(f"capture receiver on :{args.port}   writing to {Handler.out_dir}")
     print(f"  this machine   http://localhost:{args.port}/")
     print(f"  other devices  http://{lan_ip()}:{args.port}/")
     print("\nOpen in a normal browser window. Ctrl-C to stop.")
     try:
         srv.serve_forever()
+        if args.once:
+            print("captured; exiting")
     except KeyboardInterrupt:
         print("\nstopped")
 

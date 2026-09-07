@@ -96,6 +96,18 @@ confirmation of an obvious next step are not material decisions.
 
 When genuinely blocked, ask with a recommendation rather than a survey.
 
+## Process-matching in scripts
+
+Never `pkill -f <pattern>` or `pgrep -f <pattern>` where the pattern also
+appears in the command line doing the matching — it matches itself. This has
+cost time four times in this project: it killed an ssh session mid-checkout, it
+stalled a build watcher that never cleared, and once it produced a false process
+count that nearly triggered a fix to code that already worked.
+
+Use a self-excluding pattern (`receiv[e].py`), match on a PID captured at start,
+or make the process exit on its own. `capture/server/receive.py --once` exists
+for exactly that reason.
+
 ## The shared checkout
 
 `.workspace/src` is shared: mapping work cites line numbers from it while patch

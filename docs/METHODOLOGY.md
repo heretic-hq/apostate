@@ -144,6 +144,45 @@ So a capture must record the exact browser build, and a reference is only a
 valid V3 target for a binary of the same version. Rebasing onto a new Chromium
 means re-capturing the references, not just re-applying the patches.
 
+### Measured: what a profile can and cannot reach across platforms
+
+A Linux host was made to present a macOS M4 Max, and the result diffed against
+that machine. Against 319 differing fields with no profile, the profile closed
+77. The remainder is not a to-do list — most of it is not reachable by any
+patch.
+
+| kind | fields | why |
+|---|---|---|
+| closed by the profile | 77 | values the browser chooses |
+| **fonts** | 85 | the host does not have the font files |
+| **WebGL parameter tables** | 78 | ANGLE hard-codes them per backend; Linux cannot run Metal |
+| canvas renders | 8 | follows fonts and the raster backend |
+| codecs, WebGPU adapter, voices, keyboard, media devices | 17 | OS-provided resources the host lacks |
+| audio render | 4 | CPUID-selected FFT kernel and host libm |
+| still patchable | ~50 | headers, layout, remaining media queries |
+
+So roughly three fifths of the cross-platform gap is structural: the host does
+not possess the resource, and no value can be substituted for it. That bounds
+what cross-OS presentation can honestly claim.
+
+Two consequences follow, and both are product decisions rather than engineering
+ones.
+
+**Same-OS profiles are a different proposition from cross-OS ones.** A Linux
+host presenting a Linux device has no font gap, no backend gap and no ISA gap;
+the structural ceiling largely disappears and what remains is patchable. That is
+where a coherent browser is achievable today.
+
+**Cross-OS presentation requires provisioning the host, not patching the
+browser.** Installing the claimed platform's fonts is the single largest
+recovery available — 85 fields, more than the profile currently closes in total.
+The remaining backend and ISA terms cannot be provisioned at all, which is why
+profiles must be partitioned by ANGLE backend and CPU ISA class.
+
+None of this was assumed. The comparison that produced it — an unprofiled build
+against the same reference — is the control, and it is worth re-running whenever
+the claim about what is reachable changes.
+
 ## 6. Verification tiers
 
 A change is not done until it passes the tier its ledger row names.

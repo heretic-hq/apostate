@@ -112,6 +112,19 @@ absent.
 all preceding patches in the series, not against pristine. Reset the checkout
 and apply `head -N patches/series` before copying the files to edit.
 
+**Never use `git diff` to produce the patch.** The applied series lives in the
+checkout as *uncommitted* working-tree changes, so `git diff` reports every
+preceding patch's hunks as well as yours. It looks right — the file paths are
+the ones you edited — and it silently folds sixteen other patches into your
+one. It only stays clean when no earlier patch touched the same file, which is
+how patch 0017 got away with it and patch 0018 would not have.
+
+The method that works: copy the files you are about to edit to a scratch tree,
+edit them, `apply-patches.sh` to restore the series base, copy the *base*
+versions to a second scratch tree, then `git diff --no-index base new` and
+rewrite the two path prefixes. The diff then contains your change and nothing
+else. Verify by applying the whole series from pristine before committing.
+
 ## Process-matching in scripts
 
 Never `pkill -f <pattern>` or `pgrep -f <pattern>` where the pattern also

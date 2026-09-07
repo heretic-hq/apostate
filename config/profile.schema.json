@@ -100,7 +100,7 @@
             24,
             30
           ],
-          "description": "Chromium uses this as an HDR flag rather than a bit depth; only 24 and 30 exist, and the same fact drives CSS color, dynamic-range and color-gamut."
+          "description": "Chromium uses this as an HDR flag rather than a bit depth; only 24 and 30 exist. It drives screen.colorDepth and screen.pixelDepth only. The dynamic-range and color-gamut media features come from color_gamut and hdr below, not from this: conformance showed colorDepth matching the reference device while both media features did not."
         },
         "avail_left": {
           "type": "integer"
@@ -108,6 +108,19 @@
         "avail_top": {
           "type": "integer",
           "description": "Height of the menu bar on macOS or a top-docked taskbar on Windows. Not derivable from the sizes: a total inset says nothing about how it splits above and below."
+        },
+        "color_gamut": {
+          "type": "string",
+          "enum": [
+            "srgb",
+            "p3",
+            "rec2020"
+          ],
+          "description": "Display gamut. With hdr, produces ScreenInfo::display_color_spaces, the single source of truth for the color-gamut and dynamic-range media features."
+        },
+        "hdr": {
+          "type": "boolean",
+          "description": "Whether the display has HDR headroom. Not independent of color_gamut: an HDR color space implies a wide gamut, so hdr true with color_gamut srgb describes a display that cannot exist and is derived as p3."
         }
       }
     },

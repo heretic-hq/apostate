@@ -25,7 +25,12 @@ Notes:
   - Reuses the existing SOCKS_UNEXPECTED_AUTH and SOCKS_UNEXPECTED_VERSION
     NetLog events. Dedicated auth phase events would need
     net_log_event_type_list.h and are left to a follow-up.
-
+  - Tests cover the authenticated handshake, credential rejection, and a proxy
+    answering 0xFF when no credentials were configured. The existing
+    CompleteHandshake test is the regression guard for the unauthenticated
+    greeting staying byte-identical.
+    NetLog events. Dedicated auth phase events would need
+    net_log_event_type_list.h and are left to a follow-up.
 diff --git a/net/socket/socks5_client_socket.cc b/net/socket/socks5_client_socket.cc
 index 3eeeb7e..ca2b9ea 100644
 --- a/net/socket/socks5_client_socket.cc
@@ -388,3 +393,146 @@ index fe8da48..9966b5b 100644
    NetLogWithSource net_log_;
  
    // Traffic annotation for socket control.
+diff --git a/net/socket/socks5_client_socket_unittest.cc b/net/socket/socks5_client_socket_unittest.cc
+index 88d275f..61bbeba 100644
+--- a/net/socket/socks5_client_socket_unittest.cc
++++ b/net/socket/socks5_client_socket_unittest.cc
+@@ -59,7 +59,8 @@ class SOCKS5ClientSocketTest : public PlatformTest, public WithTaskEnvironment {
+       base::span<const MockWrite> writes,
+       std::string_view hostname,
+       int port,
+-      NetLog* net_log);
++      NetLog* net_log,
++      std::optional<SOCKS5Credentials> credentials = std::nullopt);
+ 
+   void SetUp() override;
+ 
+@@ -91,7 +92,8 @@ std::unique_ptr<SOCKS5ClientSocket> SOCKS5ClientSocketTest::BuildMockSocket(
+     base::span<const MockWrite> writes,
+     std::string_view hostname,
+     int port,
+-    NetLog* net_log) {
++    NetLog* net_log,
++    std::optional<SOCKS5Credentials> credentials) {
+   TestCompletionCallback callback;
+   data_ = std::make_unique<StaticSocketDataProvider>(reads, writes);
+   auto tcp_sock = std::make_unique<MockTCPClientSocket>(address_list_, net_log,
+@@ -106,9 +108,115 @@ std::unique_ptr<SOCKS5ClientSocket> SOCKS5ClientSocketTest::BuildMockSocket(
+ 
+   // The SOCKS5ClientSocket takes ownership of |tcp_sock_|, but keep a
+   // non-owning pointer to it.
+-  return std::make_unique<SOCKS5ClientSocket>(std::move(tcp_sock),
+-                                              HostPortPair(hostname, port),
+-                                              TRAFFIC_ANNOTATION_FOR_TESTS);
++  return std::make_unique<SOCKS5ClientSocket>(
++      std::move(tcp_sock), HostPortPair(hostname, port),
++      TRAFFIC_ANNOTATION_FOR_TESTS, std::move(credentials));
++}
++
++namespace {
++
++// Greeting offering both "no authentication" and username/password, which is
++// what is sent when credentials are configured.
++constexpr auto kSOCKS5AuthGreetRequestData =
++    std::to_array<char>({0x05, 0x02, 0x00, 0x02});
++const std::string_view kSOCKS5AuthGreetRequest(
++    kSOCKS5AuthGreetRequestData.begin(),
++    kSOCKS5AuthGreetRequestData.end());
++
++// Server selects username/password.
++constexpr auto kSOCKS5AuthGreetResponseData =
++    std::to_array<char>({0x05, 0x02});
++const std::string_view kSOCKS5AuthGreetResponse(
++    kSOCKS5AuthGreetResponseData.begin(), kSOCKS5AuthGreetResponseData.end());
++
++// RFC 1929 request for user "u" / password "pw".
++constexpr auto kSOCKS5AuthRequestData =
++    std::to_array<char>({0x01, 0x01, 'u', 0x02, 'p', 'w'});
++const std::string_view kSOCKS5AuthRequest(kSOCKS5AuthRequestData.begin(),
++                                          kSOCKS5AuthRequestData.end());
++
++constexpr auto kSOCKS5AuthOkResponseData = std::to_array<char>({0x01, 0x00});
++const std::string_view kSOCKS5AuthOkResponse(
++    kSOCKS5AuthOkResponseData.begin(), kSOCKS5AuthOkResponseData.end());
++
++constexpr auto kSOCKS5AuthFailResponseData = std::to_array<char>({0x01, 0x01});
++const std::string_view kSOCKS5AuthFailResponse(
++    kSOCKS5AuthFailResponseData.begin(), kSOCKS5AuthFailResponseData.end());
++
++// "No acceptable methods" — what a proxy requiring credentials answers when
++// none were offered.
++constexpr auto kSOCKS5NoAcceptableMethodsData =
++    std::to_array<char>({0x05, '\xFF'});
++const std::string_view kSOCKS5NoAcceptableMethods(
++    kSOCKS5NoAcceptableMethodsData.begin(),
++    kSOCKS5NoAcceptableMethodsData.end());
++
++}  // namespace
++
++// A full handshake where the proxy selects username/password authentication.
++TEST_F(SOCKS5ClientSocketTest, AuthenticatedHandshake) {
++  const char kOkRequest[] = {
++    0x05,  // Version
++    0x01,  // Command (CONNECT)
++    0x00,  // Reserved.
++    0x03,  // Address type (DOMAINNAME).
++    0x09,  // Length of domain (9)
++    'l', 'o', 'c', 'a', 'l', 'h', 'o', 's', 't',
++    0x00, 0x50,  // 16-bit port (80)
++  };
++
++  MockWrite data_writes[] = {
++      MockWrite(ASYNC, kSOCKS5AuthGreetRequest),
++      MockWrite(ASYNC, kSOCKS5AuthRequest),
++      MockWrite(ASYNC, base::as_byte_span(kOkRequest))};
++  MockRead data_reads[] = {MockRead(ASYNC, kSOCKS5AuthGreetResponse),
++                           MockRead(ASYNC, kSOCKS5AuthOkResponse),
++                           MockRead(ASYNC, kSOCKS5OkResponse)};
++
++  user_sock_ = BuildMockSocket(data_reads, data_writes, "localhost", 80,
++                               NetLog::Get(), SOCKS5Credentials("u", "pw"));
++
++  int rv = user_sock_->Connect(callback_.callback());
++  EXPECT_THAT(rv, IsError(ERR_IO_PENDING));
++  EXPECT_FALSE(user_sock_->IsConnected());
++
++  rv = callback_.WaitForResult();
++  EXPECT_THAT(rv, IsOk());
++  EXPECT_TRUE(user_sock_->IsConnected());
++}
++
++// A proxy that rejects the credentials must fail the connection rather than
++// proceeding to the CONNECT request.
++TEST_F(SOCKS5ClientSocketTest, AuthenticationRejected) {
++  MockWrite data_writes[] = {MockWrite(ASYNC, kSOCKS5AuthGreetRequest),
++                             MockWrite(ASYNC, kSOCKS5AuthRequest)};
++  MockRead data_reads[] = {MockRead(ASYNC, kSOCKS5AuthGreetResponse),
++                           MockRead(ASYNC, kSOCKS5AuthFailResponse)};
++
++  user_sock_ = BuildMockSocket(data_reads, data_writes, "localhost", 80,
++                               NetLog::Get(), SOCKS5Credentials("u", "pw"));
++
++  int rv = user_sock_->Connect(callback_.callback());
++  EXPECT_THAT(rv, IsError(ERR_IO_PENDING));
++  rv = callback_.WaitForResult();
++  EXPECT_THAT(rv, IsError(ERR_SOCKS_CONNECTION_FAILED));
++  EXPECT_FALSE(user_sock_->IsConnected());
++}
++
++// Without credentials the greeting is unchanged, so a proxy that requires
++// authentication answers 0xFF and the connection fails.
++TEST_F(SOCKS5ClientSocketTest, NoAcceptableAuthMethods) {
++  MockWrite data_writes[] = {MockWrite(ASYNC, kSOCKS5GreetRequest)};
++  MockRead data_reads[] = {MockRead(ASYNC, kSOCKS5NoAcceptableMethods)};
++
++  user_sock_ = BuildMockSocket(data_reads, data_writes, "localhost", 80,
++                               NetLog::Get());
++
++  int rv = user_sock_->Connect(callback_.callback());
++  EXPECT_THAT(rv, IsError(ERR_IO_PENDING));
++  rv = callback_.WaitForResult();
++  EXPECT_THAT(rv, IsError(ERR_SOCKS_CONNECTION_FAILED));
++  EXPECT_FALSE(user_sock_->IsConnected());
+ }
+ 
+ // Tests a complete SOCKS5 handshake and the disconnection.

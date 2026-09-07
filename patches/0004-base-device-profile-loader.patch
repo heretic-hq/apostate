@@ -37,11 +37,16 @@ rarely probed signal for a hard usability failure.
 Memory is parsed but not yet consumed: navigator.deviceMemory needs the value
 rounded the way Blink rounds it, which is the next increment.
 
-Known limits of this increment, recorded rather than glossed: the profile is
+The profile parses on first Get() rather than from an explicit startup hook.
+The command line is fully populated before anything in base runs, so there is no
+window in which that could be too early — and it removes the ordering hazard
+completely, since there is no call site to place correctly and no process type
+that can be forgotten by omitting one.
+
+Known limit of this increment, recorded rather than glossed: the profile is
 carried inline on the command line, which is fine for scalars and will not hold
-the font lists and WebGL tables a full profile needs — that wants the shared
-memory handle the field trial machinery already uses. And the switch is not yet
-propagated to child processes, so this reaches the browser process only.
+the font lists and WebGL tables a full profile needs. That wants the shared
+memory handle the field trial machinery already uses.
 
 diff --git a/base/BUILD.gn b/base/BUILD.gn
 index ddcc03b..87e4cdc 100644
@@ -58,10 +63,10 @@ index ddcc03b..87e4cdc 100644
      "system/sys_info_internal.h",
 diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
 new file mode 100644
-index 0000000..72a5da4
+index 0000000..2d479a8
 --- /dev/null
 +++ b/base/apostate/profile.cc
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,110 @@
 +// Copyright 2026 The Apostate Authors
 +// Use of this source code is governed by a GPL-3.0 license that can be
 +// found in the LICENSE file.
@@ -83,10 +88,6 @@ index 0000000..72a5da4
 +
 +namespace {
 +
-+// Owned for process lifetime. Written once during InitializeFromCommandLine and
-+// read without locking thereafter, which is only sound because initialisation
-+// happens before any consumer runs.
-+const Profile* g_profile = nullptr;
 +const Profile* g_profile_for_testing = nullptr;
 +
 +}  // namespace
@@ -99,7 +100,23 @@ index 0000000..72a5da4
 +  if (g_profile_for_testing) {
 +    return g_profile_for_testing;
 +  }
-+  return g_profile;
++
++  // Initialised on first use rather than from an explicit startup hook.
++  //
++  // The command line is fully populated before anything in base runs, so there
++  // is no window in which this could parse too early. Doing it here instead of
++  // from content's startup sequence removes the ordering hazard entirely —
++  // there is no call site to place correctly, and no process type that can be
++  // forgotten. Function-local static initialisation is thread-safe.
++  static const Profile* const profile = [] {
++    const CommandLine* command_line = CommandLine::ForCurrentProcess();
++    if (!command_line->HasSwitch(switches::kApostateProfile)) {
++      return static_cast<const Profile*>(nullptr);
++    }
++    return static_cast<const Profile*>(ParseOrNull(
++        command_line->GetSwitchValueASCII(switches::kApostateProfile)));
++  }();
++  return profile;
 +}
 +
 +// static
@@ -159,28 +176,13 @@ index 0000000..72a5da4
 +  return profile.release();
 +}
 +
-+// static
-+void Profile::InitializeFromCommandLine() {
-+  if (g_profile) {
-+    return;
-+  }
-+
-+  const CommandLine* command_line = CommandLine::ForCurrentProcess();
-+  if (!command_line->HasSwitch(switches::kApostateProfile)) {
-+    return;
-+  }
-+
-+  g_profile = ParseOrNull(
-+      command_line->GetSwitchValueASCII(switches::kApostateProfile));
-+}
-+
 +}  // namespace base::apostate
 diff --git a/base/apostate/profile.h b/base/apostate/profile.h
 new file mode 100644
-index 0000000..3d896d8
+index 0000000..ff33d3d
 --- /dev/null
 +++ b/base/apostate/profile.h
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,86 @@
 +// Copyright 2026 The Apostate Authors
 +// Use of this source code is governed by a GPL-3.0 license that can be
 +// found in the LICENSE file.
@@ -217,13 +219,12 @@ index 0000000..3d896d8
 +// host's, because it is wrong in a way nothing can predict.
 +class BASE_EXPORT Profile {
 + public:
-+  // Parses the profile from the current process's command line. Idempotent, and
-+  // safe to call before most of base is initialised. Must be called before any
-+  // consumer reads a value; consumers that run earlier will see no profile.
-+  static void InitializeFromCommandLine();
-+
 +  // Null when this process has no profile. Never owns; valid for process
 +  // lifetime.
++  //
++  // Parses on first call. The command line is fully populated before anything
++  // in base runs, so there is no startup hook to place correctly and no process
++  // type that can be forgotten by omitting one.
 +  static const Profile* Get();
 +
 +  // Overrides the profile for tests. Passing nullptr clears it.

@@ -2,3 +2,4 @@
 0002-embedder-support-no-headless-token.patch
 0003-content-no-automation-controlled-from-switches.patch
 0004-base-device-profile-loader.patch
+0005-chrome-propagate-profile-to-children.patch

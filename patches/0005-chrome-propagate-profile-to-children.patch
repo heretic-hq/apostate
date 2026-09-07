@@ -1,0 +1,39 @@
+Subject: [PATCH] chrome: propagate the device profile to every child process
+
+The profile loader reaches only the browser process without this, which makes it
+useless for almost everything it exists to do.
+
+deviceMemory is the worked example. ApproximatedDeviceMemory is a per-process
+static computed independently in the browser, for the Device-Memory request
+header, and in the renderer, for navigator.deviceMemory. A profile reaching only
+one of them makes the header a server receives contradict the value JavaScript
+reports — a contradiction trivially checked server-side and invisible from
+inside the renderer.
+
+kCommonSwitchNames is copied for every child process type, which is why the
+switch belongs there rather than in a per-type list: the GPU process needs the
+profile for GPUInfo, the network process for proxy configuration, and any
+process type added later gets it without another edit.
+
+Ledger: profile.loader-reach.
+
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 8436913..5130820 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -2951,6 +2951,15 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+   static const char* const kCommonSwitchNames[] = {
+       embedder_support::kUserAgent,
+       switches::kUserDataDir,  // Make logs go to the right file.
++      // Apostate: the device profile must reach every process type, not just
++      // renderers. deviceMemory is the worked example — it is computed
++      // independently in the browser for the Device-Memory request header and
++      // in the renderer for navigator.deviceMemory, so a profile that reaches
++      // only one of them makes the header contradict JavaScript. GPU and
++      // network processes have their own reasons. This list is copied for every
++      // child, which is why the switch belongs here rather than in a
++      // per-process-type list.
++      ::switches::kApostateProfile,
+   };
+   command_line->CopySwitchesFrom(browser_command_line, kCommonSwitchNames);
+ 

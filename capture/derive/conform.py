@@ -94,6 +94,14 @@ def normalise_headers(value):
     return out
 
 
+def browser_version(capture):
+    """Full browser version from the capture, or None."""
+    probe = capture.get("probes", {}).get("navigator.userAgentData")
+    if not (probe and probe.get("ok")):
+        return None
+    return (probe["value"].get("high") or {}).get("uaFullVersion")
+
+
 def diff(a, b, path=()):
     """Yield (path, reference, subject) for every leaf that differs."""
     if type(a) is not type(b) and not (isinstance(a, (int, float)) and isinstance(b, (int, float))):
@@ -141,11 +149,26 @@ def main() -> int:
         return 2
 
     volatile = ALWAYS_VOLATILE | measured_volatility(ref) | measured_volatility(sub)
+
+    # A profile is only replayable by a binary of the same browser build.
+    # Apostate deliberately does not spoof its own version — the binary really
+    # is the Chromium it reports, and claiming otherwise would require behaving
+    # like that version. So a reference captured from a different point release
+    # differs in ways no patch should fix, and reporting those as failures
+    # buries the ones that matter.
+    ref_ver = browser_version(ref)
+    sub_ver = browser_version(sub)
+    version_mismatch = ref_ver and sub_ver and ref_ver != sub_ver
     volatile_paths = {(pid, ".".join(rest) if isinstance(rest, tuple) else rest)
                       for pid, rest in VOLATILE_PATHS}
 
     print(f"reference : {ref['context'].get('label')}  {ref['context']['ua'][:64]}")
     print(f"subject   : {sub['context'].get('label')}  {sub['context']['ua'][:64]}")
+    if version_mismatch:
+        print(f"\n  NOTE: browser builds differ — reference {ref_ver}, subject {sub_ver}.")
+        print("  Version-bearing fields will differ and no patch should change that:")
+        print("  the binary really is the version it reports. Match the reference build")
+        print("  to the build under test for a clean comparison.")
     if sub["context"].get("automation_suspected"):
         print(f"  note: subject reports automation signals: {sub['context'].get('automation_signals')}")
     print()

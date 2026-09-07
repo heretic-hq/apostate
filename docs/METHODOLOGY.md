@@ -128,6 +128,22 @@ Four artifacts. All work attaches to one of them.
    is a broken edge rather than a wrong value, so edges are first-class rows
    with their own owner, not comments on other rows.
 
+### A profile is only replayable by the build it was captured from
+
+Apostate does not spoof its own browser version: the binary really is the
+Chromium it reports, and claiming another would require behaving like that
+version — every feature-detection difference would contradict the claim.
+
+It follows that a capture is bound to a build. Our first V3 run compared a
+reference taken on Chrome 152.0.7977.76 against a binary built from
+152.0.7977.82, and the version-bearing fields differed in ways no patch should
+ever fix. The conformance runner reports that separately rather than counting it
+as failure.
+
+So a capture must record the exact browser build, and a reference is only a
+valid V3 target for a binary of the same version. Rebasing onto a new Chromium
+means re-capturing the references, not just re-applying the patches.
+
 ## 6. Verification tiers
 
 A change is not done until it passes the tier its ledger row names.

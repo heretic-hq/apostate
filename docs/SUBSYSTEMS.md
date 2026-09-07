@@ -205,6 +205,16 @@ bypassed `navigator.deviceMemory` entirely. Note the 10 GiB cap hides this on
 hosts above roughly 50 GiB, which is why it survived several captures
 unnoticed.
 
+## 13. Profile Composition
+
+Owns: the corpus, block decomposition, and composing profiles from blocks.
+
+Detail: `subsystems/profile-composition.md`.
+
+Trap: identical WebGL capability tables do not imply identical rendered output.
+Two GPUs can agree on every queryable limit and still rasterise differently, so
+a renderer string must never travel without the pixels that belong to it.
+
 ## 12. Speech & Sensors
 
 Owns: `speechSynthesis` voices, sensor availability, battery.

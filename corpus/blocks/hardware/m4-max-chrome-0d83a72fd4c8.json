@@ -1,0 +1,61 @@
+{
+  "block": "hardware",
+  "label": "m4-max-chrome",
+  "source_capture": "m4-max-chrome-20260907T191217Z.json",
+  "source_taken_at": "2026-09-07T19:12:16.869Z",
+  "browser_version": "152.0.7977.83",
+  "content_sha256": "0d83a72fd4c841fe1278f4b2b6ad48352295d1c0b8255bcdddd2c3ea874becf6",
+  "identity_sha256": "0d83a72fd4c841fe1278f4b2b6ad48352295d1c0b8255bcdddd2c3ea874becf6",
+  "content": {
+    "memory.heap": {
+      "jsHeapSizeLimit": 4395630592,
+      "totalJSHeapSize": 4371040,
+      "usedJSHeapSize": 3491900,
+      "deviceMemory": 32
+    },
+    "audio.properties": {
+      "sampleRate": 48000,
+      "baseLatency": 0.005333333333333333,
+      "outputLatency": 0,
+      "destinationMaxChannelCount": 2,
+      "destinationChannelCount": 2,
+      "state": "running",
+      "analyser.fftSize": 2048,
+      "analyser.frequencyBinCount": 1024,
+      "analyser.minDecibels": -100,
+      "analyser.maxDecibels": -30,
+      "analyser.smoothingTimeConstant": 0.8,
+      "compressor.threshold": {
+        "value": -24,
+        "min": -100,
+        "max": 0
+      },
+      "compressor.knee": {
+        "value": 30,
+        "min": 0,
+        "max": 40
+      },
+      "compressor.ratio": {
+        "value": 12,
+        "min": 1,
+        "max": 20
+      },
+      "compressor.attack": {
+        "value": 0.003000000026077032,
+        "min": 0,
+        "max": 1
+      },
+      "compressor.release": {
+        "value": 0.25,
+        "min": 0,
+        "max": 1
+      }
+    }
+  },
+  "logical_cores": 14,
+  "audio_buffer_frames": 256,
+  "audio_sample_rate": 48000,
+  "memory_total_bytes": 34359738368,
+  "memory_is_floor": true,
+  "evidence": "measured-floor"
+}

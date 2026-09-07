@@ -8,7 +8,8 @@
   "device_pixel_ratio": 1,
   "headed": true,
   "automation_suspected": false,
-  "automation_signals": []
+  "automation_signals": [],
+  "notes": "Launched with --disable-gpu, which makes CollectGraphicsInfoGL return the literal string 'Disabled' without querying the driver. WebGL values here are genuine (they reach the driver through the command buffer); GPUInfo values are not, and this is not a general-purpose reference capture."
  },
  "probes": {
   "navigator.scalars": {

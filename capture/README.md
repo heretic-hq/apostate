@@ -62,6 +62,35 @@ Then load it into the oracle:
 python3 corpus/build_oracle.py --src resources/fingerprints/raw
 ```
 
+## Launch flags are part of the measurement
+
+A capture describes the browser *as launched*, and some flags change what is
+being measured rather than how it is observed.
+
+`--disable-gpu` is the one that has already caused a wrong result here. It makes
+`CollectGraphicsInfoGL` return early with the literal strings `"Disabled"` for
+vendor, renderer and version, without ever calling `glGetString` — while WebGL,
+which reaches the driver through the command buffer, still reports a real ANGLE
+string. So a capture taken that way describes a configuration no real user runs,
+and it silently exempts the entire GPUInfo path from whatever is being tested.
+
+For a Linux host with no display, use software rendering explicitly rather than
+disabling GL:
+
+```sh
+chrome --headless --use-gl=angle --use-angle=swiftshader \
+       --user-data-dir=<fresh> --virtual-time-budget=20000 \
+       "http://127.0.0.1:8777/?auto=1&label=<name>"
+```
+
+`--no-sandbox` is unavoidable when running as root and is itself a deviation
+from a normal launch; prefer a non-root user where possible.
+
+Captures taken before this was understood are still valid for the surfaces they
+were used for — WebGL values go through the command buffer and were genuinely
+measured — but they are not general-purpose references, and their `GPUInfo`
+values mean nothing.
+
 ## Measuring variance
 
 `conform.py` is also how a field's natural variance gets established: point it

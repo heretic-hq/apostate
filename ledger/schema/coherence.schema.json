@@ -5,13 +5,23 @@
   "description": "A constraint between surfaces that must hold simultaneously. Most real detections are a broken edge rather than a wrong value, so edges are first-class rows with their own owner.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "members", "constraint", "evidence"],
+  "required": [
+    "id",
+    "members",
+    "constraint",
+    "evidence"
+  ],
   "properties": {
-    "id": { "type": "string", "pattern": "^coh\\.[a-z0-9]+(?:[.-][a-z0-9]+)*$" },
+    "id": {
+      "type": "string",
+      "pattern": "^coh\\.[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+    },
     "members": {
       "type": "array",
       "minItems": 2,
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Surface ledger ids bound by this constraint."
     },
     "constraint": {
@@ -19,12 +29,19 @@
       "description": "The relation in plain language, e.g. 'navigator.platform, UA OS token and Client Hints platform must name the same OS'."
     },
     "check": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Executable predicate over a collected fingerprint, used by the V3 conformance runner."
     },
     "severity": {
       "type": "string",
-      "enum": ["fatal", "strong", "weak"],
+      "enum": [
+        "fatal",
+        "strong",
+        "weak"
+      ],
       "description": "fatal: a violation is decisive on its own. strong: decisive when corroborated. weak: never sufficient alone. Mirrors the ruling algebra so weak signals cannot accumulate into false certainty."
     },
     "evidence": {
@@ -33,15 +50,74 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["tier", "source"],
+        "required": [
+          "tier",
+          "source"
+        ],
         "properties": {
-          "tier": { "type": "string", "enum": ["T0", "T1", "T2", "T3"] },
-          "source": { "type": "string" },
-          "note": { "type": "string" }
+          "tier": {
+            "type": "string",
+            "enum": [
+              "T0",
+              "T1",
+              "T2",
+              "T3"
+            ]
+          },
+          "source": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
         }
       }
     },
-    "status": { "type": "string", "enum": ["proposed", "open", "resolved", "dropped"] },
-    "notes": { "type": "string" }
-  }
+    "status": {
+      "type": "string",
+      "enum": [
+        "proposed",
+        "open",
+        "resolved",
+        "dropped"
+      ],
+      "description": "May only become 'resolved' on T0 or T1 evidence. T2 and T3 can open a row, never close one. See docs/METHODOLOGY.md \u00a73."
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "resolved"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "evidence": {
+            "contains": {
+              "properties": {
+                "tier": {
+                  "enum": [
+                    "T0",
+                    "T1"
+                  ]
+                }
+              },
+              "required": [
+                "tier"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
 }

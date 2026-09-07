@@ -6,8 +6,8 @@
   "browser_version": "152.0.4191.66",
   "captured_browser": "Microsoft Edge",
   "captured_platform": "Windows",
-  "content_sha256": "a808334a43c18109c2ad7d1867711c489afeac263fa75555f161fe88f3953591",
-  "identity_sha256": "9ade9f376be3d2ce7cab7b701fc85fb2ba829cd822892a6921b9ebcb3e8fea54",
+  "content_sha256": "2aecc1ea59a8ce6904de52adc8651ef875931d22dd42b84d001b625aeaff0cc5",
+  "identity_sha256": "f50cdf18687d55bd96ae46077bafc6c856aedb321f60423e2037280f3f2344ec",
   "content": {
     "webgl1": {
       "unmaskedVendor": "Google Inc. (NVIDIA)",
@@ -788,7 +788,136 @@
         "width": 44.390625,
         "height": 14
       }
-    ]
+    ],
+    "codecs.media": {
+      "decodingInfo": [
+        {
+          "config": {
+            "contentType": "video/mp4; codecs=\"avc1.42E01E\"",
+            "width": 1920,
+            "height": 1080,
+            "bitrate": 2000000,
+            "framerate": 30
+          },
+          "result": {
+            "powerEfficient": true,
+            "smooth": true,
+            "supported": true,
+            "keySystemAccess": null
+          }
+        },
+        {
+          "config": {
+            "contentType": "video/webm; codecs=\"vp09.00.10.08\"",
+            "width": 1920,
+            "height": 1080,
+            "bitrate": 2000000,
+            "framerate": 30
+          },
+          "result": {
+            "powerEfficient": true,
+            "smooth": true,
+            "supported": true,
+            "keySystemAccess": null
+          }
+        },
+        {
+          "config": {
+            "contentType": "video/mp4; codecs=\"hev1.1.6.L93.B0\"",
+            "width": 1920,
+            "height": 1080,
+            "bitrate": 2000000,
+            "framerate": 30
+          },
+          "result": {
+            "powerEfficient": false,
+            "smooth": false,
+            "supported": false,
+            "keySystemAccess": null
+          }
+        },
+        {
+          "config": {
+            "contentType": "video/mp4; codecs=\"av01.0.05M.08\"",
+            "width": 1920,
+            "height": 1080,
+            "bitrate": 2000000,
+            "framerate": 30
+          },
+          "result": {
+            "powerEfficient": true,
+            "smooth": true,
+            "supported": true,
+            "keySystemAccess": null
+          }
+        },
+        {
+          "config": {
+            "contentType": "audio/mp4; codecs=\"mp4a.40.2\"",
+            "channels": 2,
+            "bitrate": 300000,
+            "samplerate": 44100
+          },
+          "result": {
+            "powerEfficient": true,
+            "smooth": true,
+            "supported": true,
+            "keySystemAccess": null
+          }
+        },
+        {
+          "config": {
+            "contentType": "audio/ogg; codecs=vorbis",
+            "channels": 2,
+            "bitrate": 300000,
+            "samplerate": 44100
+          },
+          "result": {
+            "powerEfficient": true,
+            "smooth": true,
+            "supported": true,
+            "keySystemAccess": null
+          }
+        },
+        {
+          "config": {
+            "contentType": "audio/ogg; codecs=opus",
+            "channels": 2,
+            "bitrate": 300000,
+            "samplerate": 48000
+          },
+          "result": {
+            "powerEfficient": true,
+            "smooth": true,
+            "supported": true,
+            "keySystemAccess": null
+          }
+        },
+        {
+          "config": {
+            "contentType": "audio/mpeg; codecs=\"mp3\"",
+            "channels": 2,
+            "bitrate": 300000,
+            "samplerate": 44100
+          },
+          "result": {
+            "powerEfficient": true,
+            "smooth": true,
+            "supported": true,
+            "keySystemAccess": null
+          }
+        }
+      ],
+      "canPlayType": {
+        "video/mp4; codecs=\"avc1.42E01E\"": "probably",
+        "video/webm": "maybe",
+        "application/vnd.apple.mpegurl": "maybe",
+        "video/ogg": "maybe",
+        "audio/mpeg": "probably",
+        "audio/ogg; codecs=\"vorbis\"": "probably",
+        "audio/wav; codecs=\"1\"": "probably"
+      }
+    }
   },
   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Ti (0x00002482) Direct3D11 vs_5_0 ps_5_0, D3D11)",
   "vendor": "Google Inc. (NVIDIA)",

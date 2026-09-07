@@ -6,8 +6,8 @@
   "browser_version": "152.0.7977.83",
   "captured_browser": "Google Chrome",
   "captured_platform": "macOS",
-  "content_sha256": "89a23489065107763317246ace55048e12763fc5f7135127420332d1c3df40fb",
-  "identity_sha256": "1d0182dc674d937781ecd8389100b770dfcde34dd1b13ee1a345067a6a765b19",
+  "content_sha256": "d7ca02a4cead656204d2cd258ad52a60f7426ffeed09094045d392ddc59af6d7",
+  "identity_sha256": "973468c89b04cfa5157be627871846557857df79121dd8d743859a6ed07338b4",
   "content": {
     "webgl1": {
       "unmaskedVendor": "Google Inc. (Apple)",
@@ -802,7 +802,136 @@
         "width": 44.3984375,
         "height": 14
       }
-    ]
+    ],
+    "codecs.media": {
+      "decodingInfo": [
+        {
+          "config": {
+            "contentType": "video/mp4; codecs=\"avc1.42E01E\"",
+            "width": 1920,
+            "height": 1080,
+            "bitrate": 2000000,
+            "framerate": 30
+          },
+          "result": {
+            "powerEfficient": true,
+            "smooth": true,
+            "supported": true,
+            "keySystemAccess": null
+          }
+        },
+        {
+          "config": {
+            "contentType": "video/webm; codecs=\"vp09.00.10.08\"",
+            "width": 1920,
+            "height": 1080,
+            "bitrate": 2000000,
+            "framerate": 30
+          },
+          "result": {
+            "powerEfficient": true,
+            "smooth": true,
+            "supported": true,
+            "keySystemAccess": null
+          }
+        },
+        {
+          "config": {
+            "contentType": "video/mp4; codecs=\"hev1.1.6.L93.B0\"",
+            "width": 1920,
+            "height": 1080,
+            "bitrate": 2000000,
+            "framerate": 30
+          },
+          "result": {
+            "powerEfficient": true,
+            "smooth": true,
+            "supported": true,
+            "keySystemAccess": null
+          }
+        },
+        {
+          "config": {
+            "contentType": "video/mp4; codecs=\"av01.0.05M.08\"",
+            "width": 1920,
+            "height": 1080,
+            "bitrate": 2000000,
+            "framerate": 30
+          },
+          "result": {
+            "powerEfficient": true,
+            "smooth": true,
+            "supported": true,
+            "keySystemAccess": null
+          }
+        },
+        {
+          "config": {
+            "contentType": "audio/mp4; codecs=\"mp4a.40.2\"",
+            "channels": 2,
+            "bitrate": 300000,
+            "samplerate": 44100
+          },
+          "result": {
+            "powerEfficient": true,
+            "smooth": true,
+            "supported": true,
+            "keySystemAccess": null
+          }
+        },
+        {
+          "config": {
+            "contentType": "audio/ogg; codecs=vorbis",
+            "channels": 2,
+            "bitrate": 300000,
+            "samplerate": 44100
+          },
+          "result": {
+            "powerEfficient": true,
+            "smooth": true,
+            "supported": true,
+            "keySystemAccess": null
+          }
+        },
+        {
+          "config": {
+            "contentType": "audio/ogg; codecs=opus",
+            "channels": 2,
+            "bitrate": 300000,
+            "samplerate": 48000
+          },
+          "result": {
+            "powerEfficient": true,
+            "smooth": true,
+            "supported": true,
+            "keySystemAccess": null
+          }
+        },
+        {
+          "config": {
+            "contentType": "audio/mpeg; codecs=\"mp3\"",
+            "channels": 2,
+            "bitrate": 300000,
+            "samplerate": 44100
+          },
+          "result": {
+            "powerEfficient": true,
+            "smooth": true,
+            "supported": true,
+            "keySystemAccess": null
+          }
+        }
+      ],
+      "canPlayType": {
+        "video/mp4; codecs=\"avc1.42E01E\"": "probably",
+        "video/webm": "maybe",
+        "application/vnd.apple.mpegurl": "maybe",
+        "video/ogg": "maybe",
+        "audio/mpeg": "probably",
+        "audio/ogg; codecs=\"vorbis\"": "probably",
+        "audio/wav; codecs=\"1\"": "probably"
+      }
+    }
   },
   "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Max, Unspecified Version)",
   "vendor": "Google Inc. (Apple)",

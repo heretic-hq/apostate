@@ -47,12 +47,19 @@ import sys
 BLOCK_PROBES = {
     "platform": [
         "navigator.userAgentData", "navigator.plugins", "api.surface",
-        "codecs.media", "wasm", "native_code.toString", "math.precision",
+        "wasm", "native_code.toString", "math.precision",
         "webrtc.capabilities", "fonts.detected", "fonts.query_api",
         "audio.offline_render", "speech.voices", "touch",
     ],
+    # codecs.media sits here rather than in platform, on evidence. Comparing a
+    # Windows VM with no GPU driver against a real Windows machine with an
+    # RTX 3070 Ti, the only codec field that differed was decodingInfo's
+    # powerEfficient on the three video codecs — false on the VM, true on the
+    # card. powerEfficient means hardware-accelerated decode, so it is a
+    # property of the GPU, not of the OS. Everything else in the probe was
+    # identical across the two machines.
     "gpu": ["webgl1", "webgl2", "webgpu", "canvas.2d", "canvas.toDataURL_variants",
-            "clientrects"],
+            "clientrects", "codecs.media"],
     "display": ["screen.geometry", "screen.details", "css.media", "media.devices"],
     "hardware": ["memory.heap", "audio.properties"],
     "locale": ["intl.locale", "keyboard.layout"],
@@ -100,6 +107,9 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("capture", type=pathlib.Path)
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("corpus/blocks"))
+    ap.add_argument("--allow-software-gpu", action="store_true",
+                    help="keep a gpu block whose renderer is a software or "
+                         "virtual rasteriser (normally skipped)")
     ap.add_argument("--allow-foreign-brand", action="store_true",
                     help="capture is from another Chromium browser: take only "
                          "the hardware blocks, never the platform block")
@@ -233,6 +243,26 @@ def main() -> int:
 
         if block == "gpu":
             g = content.get("webgl1") or {}
+            # A software or virtual renderer is a real measurement of a real
+            # machine, and it is not a machine any consumer profile should
+            # claim. "Microsoft Basic Render Driver" is what Windows falls back
+            # to with no GPU driver, which is the signature of a VM — it says
+            # data centre as loudly as anything a page can read. Blocked here
+            # rather than at composition time, so it never enters the corpus.
+            r = (g.get("unmaskedRenderer") or "")
+            soft = next((s for s in ("Basic Render Driver", "Basic Display",
+                                     "SwiftShader", "llvmpipe", "softpipe",
+                                     "VMware", "VirtualBox", "Parallels",
+                                     "Microsoft Remote Display", "Mesa OffScreen")
+                         if s.lower() in r.lower()), None)
+            if soft and not args.allow_software_gpu:
+                print("SKIPPED gpu block: renderer is %r, a software or virtual "
+                      "rasteriser (%s)." % (r, soft), file=sys.stderr)
+                print("  No consumer machine reports this, so it must not become "
+                      "a GPU block. The", file=sys.stderr)
+                print("  capture's other blocks are still usable. Override with "
+                      "--allow-software-gpu.", file=sys.stderr)
+                continue
             rec["renderer"] = g.get("unmaskedRenderer")
             rec["vendor"] = g.get("unmaskedVendor")
             # Rendered output, kept separate from the capability tables. Two

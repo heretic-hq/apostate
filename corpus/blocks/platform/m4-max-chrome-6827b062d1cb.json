@@ -6,8 +6,8 @@
   "browser_version": "152.0.7977.83",
   "captured_browser": "Google Chrome",
   "captured_platform": "macOS",
-  "content_sha256": "10f2de5e669dc9531e2942a1dec23098c42911d5294e78b486eee0dc0f611a52",
-  "identity_sha256": "10f2de5e669dc9531e2942a1dec23098c42911d5294e78b486eee0dc0f611a52",
+  "content_sha256": "6827b062d1cbc5d3eeaf09885dfb8fdf65a2d22a27c35098c7a6d326e6b6f8db",
+  "identity_sha256": "6827b062d1cbc5d3eeaf09885dfb8fdf65a2d22a27c35098c7a6d326e6b6f8db",
   "content": {
     "navigator.userAgentData": {
       "low": {
@@ -232,135 +232,6 @@
       ],
       "chrome_runtime": false,
       "chrome_app": true
-    },
-    "codecs.media": {
-      "decodingInfo": [
-        {
-          "config": {
-            "contentType": "video/mp4; codecs=\"avc1.42E01E\"",
-            "width": 1920,
-            "height": 1080,
-            "bitrate": 2000000,
-            "framerate": 30
-          },
-          "result": {
-            "powerEfficient": true,
-            "smooth": true,
-            "supported": true,
-            "keySystemAccess": null
-          }
-        },
-        {
-          "config": {
-            "contentType": "video/webm; codecs=\"vp09.00.10.08\"",
-            "width": 1920,
-            "height": 1080,
-            "bitrate": 2000000,
-            "framerate": 30
-          },
-          "result": {
-            "powerEfficient": true,
-            "smooth": true,
-            "supported": true,
-            "keySystemAccess": null
-          }
-        },
-        {
-          "config": {
-            "contentType": "video/mp4; codecs=\"hev1.1.6.L93.B0\"",
-            "width": 1920,
-            "height": 1080,
-            "bitrate": 2000000,
-            "framerate": 30
-          },
-          "result": {
-            "powerEfficient": true,
-            "smooth": true,
-            "supported": true,
-            "keySystemAccess": null
-          }
-        },
-        {
-          "config": {
-            "contentType": "video/mp4; codecs=\"av01.0.05M.08\"",
-            "width": 1920,
-            "height": 1080,
-            "bitrate": 2000000,
-            "framerate": 30
-          },
-          "result": {
-            "powerEfficient": true,
-            "smooth": true,
-            "supported": true,
-            "keySystemAccess": null
-          }
-        },
-        {
-          "config": {
-            "contentType": "audio/mp4; codecs=\"mp4a.40.2\"",
-            "channels": 2,
-            "bitrate": 300000,
-            "samplerate": 44100
-          },
-          "result": {
-            "powerEfficient": true,
-            "smooth": true,
-            "supported": true,
-            "keySystemAccess": null
-          }
-        },
-        {
-          "config": {
-            "contentType": "audio/ogg; codecs=vorbis",
-            "channels": 2,
-            "bitrate": 300000,
-            "samplerate": 44100
-          },
-          "result": {
-            "powerEfficient": true,
-            "smooth": true,
-            "supported": true,
-            "keySystemAccess": null
-          }
-        },
-        {
-          "config": {
-            "contentType": "audio/ogg; codecs=opus",
-            "channels": 2,
-            "bitrate": 300000,
-            "samplerate": 48000
-          },
-          "result": {
-            "powerEfficient": true,
-            "smooth": true,
-            "supported": true,
-            "keySystemAccess": null
-          }
-        },
-        {
-          "config": {
-            "contentType": "audio/mpeg; codecs=\"mp3\"",
-            "channels": 2,
-            "bitrate": 300000,
-            "samplerate": 44100
-          },
-          "result": {
-            "powerEfficient": true,
-            "smooth": true,
-            "supported": true,
-            "keySystemAccess": null
-          }
-        }
-      ],
-      "canPlayType": {
-        "video/mp4; codecs=\"avc1.42E01E\"": "probably",
-        "video/webm": "maybe",
-        "application/vnd.apple.mpegurl": "maybe",
-        "video/ogg": "maybe",
-        "audio/mpeg": "probably",
-        "audio/ogg; codecs=\"vorbis\"": "probably",
-        "audio/wav; codecs=\"1\"": "probably"
-      }
     },
     "wasm": {
       "instantiates": true,

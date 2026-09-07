@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/apostate/apostate/config/profile.schema.json",
+  "title": "Apostate device profile",
+  "description": "The device a browser instance presents. Derived from a T0 capture by capture/derive/to_profile.py, never hand-written. Every field is optional: an absent field leaves that surface inherited from the host, which is correct, whereas an invented default is wrong in a way no consumer can detect. This schema describes what base/apostate/profile.cc actually parses \u2014 it is generated from the loader, not from intent.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Identifier of the capture this came from."
+    },
+    "source_capture": {
+      "type": "string",
+      "description": "Timestamp of that capture."
+    },
+    "cpu": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "logical_cores": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Clamped to the host's real count at launch. Claiming fewer is achievable; claiming more is contradicted by a worker scaling curve whatever this says, so the loader warns rather than refusing."
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "total_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Real installed memory, not the reported value. Chromium rounds to the nearer power of two and clamps to [2,32] GiB on desktop, so supplying the input keeps an out-of-bucket number from ever shipping."
+        }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Client Hints platform, e.g. macOS."
+        },
+        "version": {
+          "type": "string"
+        },
+        "architecture": {
+          "type": "string"
+        },
+        "bitness": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "mobile": {
+          "type": "boolean"
+        },
+        "navigator_platform": {
+          "type": "string",
+          "description": "navigator.platform, e.g. MacIntel. Must agree with name: the two come from different emitters and a profile setting one alone produces a browser that contradicts itself."
+        }
+      }
+    },
+    "browser": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "user_agent": {
+          "type": "string",
+          "description": "The complete UA string. Not assembled from parts, because the OS token, AppleWebKit version and Safari token vary together. Its browser version must match the binary \u2014 Apostate does not spoof its own version."
+        }
+      }
+    },
+    "screen": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "width": {
+          "type": "integer"
+        },
+        "height": {
+          "type": "integer"
+        },
+        "avail_width": {
+          "type": "integer"
+        },
+        "avail_height": {
+          "type": "integer"
+        },
+        "device_pixel_ratio": {
+          "type": "number"
+        },
+        "color_depth": {
+          "type": "integer",
+          "enum": [
+            24,
+            30
+          ],
+          "description": "Chromium uses this as an HDR flag rather than a bit depth; only 24 and 30 exist, and the same fact drives CSS color, dynamic-range and color-gamut."
+        }
+      }
+    },
+    "gpu": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "unmasked_renderer": {
+          "type": "string"
+        },
+        "unmasked_vendor": {
+          "type": "string"
+        }
+      }
+    },
+    "locale": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timezone": {
+          "type": "string",
+          "description": "IANA name. Only the name is a host fact; ICU's data is compiled in."
+        },
+        "accept_languages": {
+          "type": "string",
+          "description": "Comma list as the pref stores it, e.g. en-US,en."
+        }
+      }
+    },
+    "theme": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prefers_dark": {
+          "type": "boolean",
+          "description": "Moves roughly thirty CSS system colours at once."
+        },
+        "highlight_argb": {
+          "type": "integer",
+          "description": "0xAARRGGBB; alpha is load-bearing."
+        },
+        "highlight_text_argb": {
+          "type": "integer"
+        }
+      }
+    }
+  }
+}

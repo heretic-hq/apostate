@@ -109,16 +109,50 @@ symmetric:
 The same asymmetry applies to memory: claiming more RAM than physically present
 is contradicted by real allocation behaviour.
 
-### Consequence: profiles are not universally portable
+### How strong is this constraint, really
 
-A profile may only be presented on a host that can physically satisfy it —
-at least as many cores, at least as much memory. **Profile selection is
-host-dependent**, and the loader must refuse a profile the host cannot support
-rather than present an impossible claim.
+Weaker than the asymmetry above suggests, and the reason matters for the product.
 
-This is a constraint the corpus-native approach inherits honestly: a real
-capture describes a real machine, and presenting it from weaker hardware is a
-claim the hardware itself contradicts.
+`base::SysInfo::NumberOfProcessors` uses `sysconf` for the count of max
+available logical processors and has **no cgroup or CFS-quota handling** —
+**verified**, there is none anywhere in `base/system/`. So stock Chrome in a
+container limited to two CPUs on a thirty-two core host reports thirty-two while
+achieving two-core parallelism. That contradiction exists in unmodified Chrome,
+on real users' machines, with nothing spoofed.
+
+The same holds for a VM with CPU limits, a loaded machine, a thermally throttled
+laptop, or a browser with busy background tabs. A detector ringing on "reported
+cores disagree with measured scaling" fires on all of them, so it cannot be used
+for a binary ruling — it is weak evidence, and weak evidence never accumulates
+into certainty.
+
+Memory is weaker again. Contradicting a 32GB claim on an 8GB host requires
+actually allocating past the host's capacity, which kills the tab and breaks
+real users. It is not a probe anything ships.
+
+So the rule is a **preference with a severity gradient**, not a portability wall:
+
+- Claiming at or below host capacity is free, and is the default.
+- Claiming above it carries weak-evidence risk only, and is permitted.
+- The loader **clamps and warns**; it does not refuse. Refusing would trade a
+  weak, rarely-probed signal for a hard usability failure, which is the worse
+  deal.
+
+### What this actually costs
+
+Two fields out of roughly fifty are host-coupled. The device's *identity* —
+GPU strings, fonts, screen geometry, timezone, audio, codecs, voices — is fully
+portable and unaffected.
+
+And the pressure runs in a useful direction. A cheap VPS should be presenting a
+mid-range device rather than a top-tier workstation: a median laptop blends into
+ordinary traffic, while an M4 Max arriving from a datacenter range is
+conspicuous on its own. Preferring profiles that fit the host mostly pushes
+toward more common hardware, which is where a profile wants to be regardless.
+
+Real product lines also ship multiple SKUs at a given identity, so there is
+usually a legal lower configuration within the same device family rather than a
+jump to a different device.
 
 ## Deliverables
 

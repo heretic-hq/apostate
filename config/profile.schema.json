@@ -184,6 +184,43 @@
           "type": "boolean"
         }
       }
+    },
+    "audio": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hardware_buffer_frames": {
+          "type": "integer",
+          "enum": [
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            4096,
+            8192
+          ],
+          "description": "Frames per buffer of the claimed device's audio output, at its native sample rate. CoreAudio reports 256 on Apple hardware; Linux backends report 2048 or 480. Drives AudioContext.baseLatency, which is max(framesPerBuffer, renderQuantumSize) / sampleRate."
+        }
+      }
+    },
+    "media": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "audioinput_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16,
+          "description": "Microphones the claimed machine has. A floor, not an exact count: real host devices are kept and the list is topped up. Readable from any page via enumerateDevices() without permission."
+        },
+        "videoinput_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16,
+          "description": "Cameras the claimed machine has. Same semantics as audioinput_count."
+        }
+      }
     }
   }
 }

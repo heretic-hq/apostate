@@ -46,5 +46,12 @@
     "prefers_dark": true,
     "highlight_argb": 3434338303,
     "highlight_text_argb": 4278190080
+  },
+  "audio": {
+    "hardware_buffer_frames": 256
+  },
+  "media": {
+    "audioinput_count": 1,
+    "videoinput_count": 1
   }
 }

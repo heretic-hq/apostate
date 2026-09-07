@@ -16,3 +16,5 @@
 0016-display-avail-origin.patch
 0017-blink-webbluetooth-on-linux.patch
 0018-display-color-gamut-and-hdr.patch
+0019-audio-hardware-buffer-from-profile.patch
+0020-media-device-counts-from-profile.patch

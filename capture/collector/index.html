@@ -77,10 +77,28 @@
   var params = new URLSearchParams(location.search);
   if (params.get("label")) labelEl.value = params.get("label");
 
+  function hasScreenDetails() { return typeof window.getScreenDetails === "function"; }
+
   go.onclick = async function () {
     go.disabled = true;
     bar.style.display = "block";
     log.textContent = "";
+
+    // Ask for window-management before any probe runs. screen.details is the
+    // only source of the OS display label, HDR headroom and colour primaries,
+    // and the probe refuses to prompt itself because a permission dialog in the
+    // middle of a capture changes what is being measured. Asking here, before
+    // the first probe, gets the value without that problem. Declining is fine —
+    // the probe then reports the gap as it did before.
+    try {
+      if (navigator.permissions && hasScreenDetails()) {
+        var st = (await navigator.permissions.query({ name: "window-management" })).state;
+        if (st === "prompt") {
+          line("requesting window-management (optional; declining is fine)");
+          try { await window.getScreenDetails(); } catch (e) { /* declined */ }
+        }
+      }
+    } catch (e) { /* permission name unsupported on this build */ }
 
     var result;
     try {

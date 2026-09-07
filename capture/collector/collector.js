@@ -567,7 +567,7 @@
       "OffscreenCanvas,ImageDecoder,VideoDecoder,AudioDecoder,MediaRecorder,RTCPeerConnection," +
       "showDirectoryPicker,showOpenFilePicker,launchQueue,documentPictureInPicture,EyeDropper," +
       "CompressionStream,ReportingObserver,Scheduler,NavigationPreloadManager,VirtualKeyboard," +
-      "CookieStore,BarcodetDetector,FaceDetector,TextDetector,PressureObserver,Sanitizer," +
+      "CookieStore,BarcodeDetector,FaceDetector,TextDetector,PressureObserver,Sanitizer," +
       "GPUAdapter,XRSystem,Keyboard,Clipboard,Lock,StorageBucket").split(",");
     var out = {};
     NAMES.forEach(function (n) {

@@ -128,12 +128,27 @@ Owns: timezone, locale, `Intl` resolved options, `Math` transcendental results.
 - `third_party/blink/renderer/core/timezone/timezone_controller.cc:236` —
   **verified**. The Blink-side override; the same mechanism CDP's
   `Emulation.setTimezoneOverride` drives.
-- `base/i18n/icu_util.cc:332` — **verified**. ICU initialisation.
+- `base/i18n/icu_util.cc:320` — **verified**. `InitializeICU`, reached in every
+  process type.
 
-Trap: three override points across three layers. Setting one and not the others
-leaves processes disagreeing about what time it is, which is trivially detected
-by comparing a `Date` in a worker against one on the main thread. Timezone must
-also agree with the proxy exit IP — a coherence edge owned jointly with §10.
+Corrected: an earlier version of this section cited `icu_util.cc:332` as a third
+override layer. That `adoptDefault` call is inside a Fuchsia branch and compiles
+to nothing on macOS and Windows — the fourth time in this project the obvious
+emitter turned out to be the wrong one, and the only time it was the arbiter's
+error rather than a shard's.
+
+Trap: the browser-side monitor is the source and pushes on client registration
+rather than only on change, so a renderer spawned later still converges. A worker
+cannot diverge from its parent within a process, because ICU's default zone is a
+single file-static; what can diverge is a stale per-isolate V8 DateCache, which
+is why the controller walks all worker threads and why a patch that skips that
+step is caught by a two-line worker probe. Timezone must also agree with the
+proxy exit IP — an edge owned jointly with §10.
+
+Note also that ICU's data is compiled into the binary and file access is
+restricted to packages at startup, so the zone list, calendar list and every DST
+rule are properties of our build rather than of the host. Only the zone *name*
+is read from the host environment.
 
 ## 9. WebRTC & Device Enumeration
 

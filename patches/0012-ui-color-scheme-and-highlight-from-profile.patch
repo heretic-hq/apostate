@@ -30,10 +30,10 @@ the captured macOS value has an alpha of 0.8.
 Ledger: css.system-colors, css.prefers-color-scheme, coh.platform-resource-sets.
 
 diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
-index adce0ad..6afb31f 100644
+index d2727ce..af28053 100644
 --- a/base/apostate/profile.cc
 +++ b/base/apostate/profile.cc
-@@ -164,6 +164,20 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+@@ -170,6 +170,18 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
      }
    }
  
@@ -41,8 +41,6 @@ index adce0ad..6afb31f 100644
 +    if (std::optional<bool> v = theme->FindBool("prefers_dark")) {
 +      profile->prefers_dark_ = *v;
 +    }
-+    // Stored as 0xAARRGGBB so a partly transparent highlight round-trips; the
-+    // captured macOS value carries an alpha of 0.8.
 +    if (std::optional<double> v = theme->FindDouble("highlight_argb")) {
 +      profile->css_highlight_argb_ = static_cast<uint32_t>(*v);
 +    }
@@ -54,8 +52,50 @@ index adce0ad..6afb31f 100644
    if (const DictValue* browser = dict->FindDict("browser")) {
      if (const std::string* v = browser->FindString("user_agent")) {
        profile->user_agent_ = *v;
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index 5f924bc..4c856b5 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -145,6 +145,27 @@ class BASE_EXPORT Profile {
+   // free to get right, and impossible to get wrong per-host.
+   const std::optional<std::string>& timezone() const { return timezone_; }
+ 
++  // Preferred colour scheme: true for dark.
++  //
++  // A user preference rather than a device property, but it belongs in the
++  // profile because it moves roughly thirty observable values at once — every
++  // CSS system colour follows it. A capture taken in dark mode replayed in
++  // light mode differs on all of them.
++  std::optional<bool> prefers_dark() const { return prefers_dark_; }
++
++  // The platform's selection highlight, as CSS reports it, in 0xAARRGGBB so a
++  // partly transparent value round-trips.
++  //
++  // macOS overrides exactly these two colours, and on platforms with no native
++  // mapping the function that would set them is an empty body — so a Linux host
++  // claiming macOS emits the wrong Highlight in a single getComputedStyle read.
++  std::optional<uint32_t> css_highlight_argb() const {
++    return css_highlight_argb_;
++  }
++  std::optional<uint32_t> css_highlight_text_argb() const {
++    return css_highlight_text_argb_;
++  }
++
+   // Identifier of the capture this profile was derived from, for diagnostics.
+   const std::string& source_id() const { return source_id_; }
+ 
+@@ -170,6 +191,9 @@ class BASE_EXPORT Profile {
+   std::optional<float> device_scale_factor_;
+   std::optional<int> screen_color_depth_;
+   std::optional<std::string> timezone_;
++  std::optional<bool> prefers_dark_;
++  std::optional<uint32_t> css_highlight_argb_;
++  std::optional<uint32_t> css_highlight_text_argb_;
+   std::string source_id_;
+ };
+ 
 diff --git a/ui/color/css_system_color_mixer.cc b/ui/color/css_system_color_mixer.cc
-index 2e51a25..e1c9a35 100644
+index 2e51a25..3ddbe85 100644
 --- a/ui/color/css_system_color_mixer.cc
 +++ b/ui/color/css_system_color_mixer.cc
 @@ -4,6 +4,8 @@
@@ -67,17 +107,15 @@ index 2e51a25..e1c9a35 100644
  #include "build/build_config.h"
  #include "ui/color/color_id.h"
  #include "ui/color/color_mixer.h"
-@@ -16,6 +18,23 @@ namespace ui {
+@@ -16,6 +18,21 @@ namespace ui {
  
  #if !BUILDFLAG(IS_WIN) && !BUILDFLAG(IS_MAC)
  void MapNativeColorsToCssSystemColors(ColorMixer& mixer, ColorProviderKey key) {
 +  // Apostate: upstream leaves this empty on platforms with no native mapping,
 +  // which is why a Linux build claiming macOS reports the wrong selection
 +  // highlight — macOS overrides exactly these two colours and nothing supplies
-+  // them here.
-+  //
-+  // Taking them from the profile rather than hard-coding a per-platform table
-+  // keeps this one function correct for any claimed platform.
++  // them here. Taking them from the profile keeps this one function correct for
++  // any claimed platform rather than adding another per-platform table.
 +  if (const base::apostate::Profile* profile = base::apostate::Profile::Get()) {
 +    if (profile->css_highlight_argb().has_value()) {
 +      mixer[kColorCssSystemHighlight] = {
@@ -92,7 +130,7 @@ index 2e51a25..e1c9a35 100644
  #endif
  
 diff --git a/ui/native_theme/native_theme.cc b/ui/native_theme/native_theme.cc
-index 478080b..7ec59b1 100644
+index 478080b..8b06781 100644
 --- a/ui/native_theme/native_theme.cc
 +++ b/ui/native_theme/native_theme.cc
 @@ -4,6 +4,8 @@
@@ -108,9 +146,9 @@ index 478080b..7ec59b1 100644
  
  NativeTheme::PreferredColorScheme NativeTheme::CalculatePreferredColorScheme()
      const {
-+  // Apostate: the profile wins over the host's setting, but not over an
++  // Apostate: the profile wins over the host's setting but not over an
 +  // explicit --force-dark-mode, which is a deliberate instruction from whoever
-+  // launched the browser.
++  // launched the browser rather than a property of the claimed device.
 +  if (!IsForcedDarkMode()) {
 +    if (const base::apostate::Profile* profile =
 +            base::apostate::Profile::Get()) {

@@ -14,3 +14,4 @@
 0014-headless-accept-languages.patch
 0015-content-pointer-hover-from-profile.patch
 0016-display-avail-origin.patch
+0017-blink-webbluetooth-on-linux.patch

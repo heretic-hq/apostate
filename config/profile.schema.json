@@ -221,6 +221,19 @@
           "description": "Cameras the claimed machine has. Same semantics as audioinput_count."
         }
       }
+    },
+    "keyboard": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "layout_map": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "navigator.keyboard.getLayoutMap(), replayed from the capture. A user setting rather than a device property and not derivable from anything else, so it is carried verbatim (axiom A3). Replaces the host map wholesale; omit or leave empty to keep the host's."
+        }
+      }
     }
   }
 }

@@ -1,0 +1,136 @@
+Subject: [PATCH] keyboard: replay the layout map from the profile
+
+navigator.keyboard.getLayoutMap() returns what each physical key produces. The
+reference M4 Max reports 48 entries; ours reported 48 too, but two disagreed:
+IntlBackslash was "<" where the Mac says "\u00a7", and we reported an IntlYen
+key the Mac does not have at all.
+
+Both are the build host's X keymap showing through. The section sign on
+IntlBackslash is specific to Apple's ISO layout, and IntlYen exists on Japanese
+keyboards, so the pair together describes a machine that is neither the Mac the
+rest of the capture claims nor any single real keyboard.
+
+Replayed rather than derived, which is the axiom A3 category for this. A layout
+map is a user setting, not a device property — the same Mac produces a
+different map under a German layout — and nothing else in the profile implies
+it, so there is no rule that could generate it. The capture is the only source.
+
+Replaced wholesale rather than merged. A layout is one coherent object, and
+taking most keys from the reference while leaving the rest to the host's keymap
+would describe a keyboard that does not exist. Merging is how the two-field
+version of this bug was produced in the first place.
+
+Patched at PageImpl::GetKeyboardLayoutMap, which is the only path by which a
+layout reaches a renderer: KeyboardLockServiceImpl reads it there and nowhere
+else, so the accessor never needs touching.
+
+Iteration order is not a new observable. The return type is a flat_map on every
+platform, so whatever ordering a page eventually sees is produced downstream
+from the key set, identically for us and for stock Chrome. Fixing the key set
+is therefore sufficient; no ordering work is required or attempted.
+
+An empty map in the profile means "leave the host's map alone", so a profile
+that does not describe a keyboard does not silently blank one.
+
+Ledger: keyboard.layout-map.
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index 54ca7a3..d0e6938 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -216,6 +216,19 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+     }
+   }
+ 
++  if (const DictValue* keyboard = dict->FindDict("keyboard")) {
++    if (const DictValue* map = keyboard->FindDict("layout_map")) {
++      for (const auto [code, value] : *map) {
++        if (const std::string* s = value.GetIfString()) {
++          profile->keyboard_layout_map_[code] = *s;
++        } else {
++          LOG(ERROR) << "apostate: keyboard.layout_map." << code
++                     << " must be a string; ignoring";
++        }
++      }
++    }
++  }
++
+   if (const DictValue* locale = dict->FindDict("locale")) {
+     if (const std::string* v = locale->FindString("timezone")) {
+       profile->timezone_ = *v;
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index 6e71f86..c482e2b 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -6,6 +6,7 @@
+ #define BASE_APOSTATE_PROFILE_H_
+ 
+ #include <cstdint>
++#include <map>
+ #include <optional>
+ #include <string>
+ 
+@@ -179,6 +180,16 @@ class BASE_EXPORT Profile {
+     return media_videoinput_count_;
+   }
+ 
++  // navigator.keyboard.getLayoutMap(), replayed from the capture.
++  //
++  // This is a user setting rather than a device property — the same Mac gives a
++  // different map under a German layout — and it is not derivable from anything
++  // else in the profile, so axiom A3 puts it in the replay category rather than
++  // the derived one. Empty means "leave the host's map alone".
++  const std::map<std::string, std::string>& keyboard_layout_map() const {
++    return keyboard_layout_map_;
++  }
++
+   // IANA timezone name, e.g. "Europe/Warsaw".
+   //
+   // Only the zone *name* is a host fact. ICU's data is compiled into the binary
+@@ -261,6 +272,7 @@ class BASE_EXPORT Profile {
+   std::optional<int> audio_hardware_buffer_frames_;
+   std::optional<int> media_audioinput_count_;
+   std::optional<int> media_videoinput_count_;
++  std::map<std::string, std::string> keyboard_layout_map_;
+   std::optional<std::string> timezone_;
+   std::optional<bool> prefers_dark_;
+   std::optional<std::string> accept_languages_;
+diff --git a/content/browser/renderer_host/page_impl.cc b/content/browser/renderer_host/page_impl.cc
+index edbcafa..5770ed8 100644
+--- a/content/browser/renderer_host/page_impl.cc
++++ b/content/browser/renderer_host/page_impl.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "content/browser/renderer_host/page_impl.h"
+ 
++#include "base/apostate/profile.h"
++
+ #include "base/barrier_closure.h"
+ #include "base/feature_list.h"
+ #include "base/i18n/character_encoding.h"
+@@ -361,6 +363,26 @@ void PageImpl::SetVirtualKeyboardMode(ui::mojom::VirtualKeyboardMode mode) {
+ }
+ 
+ base::flat_map<std::string, std::string> PageImpl::GetKeyboardLayoutMap() {
++  // Replayed from the profile when it carries a map. This is the one place the
++  // layout reaches a renderer — KeyboardLockServiceImpl reads it here and
++  // nowhere else — so overriding it here covers navigator.keyboard.getLayoutMap()
++  // without touching the accessor.
++  //
++  // The host's map is replaced wholesale rather than merged. A layout is a
++  // single coherent object: taking most keys from a US Mac and the rest from
++  // whatever X keymap the build host happens to have would describe a keyboard
++  // that does not exist, which is the failure the axioms exist to prevent.
++  //
++  // Iteration order is not a new observable. This return type is a flat_map on
++  // every platform, so the ordering a page finally sees is produced downstream
++  // from the key set, identically for us and for stock Chrome.
++  if (const base::apostate::Profile* profile = base::apostate::Profile::Get()) {
++    const std::map<std::string, std::string>& map =
++        profile->keyboard_layout_map();
++    if (!map.empty()) {
++      return base::flat_map<std::string, std::string>(map.begin(), map.end());
++    }
++  }
+   return GetMainDocument().GetRenderWidgetHost()->GetKeyboardLayoutMap();
+ }
+ 

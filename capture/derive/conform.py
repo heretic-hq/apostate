@@ -36,9 +36,10 @@ ALWAYS_VOLATILE = {
 
 # Paths within an otherwise-stable probe that track device state, not identity.
 VOLATILE_PATHS = {
-    ("audio.properties", "baseLatency"),
-    ("audio.properties", "sampleRate"),
-    ("audio.properties", "outputLatency"),
+    # Only context state moves. baseLatency and outputLatency were excluded here
+    # on a misreading of which field differed between two captures; measured
+    # across five captures they are constant, and baseLatency encodes buffer
+    # size over sample rate, so excluding it discarded real signal.
     ("audio.properties", "state"),
     ("screen.geometry", "outerWidth"),   # window size is the user's choice,
     ("screen.geometry", "outerHeight"),  # not a property of the device

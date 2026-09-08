@@ -32,3 +32,4 @@
 0032-webgl2-clamp-uniform-and-varying-limits.patch
 0033-screen-is-extended-from-profile.patch
 0034-media-power-efficient-from-claimed-gpu.patch
+0035-webgl-clamp-64bit-query-path.patch

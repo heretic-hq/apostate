@@ -12,12 +12,17 @@ Two halves, and the second is the one that gets missed.
 **Add** the families the claimed device has. That needs the actual font files;
 they are licensed and are not in this repository. The operator supplies them.
 
-**Remove** the families the claimed device does not have. A Linux host serving a
-macOS profile enumerates DejaVu Sans, Liberation Sans and Noto Sans, which no
-Mac has. Adding twenty-six Apple families while leaving those three in place
-produces a machine that is both, which is worse than a machine that is honestly
-Linux. Because this config replaces the system font path rather than adding to
-it, removal is the default and requires no rejection rules.
+**Removal matters less than it looks.** This config replaces the system font
+path rather than extending it, so the host's own families drop out by default —
+but that is tidiness, not the point. Presence of a foreign family proves little:
+Liberation and DejaVu arrive with LibreOffice on any platform, Noto with all
+sorts of software, and real machines carry whatever their owners installed.
+Measured against the reference Mac, removal accounts for 3 differing fields and
+installation for 26.
+
+What cannot be explained away is the *absence* of families the claimed platform
+ships and cannot uninstall — Menlo, Monaco, Zapfino, PingFang SC, Helvetica Neue
+on macOS. That is what this tool reports.
 
 Usage:
     scripts/make-fontconfig.py --fonts /srv/fonts/macos \\

@@ -232,18 +232,37 @@ So font enumeration is a deployment decision with a known mechanism, and
 `scripts/make-fontconfig.py` generates the configuration and reports which of a
 reference device's families a directory still lacks.
 
-The half that gets missed is removal. A Linux host serving a macOS profile
-enumerates DejaVu Sans, Liberation Sans and Noto Sans, which no Mac has. Adding
-twenty-six Apple families while leaving those three in place produces a machine
-that is both, which is more attributable than one that is honestly Linux —
-this is the failure DataDome caught in a competitor. Because the generated
-config replaces the system font path rather than extending it, removal is the
-default rather than a rule that has to be remembered.
+**Removal is worth much less than adding, and an earlier draft of this section
+overstated it.** It claimed that a Linux host enumerating DejaVu Sans, Liberation
+Sans and Noto Sans on a macOS profile was itself the tell. That does not hold:
+those three are freely downloadable, LibreOffice installs Liberation and DejaVu
+on any platform, and Noto arrives with all sorts of software. Real machines carry
+long tails of fonts their owners installed. A rule keyed on the *presence* of a
+foreign family would fire on ordinary users.
 
-What remains open after provisioning is **metrics fidelity**: whether the same
-font file rasterised by FreeType yields the widths CoreText or DirectWrite
-produce. Advance widths come from the font file, so the prior is good, but it is
-untested until real font files are in place and is not claimed here.
+The defensible signal is the inverse — the **absence of families the claimed
+platform cannot be without**. Menlo, Monaco, Zapfino, PingFang SC and Helvetica
+Neue ship with macOS and cannot be uninstalled. A machine claiming macOS that
+lacks them is not a Mac, and no amount of user behaviour explains it away.
+
+The measurement bears that out. Of 76 families compared between the reference
+Mac and an unprovisioned Linux host, 47 already agree on metrics. Of the 29 that
+differ, 26 are families absent from the host — recovered by installing them —
+and exactly 3 are the Linux families present here and not there. So removal buys
+three fields and is tidiness; installation buys twenty-six and is the work.
+
+**Metric-compatible substitution already works, and only for metrics.** The
+unprovisioned host reports Arial, Courier, Courier New, Helvetica, Times and
+Times New Roman as present with metrics identical to the Mac's, because
+fontconfig aliases them to Liberation and DejaVu, which were designed as
+metric-compatible substitutes. Generic `serif`, `sans-serif` and `monospace`
+resolve to identical widths — 692, 720 and 636 — on both machines.
+
+That is why the split between probe families matters. A probe that measures text
+*width* is satisfied by a metric-compatible substitute. A probe that reads
+rendered *pixels* is not: the glyph outlines differ, which is the 32% of text-band
+pixels that differ between the two machines. Installing the real files is what
+closes the second, and nothing closes it short of that.
 
 None of this was assumed. The comparison that produced it — an unprofiled build
 against the same reference — is the control, and it is worth re-running whenever

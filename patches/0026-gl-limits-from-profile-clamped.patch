@@ -1,0 +1,196 @@
+Subject: [PATCH] gl: serve the claimed device's limits, clamped to the driver
+
+WebGL limits are the one class of value a page falsifies by *using* it. Ask for
+a texture past the reported MAX_TEXTURE_SIZE and an over-claim collapses in a
+single call, and a spoofed MAX_VERTEX_UNIFORM_VECTORS is recoverable by a
+twelve-step binary search that compiles `uniform vec4 u[N]` and reads
+COMPILE_STATUS. A competitor's issue tracker records both being caught, and the
+conclusion they reached after the second was to remove the spoof rather than
+deepen it.
+
+So this does not spoof. It serves the profile's value or the driver's, whichever
+is smaller.
+
+The clamp is the whole point. It makes over-claiming structurally impossible
+rather than something profile selection has to avoid, which matters because
+selection cannot be relied on: a browser someone downloads and runs has to be
+coherent on whatever machine it lands on, without the operator first measuring
+their GPU and picking a compatible profile. A profile that is too ambitious for
+its host degrades to the truth instead of lying. Under-claiming is safe in the
+other direction, since ANGLE validates every allocation against the value it
+reported, so a page cannot exceed a limit we understate.
+
+Same rule SysInfo::NumberOfProcessors already follows for hardwareConcurrency,
+applied to the surface where getting it wrong is cheapest to detect, and it logs
+the same way when the claim exceeds the host so the gap is visible rather than
+silent.
+
+Served at RealGLApi::glGetIntegervFn, which is where every integer GL parameter
+passes and four lines from where patch 0007 already serves the driver strings.
+One choke point for both, so the renderer string and the limits it implies
+cannot drift apart.
+
+Seventeen limits are listed explicitly rather than served wholesale. A limit
+that cannot be falsified does not need to come from the profile at all, and one
+outside the list would otherwise be served without anyone having reasoned about
+how a page could check it.
+
+Extensions are not covered here and remain a gap: a profile claiming an
+extension the driver lacks still exposes it, and getExtension is called before
+its methods are, so that is falsifiable too. It belongs at the same choke point
+and is a separate row.
+
+Ledger: webgl.max-limits.
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index d0e6938..709e5bd 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -216,6 +216,19 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+     }
+   }
+ 
++  if (const DictValue* gl = dict->FindDict("gl_limits")) {
++    for (const auto [name, value] : *gl) {
++      if (std::optional<int> v = value.GetIfInt()) {
++        if (*v > 0) {
++          profile->gl_limits_[name] = *v;
++        } else {
++          LOG(ERROR) << "apostate: gl_limits." << name
++                     << " must be positive; ignoring";
++        }
++      }
++    }
++  }
++
+   if (const DictValue* keyboard = dict->FindDict("keyboard")) {
+     if (const DictValue* map = keyboard->FindDict("layout_map")) {
+       for (const auto [code, value] : *map) {
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index c482e2b..77bd5b3 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -190,6 +190,18 @@ class BASE_EXPORT Profile {
+     return keyboard_layout_map_;
+   }
+ 
++  // GL integer limits the claimed device reports, keyed by the GLenum's name
++  // as WebGL spells it — MAX_TEXTURE_SIZE and so on.
++  //
++  // These are never reported above what the driver underneath actually does.
++  // A limit is the one class of value a page can falsify by *using* it: ask for
++  // a texture larger than the driver can allocate and the claim collapses. So
++  // the emitter takes the smaller of the claim and the truth, which makes
++  // over-claiming structurally impossible rather than a thing selection has to
++  // avoid. Under-claiming is safe in the other direction, because ANGLE
++  // validates every allocation against the value it reported.
++  const std::map<std::string, int>& gl_limits() const { return gl_limits_; }
++
+   // IANA timezone name, e.g. "Europe/Warsaw".
+   //
+   // Only the zone *name* is a host fact. ICU's data is compiled into the binary
+@@ -273,6 +285,7 @@ class BASE_EXPORT Profile {
+   std::optional<int> media_audioinput_count_;
+   std::optional<int> media_videoinput_count_;
+   std::map<std::string, std::string> keyboard_layout_map_;
++  std::map<std::string, int> gl_limits_;
+   std::optional<std::string> timezone_;
+   std::optional<bool> prefers_dark_;
+   std::optional<std::string> accept_languages_;
+diff --git a/ui/gl/gl_gl_api_implementation.cc b/ui/gl/gl_gl_api_implementation.cc
+index 3ebdfb1..5af1eda 100644
+--- a/ui/gl/gl_gl_api_implementation.cc
++++ b/ui/gl/gl_gl_api_implementation.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "ui/gl/gl_gl_api_implementation.h"
+ 
++#include <algorithm>
++
+ #include "base/apostate/profile.h"
+ #include "base/no_destructor.h"
+ 
+@@ -236,12 +238,82 @@ void RealGLApi::Initialize(DriverGL* driver) {
+   InitializeBase(driver);
+ }
+ 
++namespace {
++
++// GL limits a page can check by using them, and the name each is known by in a
++// profile. Only these are served: a limit that cannot be falsified does not
++// need to come from the profile, and one that is not in this list would be
++// served without anyone having reasoned about how it could be checked.
++struct ApostateGlLimit {
++  GLenum pname;
++  const char* name;
++};
++
++constexpr ApostateGlLimit kApostateGlLimits[] = {
++    {GL_MAX_TEXTURE_SIZE, "MAX_TEXTURE_SIZE"},
++    {GL_MAX_RENDERBUFFER_SIZE, "MAX_RENDERBUFFER_SIZE"},
++    {GL_MAX_CUBE_MAP_TEXTURE_SIZE, "MAX_CUBE_MAP_TEXTURE_SIZE"},
++    {GL_MAX_TEXTURE_IMAGE_UNITS, "MAX_TEXTURE_IMAGE_UNITS"},
++    {GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS, "MAX_VERTEX_TEXTURE_IMAGE_UNITS"},
++    {GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, "MAX_COMBINED_TEXTURE_IMAGE_UNITS"},
++    {GL_MAX_VERTEX_ATTRIBS, "MAX_VERTEX_ATTRIBS"},
++    {GL_MAX_VARYING_VECTORS, "MAX_VARYING_VECTORS"},
++    {GL_MAX_VERTEX_UNIFORM_VECTORS, "MAX_VERTEX_UNIFORM_VECTORS"},
++    {GL_MAX_FRAGMENT_UNIFORM_VECTORS, "MAX_FRAGMENT_UNIFORM_VECTORS"},
++    {GL_MAX_3D_TEXTURE_SIZE, "MAX_3D_TEXTURE_SIZE"},
++    {GL_MAX_ARRAY_TEXTURE_LAYERS, "MAX_ARRAY_TEXTURE_LAYERS"},
++    {GL_MAX_DRAW_BUFFERS, "MAX_DRAW_BUFFERS"},
++    {GL_MAX_COLOR_ATTACHMENTS, "MAX_COLOR_ATTACHMENTS"},
++    {GL_MAX_SAMPLES, "MAX_SAMPLES"},
++    {GL_MAX_ELEMENTS_INDICES, "MAX_ELEMENTS_INDICES"},
++    {GL_MAX_ELEMENTS_VERTICES, "MAX_ELEMENTS_VERTICES"},
++};
++
++}  // namespace
++
+ void RealGLApi::glGetIntegervFn(GLenum pname, GLint* params) {
+   if (pname == GL_NUM_EXTENSIONS && disabled_exts_.size()) {
+     InitializeFilteredExtensionsIfNeeded();
+     *params = static_cast<GLint>(filtered_exts_.size());
+-  } else {
+-    GLApiBase::glGetIntegervFn(pname, params);
++    return;
++  }
++
++  GLApiBase::glGetIntegervFn(pname, params);
++
++  // Serve the claimed device's limit, but never above what this driver can
++  // actually do. The clamp is the point: a limit is the one class of value a
++  // page falsifies by *using* it — allocate a texture past the reported size
++  // and an over-claim collapses in one call. Taking the minimum makes that
++  // impossible for any profile on any host, so a profile that is too ambitious
++  // for the machine it lands on degrades to the truth instead of lying.
++  //
++  // This is the same rule SysInfo::NumberOfProcessors already follows for
++  // hardwareConcurrency, applied to the surface where getting it wrong is
++  // cheapest to detect.
++  const base::apostate::Profile* profile = base::apostate::Profile::Get();
++  if (!profile || profile->gl_limits().empty() || !params) {
++    return;
++  }
++  for (const auto& limit : kApostateGlLimits) {
++    if (limit.pname != pname) {
++      continue;
++    }
++    auto it = profile->gl_limits().find(limit.name);
++    if (it == profile->gl_limits().end()) {
++      return;
++    }
++    const GLint real = *params;
++    const GLint claimed = static_cast<GLint>(it->second);
++    *params = std::min(claimed, real);
++    if (claimed > real) {
++      LOG(WARNING) << "apostate: profile claims " << limit.name << " = "
++                   << claimed << " but this driver reports " << real
++                   << "; serving " << real
++                   << ". The profile is more capable than the host and a page "
++                      "that allocates past the real limit would see through the "
++                      "claim.";
++    }
++    return;
+   }
+ }
+ 

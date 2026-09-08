@@ -85,6 +85,42 @@ def get(block, pid, *path, default=None):
     return default if v is None else v
 
 
+FALSIFIABLE_MAX = [
+    "MAX_TEXTURE_SIZE", "MAX_RENDERBUFFER_SIZE", "MAX_CUBE_MAP_TEXTURE_SIZE",
+    "MAX_VIEWPORT_DIMS", "MAX_VERTEX_UNIFORM_VECTORS", "MAX_FRAGMENT_UNIFORM_VECTORS",
+    "MAX_VARYING_VECTORS", "MAX_TEXTURE_IMAGE_UNITS", "MAX_VERTEX_TEXTURE_IMAGE_UNITS",
+    "MAX_COMBINED_TEXTURE_IMAGE_UNITS", "MAX_VERTEX_ATTRIBS", "MAX_3D_TEXTURE_SIZE",
+    "MAX_ARRAY_TEXTURE_LAYERS", "MAX_DRAW_BUFFERS", "MAX_COLOR_ATTACHMENTS",
+    "MAX_SAMPLES", "MAX_ELEMENTS_INDICES", "MAX_ELEMENTS_VERTICES",
+]
+
+
+def host_blocks(gpu_block, host_capture):
+    """Claims in a gpu block that the serving host cannot honour."""
+    def n(v):
+        if isinstance(v, (int, float)):
+            return v
+        if isinstance(v, list) and v and isinstance(v[0], (int, float)):
+            return min(v)
+        return None
+
+    out = []
+    for ctx in ("webgl1", "webgl2"):
+        w = (gpu_block.get("content") or {}).get(ctx)
+        hp = host_capture.get("probes", {}).get(ctx)
+        if not (w and hp and hp.get("ok")):
+            continue
+        h = hp["value"]
+        wp, hpar = w.get("parameters") or {}, h.get("parameters") or {}
+        for key in FALSIFIABLE_MAX:
+            a, b = n(wp.get(key)), n(hpar.get(key))
+            if a is not None and b is not None and a > b:
+                out.append(("%s.%s" % (ctx, key), a, b))
+        for e in sorted(set(w.get("extensions") or []) - set(h.get("extensions") or [])):
+            out.append(("%s.extension %s" % (ctx, e), "present", "absent"))
+    return out
+
+
 def compose(chosen):
     """Build a profile dict from the chosen blocks."""
     plat, gpu, disp, hw, loc, theme = (chosen[k] for k in KINDS)
@@ -205,6 +241,14 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     for k in KINDS:
         ap.add_argument("--" + k)
+    ap.add_argument("--host", type=pathlib.Path,
+                    help="an unprofiled capture from the machine that will serve "
+                         "this profile. Blocks whose claims the host cannot "
+                         "honour are refused: a WebGL limit or extension the "
+                         "host lacks is falsifiable by using it, so serving it "
+                         "is a lie with a known refutation. Selection has to be "
+                         "dynamic per host — the corpus cannot know in advance "
+                         "which machine will run it.")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--enumerate", action="store_true")
     ap.add_argument("--out", type=pathlib.Path)
@@ -259,6 +303,19 @@ def main() -> int:
     if not good:
         print("REFUSED: %s" % why, file=sys.stderr)
         return 2
+
+    if args.host:
+        blocked = host_blocks(chosen["gpu"], json.loads(args.host.read_text()))
+        if blocked:
+            print("REFUSED: this host cannot serve the chosen gpu block.",
+                  file=sys.stderr)
+            for k, a, b in blocked[:8]:
+                print("    %-44s claim=%-10s host=%s" % (k, a, b), file=sys.stderr)
+            if len(blocked) > 8:
+                print("    … %d more" % (len(blocked) - 8), file=sys.stderr)
+            print("  Run scripts/check-servable.py for the full report.",
+                  file=sys.stderr)
+            return 2
 
     profile = compose(chosen)
     tiers = {chosen[k].get("evidence", "measured") for k in KINDS}

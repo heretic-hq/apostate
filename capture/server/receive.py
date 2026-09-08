@@ -51,6 +51,48 @@ def lan_ip() -> str:
         s.close()
 
 
+class TLSCapableServer(http.server.ThreadingHTTPServer):
+    """Threading server that terminates TLS in the worker, not on accept.
+
+    Wrapping the *listening* socket looks equivalent and is not: accept() then
+    performs the handshake on the main thread, so a single client that connects
+    and never sends a ClientHello stops the server accepting anything, forever.
+    A port scanner did exactly that and the listen queue filled while systemd
+    still reported the unit active — listening, alive, and deaf.
+
+    So accept stays plain and the handshake happens in the connection's own
+    thread under a timeout. A stalled peer now costs one thread instead of the
+    service.
+    """
+
+    ssl_ctx = None
+    daemon_threads = True
+    # The default of 5 is what let a handful of stuck connections fill the queue.
+    request_queue_size = 128
+    # A peer that opens a socket and says nothing must not hold a worker.
+    handshake_timeout = 20
+
+    def finish_request(self, request, client_address):
+        if self.ssl_ctx is not None:
+            try:
+                request.settimeout(self.handshake_timeout)
+                request = self.ssl_ctx.wrap_socket(request, server_side=True)
+            except (OSError, ssl.SSLError):
+                # Scanners, probes and clients with no shared cipher all land
+                # here. None of them is an event worth logging or dying for.
+                try:
+                    request.close()
+                except OSError:
+                    pass
+                return
+        super().finish_request(request, client_address)
+
+    def handle_error(self, request, client_address):
+        # A broken connection is not a server fault and must not reach stderr as
+        # a traceback; the useful output is the per-capture summary.
+        pass
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     out_dir: pathlib.Path
 
@@ -171,7 +213,7 @@ def main() -> None:
     Handler.out_dir = args.out.resolve()
     Handler.out_dir.mkdir(parents=True, exist_ok=True)
 
-    srv = http.server.ThreadingHTTPServer((args.bind, args.port), Handler)
+    srv = TLSCapableServer((args.bind, args.port), Handler)
     # Request threads are non-daemon by default, so serve_forever() returning
     # is not enough to end the process — it waits for them. --once would then
     # store a capture and hang, which is the opposite of the point.
@@ -196,7 +238,7 @@ def main() -> None:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(certfile=str(args.cert), keyfile=str(args.key))
         ctx.set_alpn_protocols(["http/1.1"])
-        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        srv.ssl_ctx = ctx
         scheme = "https"
 
     print(f"capture receiver on :{args.port}   writing to {Handler.out_dir}")

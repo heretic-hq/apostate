@@ -198,7 +198,7 @@ patch.
 | closed by the profile | 77 | values the browser chooses |
 | **fonts** | 85 | the host does not have the font files |
 | **WebGL parameter tables** | 78 | ANGLE hard-codes them per backend; Linux cannot run Metal |
-| canvas renders | 8 | follows fonts and the raster backend |
+| canvas renders | 8 | follows fonts and the raster backend; glyph rasterisation is FreeType against CoreText and is *not* provisionable |
 | codecs, WebGPU adapter, voices, keyboard, media devices | 17 | OS-provided resources the host lacks |
 | audio render | 4 | CPUID-selected FFT kernel and host libm |
 | still patchable | ~50 | headers, layout, remaining media queries |
@@ -220,6 +220,30 @@ browser.** Installing the claimed platform's fonts is the single largest
 recovery available — 85 fields, more than the profile currently closes in total.
 The remaining backend and ISA terms cannot be provisioned at all, which is why
 profiles must be partitioned by ANGLE backend and CPU ISA class.
+
+That the font half is provisionable is now measured, not assumed. Chromium on
+Linux asks fontconfig, and fontconfig answers from whatever it is pointed at:
+running the browser with `FONTCONFIG_FILE` set to a config naming one directory
+made it enumerate exactly the families in that directory. Pointed at a directory
+holding two families it reported those and nothing else; pointed at a config
+whose font path excluded the system directories it reported none at all.
+
+So font enumeration is a deployment decision with a known mechanism, and
+`scripts/make-fontconfig.py` generates the configuration and reports which of a
+reference device's families a directory still lacks.
+
+The half that gets missed is removal. A Linux host serving a macOS profile
+enumerates DejaVu Sans, Liberation Sans and Noto Sans, which no Mac has. Adding
+twenty-six Apple families while leaving those three in place produces a machine
+that is both, which is more attributable than one that is honestly Linux —
+this is the failure DataDome caught in a competitor. Because the generated
+config replaces the system font path rather than extending it, removal is the
+default rather than a rule that has to be remembered.
+
+What remains open after provisioning is **metrics fidelity**: whether the same
+font file rasterised by FreeType yields the widths CoreText or DirectWrite
+produce. Advance widths come from the font file, so the prior is good, but it is
+untested until real font files are in place and is not claimed here.
 
 None of this was assumed. The comparison that produced it — an unprofiled build
 against the same reference — is the control, and it is worth re-running whenever

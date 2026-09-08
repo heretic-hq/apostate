@@ -27,3 +27,5 @@
 0027-swiftshader-raise-render-limits.patch
 0028-webgl-extensions-from-profile.patch
 0029-webgl-shader-precision-from-profile.patch
+0030-css-highlight-at-the-css-emitter.patch
+0031-css-system-fonts-from-profile.patch

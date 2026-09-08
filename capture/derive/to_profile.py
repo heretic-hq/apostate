@@ -205,6 +205,25 @@ def build(capture):
     scheme = media.get("prefers-color-scheme") or []
     if scheme:
         put("theme", "prefers_dark", "dark" in scheme)
+    # CSS system fonts. Which keywords diverge is a platform fact — Chromium's
+    # Windows provider special-cases only menu, small-caption and status-bar —
+    # but the values behind them come from the user's Windows theme, so all six
+    # are replayed rather than derived from the platform name.
+    sys_fonts = {}
+    for kw, spec in ((probe(capture, "css.system") or {}).get("fonts") or {}).items():
+        family, size = spec.get("fontFamily"), spec.get("fontSize")
+        if not family or not isinstance(size, str) or not size.endswith("px"):
+            continue
+        # getComputedStyle quotes families containing spaces; the emitter wants
+        # the bare name.
+        family = family.strip().strip('"').strip("'")
+        try:
+            sys_fonts[kw] = {"family": family, "size_px": float(size[:-2])}
+        except ValueError:
+            continue
+    if sys_fonts:
+        profile.setdefault("theme", {})["system_fonts"] = dict(sorted(sys_fonts.items()))
+
     put("theme", "highlight_argb", css_rgb_to_argb(system.get("Highlight")))
     put("theme", "highlight_text_argb", css_rgb_to_argb(system.get("HighlightText")))
 

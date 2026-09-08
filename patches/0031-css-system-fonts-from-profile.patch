@@ -1,0 +1,227 @@
+Subject: [PATCH] css: system fonts from the profile
+
+The six CSS system font keywords resolve through LayoutThemeFontProvider, and
+Chromium picks the provider at compile time. Windows builds get
+layout_theme_font_provider_win.cc, which routes small-caption, menu and
+status-bar to the shell's non-client metrics; every platform without a native
+provider — Linux included — gets the default one, which answers all six with
+Arial at the default size and ignores the keyword entirely.
+
+So a Linux build claiming Windows cannot reach the right answer by any runtime
+path. The code that would have produced it is not in the binary. This is the
+compile-time platform gate in its plainest form.
+
+Measured against the reference Windows machine, the split is exactly the three
+keywords Chromium's Windows provider special-cases: menu, small-caption and
+status-bar report "Segoe UI" at 12px, while caption, icon and message-box report
+Arial at 16px — the same values our Linux default already produces for those
+three, which is why only three of the six were failing V3.
+
+The values behind the Windows three come from SPI_GETNONCLIENTMETRICS. That is
+the user's Windows theme rather than anything derivable from the platform name,
+so they are replayed from the capture rather than computed, and the profile
+carries all six so a macOS profile can use the same mechanism without another
+per-platform table.
+
+Family and size are all-or-nothing per keyword. A family without a size resolves
+at the host's default size, which is the mismatch this exists to remove.
+
+The AtomicStrings are built once through DEFINE_THREAD_SAFE_STATIC_LOCAL because
+SystemFontFamily returns a reference and the storage has to outlive every
+caller; the profile is immutable for the life of the process, so building the
+table once is sound.
+
+Ledger: css.system-fonts.
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index 35ee265..7760755 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -243,6 +243,26 @@ class BASE_EXPORT Profile {
+     return gl_precisions_;
+   }
+ 
++  // One CSS system font: the family and size a system font keyword resolves to.
++  struct SystemFont {
++    std::string family;
++    double size_px = 0;
++  };
++
++  // CSS system fonts, keyed by the keyword as CSS spells it — "menu",
++  // "small-caption", "status-bar", "caption", "icon", "message-box".
++  //
++  // Which keywords diverge is a platform fact and a narrow one. Chromium's
++  // Windows provider routes only small-caption, menu and status-bar to the
++  // shell's non-client metrics and lets the other three fall through to the
++  // same Arial/16px default our Linux build uses, so a Windows profile differs
++  // from a Linux host on exactly three of the six. The values behind them come
++  // from SPI_GETNONCLIENTMETRICS, which is the user's Windows theme rather than
++  // anything derivable, so they are replayed from the capture.
++  const std::map<std::string, SystemFont>& css_system_fonts() const {
++    return css_system_fonts_;
++  }
++
+   // IANA timezone name, e.g. "Europe/Warsaw".
+   //
+   // Only the zone *name* is a host fact. ICU's data is compiled into the binary
+@@ -329,6 +349,7 @@ class BASE_EXPORT Profile {
+   std::map<std::string, int> gl_limits_;
+   std::set<std::string> gl_extensions_;
+   std::map<std::string, ShaderPrecision> gl_precisions_;
++  std::map<std::string, SystemFont> css_system_fonts_;
+   std::optional<std::string> timezone_;
+   std::optional<bool> prefers_dark_;
+   std::optional<std::string> accept_languages_;
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index 1be796d..cf8f1b1 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -267,6 +267,37 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+     }
+   }
+ 
++  if (const DictValue* theme = dict->FindDict("theme")) {
++    if (const DictValue* fonts = theme->FindDict("system_fonts")) {
++      for (const auto [name, value] : *fonts) {
++        const DictValue* entry = value.GetIfDict();
++        if (!entry) {
++          continue;
++        }
++        const std::string* family = entry->FindString("family");
++        std::optional<double> size = entry->FindDouble("size_px");
++        if (!size) {
++          if (std::optional<int> as_int = entry->FindInt("size_px")) {
++            size = *as_int;
++          }
++        }
++        // Both or neither. A family without a size resolves at the host's
++        // default size, which is the mismatch this exists to remove.
++        if (!family || family->empty() || !size) {
++          LOG(ERROR) << "apostate: theme.system_fonts." << name
++                     << " needs family and size_px; ignoring";
++          continue;
++        }
++        if (*size <= 0 || *size > 200) {
++          LOG(ERROR) << "apostate: theme.system_fonts." << name
++                     << ".size_px out of range; ignoring";
++          continue;
++        }
++        profile->css_system_fonts_[name] = SystemFont{*family, *size};
++      }
++    }
++  }
++
+   if (const DictValue* keyboard = dict->FindDict("keyboard")) {
+     if (const DictValue* map = keyboard->FindDict("layout_map")) {
+       for (const auto [code, value] : *map) {
+diff --git a/third_party/blink/renderer/core/layout/layout_theme_font_provider_default.cc b/third_party/blink/renderer/core/layout/layout_theme_font_provider_default.cc
+index 383ae4e..493b41d 100644
+--- a/third_party/blink/renderer/core/layout/layout_theme_font_provider_default.cc
++++ b/third_party/blink/renderer/core/layout/layout_theme_font_provider_default.cc
+@@ -25,23 +25,107 @@
+ 
+ #include "third_party/blink/renderer/core/layout/layout_theme_font_provider.h"
+ 
++#include "base/apostate/profile.h"
+ #include "third_party/blink/renderer/core/css_value_keywords.h"
+ #include "third_party/blink/renderer/platform/fonts/font_cache.h"
+ #include "third_party/blink/renderer/platform/fonts/font_description.h"
++#include "third_party/blink/renderer/platform/wtf/hash_map.h"
+ #include "third_party/blink/renderer/platform/wtf/std_lib_extras.h"
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+ 
+ namespace blink {
+ 
++namespace {
++
++// Apostate: CSS system fonts from the profile.
++//
++// This file is the default provider, compiled on every platform that has no
++// native one — Linux included. It answers every system font keyword with
++// Arial at the default size, because on Linux there is nothing to ask. Windows
++// compiles layout_theme_font_provider_win.cc instead, which routes exactly
++// three keywords to the shell's non-client metrics.
++//
++// That is a compile-time platform gate, so a Linux build claiming Windows
++// cannot reach the right answer by any runtime path: the code that would have
++// produced it is not in the binary. The profile carries the resolved values and
++// this provider serves them, which keeps one file correct for any claimed
++// platform instead of compiling in a second per-platform table.
++//
++// Measured against the reference Windows machine: menu, small-caption and
++// status-bar are "Segoe UI" at 12px while caption, icon and message-box are
++// Arial at 16px — the same three that Chromium's Windows provider special-cases
++// and the same three we were getting wrong.
++
++const char* ApostateFontKey(CSSValueID id) {
++  switch (id) {
++    case CSSValueID::kCaption:
++      return "caption";
++    case CSSValueID::kIcon:
++      return "icon";
++    case CSSValueID::kMenu:
++      return "menu";
++    case CSSValueID::kMessageBox:
++      return "message-box";
++    case CSSValueID::kSmallCaption:
++      return "small-caption";
++    case CSSValueID::kStatusBar:
++      return "status-bar";
++    default:
++      return nullptr;
++  }
++}
++
++// The profile is immutable for the life of the process, so the AtomicStrings
++// are built once and handed out by reference. SystemFontFamily returns a
++// reference, so the storage has to outlive every caller.
++struct ApostateFontTable {
++  HashMap<String, AtomicString> family;
++};
++
++ApostateFontTable BuildApostateFontTable() {
++  ApostateFontTable table;
++  if (const base::apostate::Profile* profile = base::apostate::Profile::Get()) {
++    for (const auto& [key, font] : profile->css_system_fonts()) {
++      table.family.Set(String::FromUtf8(key),
++                       AtomicString(String::FromUtf8(font.family)));
++    }
++  }
++  return table;
++}
++
++const ApostateFontTable& GetApostateFontTable() {
++  DEFINE_THREAD_SAFE_STATIC_LOCAL(ApostateFontTable, table,
++                                  (BuildApostateFontTable()));
++  return table;
++}
++
++}  // namespace
++
+ // static
+ const AtomicString& LayoutThemeFontProvider::SystemFontFamily(
+     CSSValueID system_font_id) {
++  if (const char* key = ApostateFontKey(system_font_id)) {
++    const ApostateFontTable& table = GetApostateFontTable();
++    auto it = table.family.find(String::FromUtf8(key));
++    if (it != table.family.end()) {
++      return it->value;
++    }
++  }
+   return DefaultGUIFont();
+ }
+ 
+ // static
+ float LayoutThemeFontProvider::SystemFontSize(CSSValueID system_font_id,
+                                               const Document* document) {
++  if (const char* key = ApostateFontKey(system_font_id)) {
++    if (const base::apostate::Profile* profile =
++            base::apostate::Profile::Get()) {
++      auto it = profile->css_system_fonts().find(key);
++      if (it != profile->css_system_fonts().end()) {
++        return static_cast<float>(it->second.size_px);
++      }
++    }
++  }
+   switch (system_font_id) {
+     case CSSValueID::kWebkitMiniControl:
+     case CSSValueID::kWebkitSmallControl:

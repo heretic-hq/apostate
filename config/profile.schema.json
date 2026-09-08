@@ -217,6 +217,40 @@
         },
         "highlight_text_argb": {
           "type": "integer"
+        },
+        "system_fonts": {
+          "type": "object",
+          "description": "CSS system font keywords and what they resolve to. Chromium picks the font provider at compile time, so a Linux build claiming Windows cannot reach the Windows values by any runtime path. Windows routes only menu, small-caption and status-bar to SPI_GETNONCLIENTMETRICS; the other three fall through to the same Arial/16px default Linux uses.",
+          "propertyNames": {
+            "enum": [
+              "caption",
+              "icon",
+              "menu",
+              "message-box",
+              "small-caption",
+              "status-bar"
+            ]
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "family",
+              "size_px"
+            ],
+            "properties": {
+              "family": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Resolved family name, without CSS quoting."
+              },
+              "size_px": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 200
+              }
+            }
+          }
         }
       }
     },

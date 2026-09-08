@@ -199,17 +199,31 @@ def main() -> int:
         # case-sensitively reported Lucida Grande missing from a directory that
         # contained it.
         have_lower = {h.lower() for h in have}
-        missing = sorted(f for f in want if f.lower() not in have_lower)
+        # An aliased family is satisfied without its own file, and saying
+        # otherwise sends the operator hunting for fonts they do not need.
+        # Windows itself resolves several of these through the registry's
+        # FontSubstitutes key rather than shipping a file: Helvetica is Arial,
+        # Times is Times New Roman, Courier is Courier New, MS Sans Serif is
+        # Microsoft Sans Serif. A page that measures them sees the substitute,
+        # which is exactly what --alias reproduces.
+        aliased = {src.lower() for src, dst in pairs if dst.lower() in have_lower}
+        satisfied = have_lower | aliased
+        missing = sorted(f for f in want if f.lower() not in satisfied)
         print()
         print("  reference wants %d families, directory supplies %d"
               % (len(want), len(want) - len(missing)))
+        if aliased:
+            covered = sorted(f for f in want if f.lower() in aliased)
+            if covered:
+                print("  satisfied by substitution (%d): %s"
+                      % (len(covered), ", ".join(covered)))
         if missing:
             print("  MISSING (%d): %s" % (len(missing), ", ".join(missing)))
             print()
             print("  These are licensed files and are not distributable with this")
             print("  repository. Copy them from a machine entitled to them.")
         else:
-            print("  every reference family is present")
+            print("  every reference family is present or substituted")
     return 0
 
 

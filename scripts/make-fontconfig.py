@@ -151,7 +151,12 @@ def main() -> int:
             return 0
         want = set(probe["value"]["detected"])
         have = families_in(args.fonts, args.out)
-        missing = sorted(f for f in want if f not in have)
+        # Case-insensitive: CSS font matching is, and a reference capture may
+        # carry a family in whatever case the probe list used. Comparing
+        # case-sensitively reported Lucida Grande missing from a directory that
+        # contained it.
+        have_lower = {h.lower() for h in have}
+        missing = sorted(f for f in want if f.lower() not in have_lower)
         print()
         print("  reference wants %d families, directory supplies %d"
               % (len(want), len(want) - len(missing)))

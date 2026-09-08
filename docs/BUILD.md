@@ -84,3 +84,24 @@ when an independent rebuild from the same pins reproduces every hash.
 Linux x64 builds run in the pinned container, on the remote build machine.
 macOS builds run natively on pinned Xcode. Both produce a manifest; both are
 verified by rebuild.
+
+## Extensions stay enabled
+
+`enable_extensions` is left at its default and must stay there.
+
+Chromium forks commonly disable the extensions feature to reduce binary size or
+attack surface. Doing so changes `window.chrome`: `chrome.app` is exposed by the
+extensions layer, and a build without it either loses the object or exposes a
+different shape. That is a page-visible difference no profile can repair,
+because it is decided at compile time, and by at least one practitioner account
+it is the signal that actually gets Cromite blocked by Google — not the
+proprietary request headers, which appear not to be enforced.
+
+Verified against stock Chrome 152 on one machine: `window.chrome` exposes
+exactly `loadTimes`, `csi` and `app` on both, `chrome.app` matches down to the
+`InstallState` and `RunningState` enum members, `chrome.runtime` is absent on
+both, and `chrome.app.isInstalled` is false on both.
+
+The general rule this is an instance of: a build argument that removes a feature
+removes it observably. Size and attack surface are not reasons to diverge from
+the browser we claim to be.

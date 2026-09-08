@@ -55,7 +55,20 @@ TEMPLATE = """<?xml version="1.0"?>
   <!-- Generic aliases must resolve inside the supplied set, or text falls back
        to nothing and every width collapses to one value. -->
 %(aliases)s
-</fontconfig>
+
+  <!-- Hinting off, and this is the setting that decides whether metrics match.
+       FreeType hints glyph advances by default; DirectWrite and CoreText report
+       the font's own linear metrics. With hinting on, a correctly provisioned
+       host still disagreed with the reference on 68 of 76 families by a median
+       of 5 units in ~700. With it off, 75 of 76 agree exactly and the three
+       generic baselines match to the unit. -->
+  <match target="font">
+    <edit name="hinting" mode="assign"><bool>false</bool></edit>
+    <edit name="hintstyle" mode="assign"><const>hintnone</const></edit>
+    <edit name="antialias" mode="assign"><bool>true</bool></edit>
+    <edit name="rgba" mode="assign"><const>none</const></edit>
+  </match>
+%(emoji)s</fontconfig>
 """
 
 ALIAS = """  <match target="pattern">
@@ -92,6 +105,15 @@ def main() -> int:
     ap.add_argument("--serif", default="Times New Roman")
     ap.add_argument("--sans", default="Arial")
     ap.add_argument("--monospace", default="Courier New")
+    ap.add_argument("--emoji", help="colour emoji family for the generic "
+                                    "'emoji' alias, e.g. 'Segoe UI Emoji'")
+    ap.add_argument("--alias", action="append", default=[], metavar="OLD=NEW",
+                    help="map a family name onto another, repeatable. Real "
+                         "platforms do this: Windows resolves Helvetica to "
+                         "Arial and Times to Times New Roman through its font "
+                         "mapper, with no such file on disk, so a host that "
+                         "only has the files under-reports against a real "
+                         "machine unless the same mappings are declared.")
     args = ap.parse_args()
 
     if not args.fonts.is_dir():
@@ -101,12 +123,23 @@ def main() -> int:
     cache = args.cache or pathlib.Path(str(args.out) + ".cache")
     cache.mkdir(parents=True, exist_ok=True)
 
-    aliases = "\n".join(ALIAS % (generic, family) for generic, family in
-                        (("serif", args.serif), ("sans-serif", args.sans),
-                         ("monospace", args.monospace)))
+    pairs = [("serif", args.serif), ("sans-serif", args.sans),
+             ("monospace", args.monospace)]
+    for a in args.alias:
+        if "=" not in a:
+            print("--alias needs OLD=NEW, got %r" % a, file=sys.stderr)
+            return 2
+        old_name, new_name = a.split("=", 1)
+        pairs.append((old_name.strip(), new_name.strip()))
+    aliases = "\n".join(ALIAS % (src, dst) for src, dst in pairs)
+    emoji = ""
+    if args.emoji:
+        emoji = ('  <alias binding="strong"><family>emoji</family>'
+                 '<prefer><family>%s</family></prefer></alias>\n' % args.emoji)
     args.out.write_text(TEMPLATE % {"fontdir": args.fonts.resolve(),
                                     "cachedir": cache.resolve(),
-                                    "aliases": aliases})
+                                    "aliases": aliases,
+                                    "emoji": emoji})
     print("wrote %s" % args.out)
     print("  use with: FONTCONFIG_FILE=%s" % args.out.resolve())
 

@@ -124,6 +124,59 @@
         }
       }
     },
+    "gl_limits": {
+      "type": "object",
+      "description": "getParameter() MAX_* limits of the claimed device, keyed as WebGL spells them. Served as min(claim, driver): a limit is the one class of value a page falsifies by using it, so over-claiming is made structurally impossible rather than something selection has to avoid.",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "gl_extensions": {
+      "type": "array",
+      "description": "WebGL extension names the claimed device exposes, as getSupportedExtensions() spells them. Used only to remove extensions this host advertises and the claimed device does not. An extension cannot be added: a page calls getExtension() and then calls methods on what it gets back, so a claimed-but-unimplemented extension fails at first use.",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_]+$"
+      },
+      "uniqueItems": true
+    },
+    "gl_precisions": {
+      "type": "object",
+      "description": "getShaderPrecisionFormat() results, keyed \"<SHADER>.<QUALIFIER>\". The third component of the WebGL identity, independent of gl_limits and gl_extensions. Chromium seeds the desktop answer itself (127/127/23 float, 31/30/0 int) and the driver overwrites it only where the entry point is implemented, so real desktop Chrome reports Chromium's constants while ANGLE reports its backend's declaration.",
+      "propertyNames": {
+        "pattern": "^(VERTEX|FRAGMENT)_SHADER\\.(LOW|MEDIUM|HIGH)_(FLOAT|INT)$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "rangeMin",
+          "rangeMax",
+          "precision"
+        ],
+        "properties": {
+          "rangeMin": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 127,
+            "description": "log2 of the smallest representable magnitude."
+          },
+          "rangeMax": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 127,
+            "description": "log2 of the largest representable magnitude."
+          },
+          "precision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 23,
+            "description": "Mantissa bits. 0 for integer types, 23 for IEEE binary32."
+          }
+        }
+      }
+    },
     "gpu": {
       "type": "object",
       "additionalProperties": false,

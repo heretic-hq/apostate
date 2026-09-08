@@ -1,0 +1,260 @@
+Subject: [PATCH] webgl: shader precision from the profile
+
+getShaderPrecisionFormat() is the third component of the WebGL identity, and
+until now we served the host's. Patch 0026 gave the claimed device's limits and
+0028 its extension list; against the reference Windows Intel UHD 630 that left
+webgl1 with 22 differing fields, of which 18 were precision, and webgl2 with 36,
+of which 20 were precision. One field of the remaining four is a parameter. The
+component nothing else reads is the component that stayed wrong.
+
+That is the argument for doing it rather than leaving it: a profile that matches
+two of the three components and misses the third is worse than one that matches
+none, because a mismatched third is a contradiction rather than an unknown. It
+is also the failure mode this surface invites, since no other code path touches
+these twelve triples and nothing complains when they are wrong.
+
+The divergence is not about hardware. Chromium seeds the desktop answer itself
+in QueryShaderPrecisionFormat (gpu/command_buffer/service/gl_utils.cc:88) —
+127/127/23 for every float qualifier, 31/30/0 for every int — and only then
+calls the driver, which overwrites it where the entry point is implemented.
+Desktop GL leaves it a stub, so real Chrome on real hardware reports Chromium's
+own constants. ANGLE implements it and reports what its backend declares, which
+on SwiftShader is 15/15/10 for lowp and mediump. The reference capture's values
+are Chromium's constants, not the Intel GPU's.
+
+Patched at RealGLApi, the same layer as 0026, because it is the single choke
+point for both decoders: the passthrough decoder calls
+api()->glGetShaderPrecisionFormatFn directly, and the validating decoder's
+QueryShaderPrecisionFormat reaches the same binding through the global. One
+override covers WebGL1 and WebGL2 on either decoder.
+
+Served without clamping, and that is the one place this patch departs from 0026,
+so it needs its evidence rather than an assertion. A limit is falsified by using
+it — allocate past the reported size and the over-claim collapses in one call,
+which is why 0026 takes the minimum. A precision claim is falsifiable only if
+the backend actually computes at the lower precision. Measured on our own
+build: the same 2^-16 residual pushed through lowp, mediump and highp on
+ANGLE/SwiftShader returns an identical non-zero result from all three
+qualifiers. SwiftShader declares reduced precision and computes every qualifier
+in float32. Reporting 127/127/23 is therefore truthful about what the shader
+will do, and clamping would force us to keep publishing a declaration the
+backend's own arithmetic contradicts.
+
+The warning still fires when a claim exceeds the host's declaration, because
+that reasoning is specific to backends that compute at float32 throughout. A
+backend that genuinely rounds to its declared precision makes the claim
+falsifiable again, and the log line is where that surfaces instead of V4.
+
+Entries are all-or-nothing and bounded to what IEEE binary32 can describe; a
+partial entry would mix the claim with the host inside a single query, which is
+the incoherence the field exists to remove.
+
+Ledger: webgl.shader-precision.
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index a077b58..35ee265 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -214,6 +214,35 @@ class BASE_EXPORT Profile {
+   // be on the real device.
+   const std::set<std::string>& gl_extensions() const { return gl_extensions_; }
+ 
++  // One getShaderPrecisionFormat() answer: the exponent range and mantissa
++  // bits a shader type reports for a precision qualifier.
++  struct ShaderPrecision {
++    int range_min = 0;
++    int range_max = 0;
++    int precision = 0;
++  };
++
++  // getShaderPrecisionFormat() results, keyed "<SHADER>.<QUALIFIER>" exactly as
++  // the collector spells them — "FRAGMENT_SHADER.LOW_FLOAT" and so on.
++  //
++  // This is the third component of the WebGL identity, independent of the
++  // limits above and of the extension list, and it is the one a profile is
++  // most likely to leave on the host: nothing else reads it, so it stays wrong
++  // quietly while the other two are fixed. Matching two of three is worse than
++  // matching none, because a mismatched third component is a contradiction
++  // rather than an unknown.
++  //
++  // The values are not a device property so much as a backend one. Chromium
++  // seeds the desktop answer itself in QueryShaderPrecisionFormat — 127/127/23
++  // for every float qualifier, 31/30/0 for every int — and then calls the
++  // driver, which overwrites it only where the driver implements the entry
++  // point. Desktop GL leaves it a stub, so real Chrome on real hardware
++  // reports Chromium's constants; ANGLE implements it and reports what its
++  // backend declares. That is the entire divergence.
++  const std::map<std::string, ShaderPrecision>& gl_precisions() const {
++    return gl_precisions_;
++  }
++
+   // IANA timezone name, e.g. "Europe/Warsaw".
+   //
+   // Only the zone *name* is a host fact. ICU's data is compiled into the binary
+@@ -299,6 +328,7 @@ class BASE_EXPORT Profile {
+   std::map<std::string, std::string> keyboard_layout_map_;
+   std::map<std::string, int> gl_limits_;
+   std::set<std::string> gl_extensions_;
++  std::map<std::string, ShaderPrecision> gl_precisions_;
+   std::optional<std::string> timezone_;
+   std::optional<bool> prefers_dark_;
+   std::optional<std::string> accept_languages_;
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index affe606..1be796d 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -237,6 +237,36 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+     }
+   }
+ 
++  if (const DictValue* precs = dict->FindDict("gl_precisions")) {
++    for (const auto [name, value] : *precs) {
++      const DictValue* entry = value.GetIfDict();
++      if (!entry) {
++        continue;
++      }
++      std::optional<int> lo = entry->FindInt("rangeMin");
++      std::optional<int> hi = entry->FindInt("rangeMax");
++      std::optional<int> bits = entry->FindInt("precision");
++      // All three or none. A partial entry would mix the claim with the host
++      // on one query, which is the incoherence this whole field exists to
++      // remove.
++      if (!lo || !hi || !bits) {
++        LOG(ERROR) << "apostate: gl_precisions." << name
++                   << " needs rangeMin, rangeMax and precision; ignoring";
++        continue;
++      }
++      // getShaderPrecisionFormat reports log2 of the exponent range and a
++      // mantissa bit count. IEEE binary32 is the largest thing any GL type
++      // describes, so nothing legitimate exceeds these.
++      if (*lo < 0 || *lo > 127 || *hi < 0 || *hi > 127 || *bits < 0 ||
++          *bits > 23) {
++        LOG(ERROR) << "apostate: gl_precisions." << name
++                   << " out of range; ignoring";
++        continue;
++      }
++      profile->gl_precisions_[name] = ShaderPrecision{*lo, *hi, *bits};
++    }
++  }
++
+   if (const DictValue* keyboard = dict->FindDict("keyboard")) {
+     if (const DictValue* map = keyboard->FindDict("layout_map")) {
+       for (const auto [code, value] : *map) {
+diff --git a/ui/gl/gl_gl_api_implementation.h b/ui/gl/gl_gl_api_implementation.h
+index 1df38a4..9aa8325 100644
+--- a/ui/gl/gl_gl_api_implementation.h
++++ b/ui/gl/gl_gl_api_implementation.h
+@@ -55,6 +55,10 @@ class GL_EXPORT RealGLApi : public GLApiBase {
+   void SetDisabledExtensions(const std::string& disabled_extensions) override;
+ 
+   void glGetIntegervFn(GLenum pname, GLint* params) override;
++  void glGetShaderPrecisionFormatFn(GLenum shadertype,
++                                    GLenum precisiontype,
++                                    GLint* range,
++                                    GLint* precision) override;
+   const GLubyte* glGetStringFn(GLenum name) override;
+   const GLubyte* glGetStringiFn(GLenum name, GLuint index) override;
+ 
+diff --git a/ui/gl/gl_gl_api_implementation.cc b/ui/gl/gl_gl_api_implementation.cc
+index 5af1eda..136e3ea 100644
+--- a/ui/gl/gl_gl_api_implementation.cc
++++ b/ui/gl/gl_gl_api_implementation.cc
+@@ -317,6 +317,99 @@ void RealGLApi::glGetIntegervFn(GLenum pname, GLint* params) {
+   }
+ }
+ 
++void RealGLApi::glGetShaderPrecisionFormatFn(GLenum shadertype,
++                                             GLenum precisiontype,
++                                             GLint* range,
++                                             GLint* precision) {
++  GLApiBase::glGetShaderPrecisionFormatFn(shadertype, precisiontype, range,
++                                          precision);
++
++  const base::apostate::Profile* profile = base::apostate::Profile::Get();
++  if (!profile || profile->gl_precisions().empty() || !range || !precision) {
++    return;
++  }
++
++  const char* shader = nullptr;
++  switch (shadertype) {
++    case GL_VERTEX_SHADER:
++      shader = "VERTEX_SHADER";
++      break;
++    case GL_FRAGMENT_SHADER:
++      shader = "FRAGMENT_SHADER";
++      break;
++    default:
++      return;
++  }
++
++  const char* qualifier = nullptr;
++  switch (precisiontype) {
++    case GL_LOW_FLOAT:
++      qualifier = "LOW_FLOAT";
++      break;
++    case GL_MEDIUM_FLOAT:
++      qualifier = "MEDIUM_FLOAT";
++      break;
++    case GL_HIGH_FLOAT:
++      qualifier = "HIGH_FLOAT";
++      break;
++    case GL_LOW_INT:
++      qualifier = "LOW_INT";
++      break;
++    case GL_MEDIUM_INT:
++      qualifier = "MEDIUM_INT";
++      break;
++    case GL_HIGH_INT:
++      qualifier = "HIGH_INT";
++      break;
++    default:
++      return;
++  }
++
++  auto it = profile->gl_precisions().find(std::string(shader) + "." +
++                                          std::string(qualifier));
++  if (it == profile->gl_precisions().end()) {
++    return;
++  }
++
++  // Unlike the limits above this is served without clamping, and the reason is
++  // measured rather than assumed. A limit is falsified by using it — allocate
++  // past the reported size and an over-claim collapses. A precision claim is
++  // falsified only if the backend actually computes at the lower precision, so
++  // the question is whether ours does.
++  //
++  // It does not. Running the same 2^-16 residual through lowp, mediump and
++  // highp on ANGLE/SwiftShader returns an identical non-zero result from all
++  // three: SwiftShader declares lowp and mediump as 10-bit with a range of 15
++  // and then computes every one of them in float32. Reporting 23/127/127 for
++  // those qualifiers is therefore truthful about what the shader will do, and
++  // no shader can catch it out. Clamping here would instead force us to keep
++  // publishing a declaration that contradicts the backend's own arithmetic.
++  //
++  // The warning still fires when a claim exceeds what the host declares,
++  // because that reasoning is specific to backends that compute at float32
++  // throughout. A backend that genuinely rounds to its declared precision
++  // would make the claim falsifiable again, and the log line is how that shows
++  // up rather than being discovered at V4.
++  if (it->second.precision > *precision) {
++    LOG(WARNING) << "apostate: profile claims " << shader << "." << qualifier
++                 << " precision " << it->second.precision
++                 << " but this driver declares " << *precision
++                 << ". Serving the claim: verified on ANGLE/SwiftShader, whose "
++                    "reduced qualifiers compute at float32 regardless. Confirm "
++                    "the same holds on any other backend.";
++  }
++
++  // Written through std::copy_n rather than range[0]/range[1]. The GL entry
++  // point contract guarantees two elements and GLApiBase has just filled both,
++  // but raw indexing past [0] trips -Wunsafe-buffer-usage, and nothing in
++  // ui/gl uses the UNSAFE_BUFFERS escape hatch — no reason to be the first.
++  const std::array<GLint, 2> claimed_range = {
++      static_cast<GLint>(it->second.range_min),
++      static_cast<GLint>(it->second.range_max)};
++  std::copy_n(claimed_range.begin(), claimed_range.size(), range);
++  *precision = static_cast<GLint>(it->second.precision);
++}
++
+ const GLubyte* RealGLApi::glGetStringFn(GLenum name) {
+   if (name == GL_EXTENSIONS && disabled_exts_.size()) {
+     InitializeFilteredExtensionsIfNeeded();

@@ -159,6 +159,21 @@ def build(capture):
     if exts:
         profile["gl_extensions"] = exts
 
+    # getShaderPrecisionFormat, the third WebGL component. Independent of the
+    # limits and the extension list, read by nothing else, and therefore the
+    # one that stays wrong quietly while the other two get fixed. Matching two
+    # of three is worse than matching none: a mismatched third component is a
+    # contradiction rather than an unknown.
+    precisions = {}
+    for src in (gl2, gl1):          # webgl1 wins on conflict; it is the wider
+        for k, v in (src.get("precision") or {}).items():
+            if isinstance(v, dict) and {"rangeMin", "rangeMax", "precision"} <= set(v):
+                precisions[k] = {"rangeMin": v["rangeMin"],
+                                 "rangeMax": v["rangeMax"],
+                                 "precision": v["precision"]}
+    if precisions:
+        profile["gl_precisions"] = dict(sorted(precisions.items()))
+
     put("screen", "width", screen.get("width"))
     put("screen", "height", screen.get("height"))
     put("screen", "avail_left", screen.get("availLeft"))

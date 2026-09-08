@@ -149,6 +149,23 @@ def build(capture):
     if hw:
         profile.setdefault("media", {})["hw_decode_codecs"] = sorted(hw)
 
+    # TTS voices. Replayed rather than derived: the names encode the OS and
+    # its installed language packs, and nothing about the platform string
+    # predicts which twenty-odd voices a given Windows install carries.
+    voices = probe(capture, "speech.voices") or []
+    if isinstance(voices, list) and voices:
+        out = []
+        for v in voices:
+            name, lang = v.get("name"), v.get("lang")
+            if not name or not lang:
+                continue
+            entry = {"name": name, "lang": lang}
+            if v.get("default"):
+                entry["default"] = True
+            out.append(entry)
+        if out:
+            profile.setdefault("speech", {})["voices"] = out
+
     # Capture device counts. A laptop with neither a microphone nor a camera is
     # not a laptop, and a headless host has neither.
     devs = (probe(capture, "media.devices") or {}).get("counts") or {}

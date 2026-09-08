@@ -46,9 +46,51 @@ done
 B64="$(base64 -w0 < "$PROFILE" 2>/dev/null || base64 < "$PROFILE" | tr -d '\n')"
 USERDIR="$OUTDIR/userdata"
 
+# Pre-grant window-management so screen.details measures instead of erroring.
+#
+# That probe is the only source of the display label, HDR headroom and colour
+# primaries, and it sits behind a permission that defaults to "prompt" — which
+# a headless run can never answer, so the row was permanently unmeasured rather
+# than wrong. The reference machine had it granted, so granting matches.
+#
+# Seeded into Preferences rather than granted over CDP on purpose: attaching a
+# debugger to measure a browser changes the browser being measured, and this
+# harness exists to avoid exactly that class of error.
+#
+# KNOWN LIMITATION: this does not currently work. The exception is written, it
+# survives into the profile Chrome writes back, and navigator.permissions still
+# reports 'prompt' in both headless and Xvfb-headed runs. No general
+# auto-accept switch exists either, and adding one to the measurement path
+# would introduce exactly the kind of observable the axioms forbid. So the
+# subject side of screen.details stays unmeasured for now.
+#
+# The asymmetry matters and is not fatal: reference captures come from real
+# people who click Allow, so the *values* will be in the corpus and can drive
+# the profile. What is missing is only the automated check that we serve them
+# back correctly, which needs one manual headed run on a display where a human
+# can grant it.
+mkdir -p "$USERDIR/Default"
+cat > "$USERDIR/Default/Preferences" <<PREFS
+{"profile":{"content_settings":{"exceptions":{"window-placement":{
+  "http://127.0.0.1:$PORT,*":{"last_modified":"13350000000000000","setting":1}}}}}}
+PREFS
+
 say "launching browser"
+# APOSTATE_V3_HEADFUL=1 runs under Xvfb instead of headless. The reference
+# captures come from real headed browsers, and headless differs in ways that
+# have nothing to do with any patch — window-management is refused outright, so
+# screen.details cannot be measured at all.
+if [ -n "${APOSTATE_V3_HEADFUL:-}" ]; then
+  command -v xvfb-run >/dev/null || die "APOSTATE_V3_HEADFUL set but xvfb-run is missing"
+  LAUNCH=(xvfb-run -a --server-args="-screen 0 ${APOSTATE_V3_SCREEN:-1920x1080x24}" "$CHROME")
+  MODE=()
+else
+  LAUNCH=("$CHROME")
+  MODE=(--headless=new)
+fi
+
 env ${FONTCONF:+FONTCONFIG_FILE="$FONTCONF"} \
-  "$CHROME" --headless=new --no-sandbox --disable-gpu-sandbox \
+  "${LAUNCH[@]}" "${MODE[@]}" --no-sandbox --disable-gpu-sandbox \
   --no-first-run --no-default-browser-check \
   --user-data-dir="$USERDIR" \
   --apostate-profile="$B64" \

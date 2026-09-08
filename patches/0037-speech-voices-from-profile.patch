@@ -1,0 +1,281 @@
+Subject: [PATCH] speech: TTS voices from the profile, and utterances that run
+
+speechSynthesis.getVoices() returns nothing on our build and 22 voices on the
+reference. An empty list is a strong container tell — every real desktop has
+voices, Windows ships around twenty SAPI ones — and the names are
+platform-shaped rather than arbitrary, so they are replayed rather than
+invented: "Microsoft Hazel - English (United Kingdom)" is not a string any
+other OS produces.
+
+Two things had to be right for this to be worth doing.
+
+First, where. TtsControllerImpl only asks the platform for voices when
+TtsPlatformReady() is true, and that is PlatformImplSupported() &&
+PlatformImplInitialized() — both false on a box without speech-dispatcher. So
+patching GetVoices() alone changes nothing, because nothing calls it. The
+profile makes this platform report supported and initialised, and then supplies
+the list.
+
+Second, speaking. A voice list that cannot speak would be worse than no list at
+all: a page sets utterance.volume = 0, calls speak(), and listens for onend
+against onerror. That is silent, instant, and it catches a list of voices that
+is only a list — the same cheap falsification that keeps HEVC's supported=false
+honest in patch 0034. So the utterance actually runs: TTS_EVENT_START, then
+TTS_EVENT_END after the time real speech would have taken, at roughly fifteen
+characters a second scaled by the requested rate. The only thing absent is
+audio, and nothing can observe that. Timing matters here rather than being
+decoration — an utterance that ends instantly is as wrong as one that never
+starts.
+
+The host's own voices are replaced rather than merged. speech-dispatcher offers
+espeak voices whose names no Windows or macOS machine produces, and a device
+reporting both is running two synthesisers at once. Where a real synthesiser is
+initialised it keeps it and speaks for real; the synthetic path is only taken
+when there is nothing behind the list.
+
+StopSpeaking is guarded for the same reason: calling into an uninitialised
+speech-dispatcher connection is not safe, and there is nothing there to stop.
+
+Ledger: speech.voices.
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index 52bd72f..82ecce0 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -10,6 +10,7 @@
+ #include <set>
+ #include <optional>
+ #include <string>
++#include <vector>
+ 
+ #include "base/base_export.h"
+ 
+@@ -288,6 +289,25 @@ class BASE_EXPORT Profile {
+     return hw_decode_codecs_;
+   }
+ 
++  // One speech-synthesis voice as speechSynthesis.getVoices() reports it.
++  struct SpeechVoice {
++    std::string name;
++    std::string lang;
++    bool is_default = false;
++  };
++
++  // The claimed machine's TTS voices.
++  //
++  // An empty list is a strong container tell: every real desktop has voices,
++  // Windows ships around twenty SAPI ones, and a Linux box without
++  // speech-dispatcher installed reports none at all. The list is also
++  // platform-shaped rather than arbitrary — "Microsoft Hazel - English (United
++  // Kingdom)" is not a name any other OS produces — so it has to be replayed
++  // rather than invented.
++  const std::vector<SpeechVoice>& speech_voices() const {
++    return speech_voices_;
++  }
++
+   // IANA timezone name, e.g. "Europe/Warsaw".
+   //
+   // Only the zone *name* is a host fact. ICU's data is compiled into the binary
+@@ -377,6 +397,7 @@ class BASE_EXPORT Profile {
+   std::map<std::string, SystemFont> css_system_fonts_;
+   std::optional<bool> screen_is_extended_;
+   std::set<std::string> hw_decode_codecs_;
++  std::vector<SpeechVoice> speech_voices_;
+   std::optional<std::string> timezone_;
+   std::optional<bool> prefers_dark_;
+   std::optional<std::string> accept_languages_;
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index cd58a4a..86238a3 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -232,6 +232,26 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+     }
+   }
+ 
++  if (const DictValue* speech = dict->FindDict("speech")) {
++    if (const ListValue* voices = speech->FindList("voices")) {
++      for (const auto& v : *voices) {
++        const DictValue* entry = v.GetIfDict();
++        if (!entry) {
++          continue;
++        }
++        const std::string* name = entry->FindString("name");
++        const std::string* lang = entry->FindString("lang");
++        if (!name || name->empty() || !lang || lang->empty()) {
++          LOG(ERROR) << "apostate: speech.voices entry needs name and lang; "
++                        "ignoring";
++          continue;
++        }
++        profile->speech_voices_.push_back(
++            SpeechVoice{*name, *lang, entry->FindBool("default").value_or(false)});
++      }
++    }
++  }
++
+   if (const DictValue* gl = dict->FindDict("gl_limits")) {
+     for (const auto [name, value] : *gl) {
+       if (std::optional<int> v = value.GetIfInt()) {
+diff --git a/content/browser/speech/tts_linux.cc b/content/browser/speech/tts_linux.cc
+index dcfb2d4..0738577 100644
+--- a/content/browser/speech/tts_linux.cc
++++ b/content/browser/speech/tts_linux.cc
+@@ -21,6 +21,8 @@
+ #include "base/task/task_traits.h"
+ #include "base/task/thread_pool.h"
+ #include "base/threading/sequence_bound.h"
++#include "base/apostate/profile.h"
++#include "base/time/time.h"
+ #include "content/browser/speech/tts_platform_impl.h"
+ #include "content/public/browser/browser_task_traits.h"
+ #include "content/public/browser/browser_thread.h"
+@@ -124,6 +126,8 @@ class TtsPlatformImplLinux : public TtsPlatformImpl {
+   void Shutdown() override;
+ 
+   void OnInitialized(bool success, PlatformVoices voices);
++  // Completes a profile-supplied utterance. See Speak().
++  void FinishApostateUtterance(int utterance_id, int text_length);
+   void OnSpeakScheduled(base::OnceCallback<void(bool)> on_speak_finished,
+                         bool success);
+   void OnSpeakFinished(int utterance_id);
+@@ -414,11 +418,45 @@ TtsPlatformImplLinux::TtsPlatformImplLinux()
+   worker_.AsyncCall(&TtsPlatformImplBackgroundWorker::Initialize);
+ }
+ 
++namespace {
++
++// Voices the profile supplies, or nullptr when it supplies none.
++//
++// When present they replace the host's entirely rather than adding to them.
++// speech-dispatcher on the build host offers espeak voices with names no
++// Windows or macOS machine produces, so merging would report a device running
++// two synthesisers at once.
++const std::vector<base::apostate::Profile::SpeechVoice>* ApostateVoices() {
++  const base::apostate::Profile* profile = base::apostate::Profile::Get();
++  if (!profile || profile->speech_voices().empty()) {
++    return nullptr;
++  }
++  return &profile->speech_voices();
++}
++
++// Characters per second of synthesised speech at rate 1.0. Measured against
++// the SAPI voices on the reference machine, which is also roughly where every
++// other synthesiser sits — the exact figure matters only because a page can
++// time an utterance, and an instant one is as wrong as a silent one.
++constexpr double kApostateCharsPerSecond = 15.0;
++
++}  // namespace
++
+ bool TtsPlatformImplLinux::PlatformImplSupported() {
++  // A profile carrying voices makes this platform "supported" whether or not
++  // speech-dispatcher is installed. Without this the controller never asks for
++  // voices at all — TtsPlatformReady() gates the call — and the list stays
++  // empty no matter what GetVoices() would have returned.
++  if (ApostateVoices()) {
++    return true;
++  }
+   return is_supported_;
+ }
+ 
+ bool TtsPlatformImplLinux::PlatformImplInitialized() {
++  if (ApostateVoices()) {
++    return true;
++  }
+   return is_initialized_;
+ }
+ 
+@@ -437,6 +475,37 @@ void TtsPlatformImplLinux::Speak(
+     return;
+   }
+ 
++  // Speaking, when the voices came from the profile and the host has no
++  // synthesiser behind them.
++  //
++  // Serving a voice list that cannot speak would be worse than serving none.
++  // A page sets utterance.volume = 0, calls speak(), and listens for onend
++  // against onerror: silent, instant, and it catches a list of voices that are
++  // only a list. So the utterance runs — start, then end after the time real
++  // speech would have taken — and the only thing missing is audio, which
++  // nothing can observe.
++  //
++  // Deferred to the real synthesiser whenever there is one, so a host with
++  // speech-dispatcher installed still speaks for real.
++  if (ApostateVoices() && !is_initialized_) {
++    is_speaking_ = true;
++    utterance_id_ = utterance_id;
++    const int text_length = static_cast<int>(utterance.size());
++    TtsController::GetInstance()->OnTtsEvent(utterance_id, TTS_EVENT_START, 0,
++                                             text_length, std::string());
++    const double rate = params.rate > 0.0 ? params.rate : 1.0;
++    base::TimeDelta duration = base::Milliseconds(static_cast<int64_t>(
++        text_length * 1000.0 / (kApostateCharsPerSecond * rate)));
++    duration = std::clamp(duration, base::Milliseconds(120), base::Seconds(300));
++    GetUIThreadTaskRunner({})->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(&TtsPlatformImplLinux::FinishApostateUtterance,
++                       base::Unretained(this), utterance_id, text_length),
++        duration);
++    std::move(on_speak_finished).Run(true);
++    return;
++  }
++
+   // Flag that a utterance is getting emitted. The |is_speaking_| flag will be
+   // set back to false when the utterance will be fully spoken, stopped or if
+   // the voice synthetizer was not able to emit it.
+@@ -453,10 +522,32 @@ void TtsPlatformImplLinux::Speak(
+                                     std::move(on_speak_finished))));
+ }
+ 
++void TtsPlatformImplLinux::FinishApostateUtterance(int utterance_id,
++                                                   int text_length) {
++  DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
++  // A stop or a newer utterance already moved on; the timer is stale.
++  if (utterance_id != utterance_id_) {
++    return;
++  }
++  is_speaking_ = false;
++  utterance_id_ = kInvalidUtteranceId;
++  TtsController::GetInstance()->OnTtsEvent(utterance_id, TTS_EVENT_END,
++                                           text_length, 0, std::string());
++}
++
+ bool TtsPlatformImplLinux::StopSpeaking() {
+   DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
+   DCHECK(PlatformImplInitialized());
+ 
++  // Nothing to stop in the worker when there is no synthesiser behind it, and
++  // calling into an uninitialised speech-dispatcher connection is not safe.
++  if (ApostateVoices() && !is_initialized_) {
++    paused_ = false;
++    is_speaking_ = false;
++    utterance_id_ = kInvalidUtteranceId;
++    return true;
++  }
++
+   worker_.AsyncCall(&TtsPlatformImplBackgroundWorker::StopSpeaking);
+   paused_ = false;
+ 
+@@ -496,6 +587,25 @@ void TtsPlatformImplLinux::GetVoices(std::vector<VoiceData>* out_voices) {
+   DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
+   DCHECK(PlatformImplInitialized());
+ 
++  if (const auto* claimed = ApostateVoices()) {
++    for (const auto& v : *claimed) {
++      out_voices->push_back(VoiceData());
++      VoiceData& voice = out_voices->back();
++      voice.native = true;
++      voice.name = v.name;
++      voice.lang = v.lang;
++      // The same event set the real path advertises. A voice claiming fewer
++      // events than it delivers, or more, is its own mismatch.
++      voice.events.insert(TTS_EVENT_START);
++      voice.events.insert(TTS_EVENT_END);
++      voice.events.insert(TTS_EVENT_CANCELLED);
++      voice.events.insert(TTS_EVENT_MARKER);
++      voice.events.insert(TTS_EVENT_PAUSE);
++      voice.events.insert(TTS_EVENT_RESUME);
++    }
++    return;
++  }
++
+   for (auto it = voices_.begin(); it != voices_.end(); ++it) {
+     out_voices->push_back(VoiceData());
+     VoiceData& voice = out_voices->back();

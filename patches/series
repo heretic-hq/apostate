@@ -33,3 +33,6 @@
 0033-screen-is-extended-from-profile.patch
 0034-media-power-efficient-from-claimed-gpu.patch
 0035-webgl-clamp-64bit-query-path.patch
+0036-webgl-clamp-float-query-path.patch
+0037-speech-voices-from-profile.patch
+0038-swiftshader-raise-max-point-size.patch

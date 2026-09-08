@@ -75,6 +75,26 @@
         }
       }
     },
+    "speech": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Speech-synthesis voices. An empty list is a container tell \u2014 every real desktop has voices \u2014 and the names are platform-shaped, so they are replayed rather than invented.",
+      "properties": {
+        "voices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "lang"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "lang": { "type": "string", "minLength": 2 },
+              "default": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
     "screen": {
       "type": "object",
       "additionalProperties": false,

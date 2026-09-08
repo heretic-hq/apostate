@@ -1,0 +1,43 @@
+Subject: [PATCH] swiftshader: raise the maximum point size to 1024
+
+ALIASED_POINT_SIZE_RANGE ends at 1023 on SwiftShader and 1024 on every real
+GPU, and ANGLE passes the Vulkan limit straight through, so the odd number is
+visible to any page that asks.
+
+Same class as patch 0027 and found the same way — by measurement, after the
+profile clamp had taken everything it could. It belongs here rather than in the
+clamp because the clamp only ever serves the smaller of the two numbers, and in
+this one case the truth is the smaller number: reporting 1024 while the
+rasteriser refuses anything above 1023 would be falsified by drawing a single
+point.
+
+Checked before changing, because a bare 1023 is exactly the shape of a
+ten-bit field and this fork has been bitten by fixed-point overflow before.
+It is not one. Two places read the constant — the reported limit, and a float
+clamp on the point sprite in Renderer.cpp — and neither packs it.
+
+Ledger: webgl.point-size-range.
+diff --git a/third_party/swiftshader/src/Vulkan/VkConfig.hpp b/third_party/swiftshader/src/Vulkan/VkConfig.hpp
+index cc4e3b9..b96d88a 100644
+--- a/third_party/swiftshader/src/Vulkan/VkConfig.hpp
++++ b/third_party/swiftshader/src/Vulkan/VkConfig.hpp
+@@ -94,7 +94,18 @@ constexpr uint32_t MAX_COMPUTE_WORKGROUP_INVOCATIONS = 256;
+ 
+ constexpr size_t MAX_INLINE_UNIFORM_BLOCK_SIZE = 256;
+ 
+-constexpr float MAX_POINT_SIZE = 1023.0;
++// Apostate: 1024.0 upstream 1023.0. Real GPUs report an aliased point size
++// range ending at 1024 and ANGLE passes the Vulkan limit straight through, so
++// SwiftShader's 1023 is visible as ALIASED_POINT_SIZE_RANGE[1] and is a value
++// no hardware reports.
++//
++// Raised rather than clamped in the profile because the clamp only ever takes
++// the smaller number, and here the truth is the smaller number: reporting 1024
++// while the rasteriser refuses anything above 1023 is falsified by drawing one
++// point. Only two things read this — the reported limit, and a float clamp on
++// the point sprite in Renderer.cpp — so there is no packed field to overflow,
++// which is the hazard that makes this class of change worth checking first.
++constexpr float MAX_POINT_SIZE = 1024.0;
+ 
+ constexpr int MAX_SAMPLER_ALLOCATION_COUNT = 4000;
+ 

@@ -1,0 +1,82 @@
+Subject: [PATCH] webgl: clamp on the float query path
+
+The third and last query path. MAX_TEXTURE_LOD_BIAS is a GLfloat, so neither
+0026's 32-bit hook nor 0035's 64-bit one ever saw it, and the value was sitting
+in the profile being ignored: the reference reports 2, SwiftShader reports 15.
+
+That completes the set. glGetIntegerv, glGetInteger64v and glGetFloatv are the
+three ways a limit reaches WebGL, they share one table, and a limit added to
+that table is now served whichever way it is asked for. Getting this wrong
+twice in three patches is the argument for the third one existing at all.
+
+Only integral claims are served. gl_limits holds integers and every entry in
+the table is one, so rounding a float claim would invent a value the profile
+never carried.
+
+Ledger: webgl.limits (extends).
+diff --git a/ui/gl/gl_gl_api_implementation.h b/ui/gl/gl_gl_api_implementation.h
+index 4971a0b..5484ef7 100644
+--- a/ui/gl/gl_gl_api_implementation.h
++++ b/ui/gl/gl_gl_api_implementation.h
+@@ -56,6 +56,7 @@ class GL_EXPORT RealGLApi : public GLApiBase {
+ 
+   void glGetIntegervFn(GLenum pname, GLint* params) override;
+   void glGetInteger64vFn(GLenum pname, GLint64* params) override;
++  void glGetFloatvFn(GLenum pname, GLfloat* params) override;
+   void glGetShaderPrecisionFormatFn(GLenum shadertype,
+                                     GLenum precisiontype,
+                                     GLint* range,
+diff --git a/ui/gl/gl_gl_api_implementation.cc b/ui/gl/gl_gl_api_implementation.cc
+index 1e702dc..b5813f0 100644
+--- a/ui/gl/gl_gl_api_implementation.cc
++++ b/ui/gl/gl_gl_api_implementation.cc
+@@ -272,6 +272,8 @@ constexpr ApostateGlLimit kApostateGlLimits[] = {
+     // claims more than SwiftShader supports, so the clamp keeps ours and the
+     // row stays red, which is the correct outcome rather than a missing entry.
+     {GL_MAX_ELEMENT_INDEX, "MAX_ELEMENT_INDEX"},
++    // A GLfloat, so it is reachable only through the glGetFloatv hook.
++    {GL_MAX_TEXTURE_LOD_BIAS, "MAX_TEXTURE_LOD_BIAS"},
+     // WebGL2's uniform-block, varying and shader-interface limits. Added after
+     // measurement rather than by reading the spec: with the list above served
+     // and the shader precision block corrected, these were what the reference
+@@ -342,6 +344,40 @@ void RealGLApi::glGetIntegervFn(GLenum pname, GLint* params) {
+   }
+ }
+ 
++void RealGLApi::glGetFloatvFn(GLenum pname, GLfloat* params) {
++  GLApiBase::glGetFloatvFn(pname, params);
++
++  // The third query path. MAX_TEXTURE_LOD_BIAS is a GLfloat, so neither the
++  // 32-bit nor the 64-bit integer hook ever sees it, and it sat in the profile
++  // being ignored: the reference reports 2 where SwiftShader reports 15.
++  //
++  // Only integral limits are served here. gl_limits holds integers, every
++  // limit in the table is one, and rounding a float claim would invent a
++  // value the profile never carried.
++  const base::apostate::Profile* profile = base::apostate::Profile::Get();
++  if (!profile || profile->gl_limits().empty() || !params) {
++    return;
++  }
++  for (const auto& limit : kApostateGlLimits) {
++    if (limit.pname != pname) {
++      continue;
++    }
++    auto it = profile->gl_limits().find(limit.name);
++    if (it == profile->gl_limits().end()) {
++      return;
++    }
++    const GLfloat real = *params;
++    const GLfloat claimed = static_cast<GLfloat>(it->second);
++    *params = std::min(claimed, real);
++    if (claimed > real) {
++      LOG(WARNING) << "apostate: profile claims " << limit.name << " = "
++                   << claimed << " but this driver reports " << real
++                   << "; serving " << real << ".";
++    }
++    return;
++  }
++}
++
+ void RealGLApi::glGetInteger64vFn(GLenum pname, GLint64* params) {
+   GLApiBase::glGetInteger64vFn(pname, params);
+ 

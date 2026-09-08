@@ -57,7 +57,8 @@
   "logical_cores": 14,
   "audio_buffer_frames": 256,
   "audio_sample_rate": 48000,
-  "memory_total_bytes": 34359738368,
-  "memory_is_floor": true,
-  "evidence": "measured-floor"
+  "memory_total_bytes": 38654705664,
+  "memory_is_floor": false,
+  "evidence": "measured",
+  "memory_source": "owner-reported (m4-max-chrome-20260907T191217Z.memory)"
 }

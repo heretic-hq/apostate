@@ -240,6 +240,18 @@ def main() -> int:
                 rec["memory_total_bytes"] = int(nav["deviceMemory"]) * 1024**3
                 rec["memory_is_floor"] = True
                 rec["evidence"] = "measured-floor"
+                # Overridable from a sidecar file next to the capture, so an
+                # owner-reported figure is recorded once and survives
+                # re-decomposition. The reference MacBook is 36 GiB, which
+                # deviceMemory reports as 32 and which the incognito quota
+                # proves is not 32.
+                side = args.capture.with_suffix(".memory")
+                if side.exists():
+                    gib_real = int(side.read_text().strip())
+                    rec["memory_total_bytes"] = gib_real * 1024**3
+                    rec["memory_is_floor"] = False
+                    rec["evidence"] = "measured"
+                    rec["memory_source"] = "owner-reported (%s)" % side.name
 
         if block == "gpu":
             g = content.get("webgl1") or {}

@@ -197,7 +197,7 @@ patch.
 |---|---|---|
 | closed by the profile | 77 | values the browser chooses |
 | **fonts** | 85 | the host does not have the font files |
-| **WebGL parameter tables** | 78 | ANGLE hard-codes them per backend; Linux cannot run Metal |
+| **WebGL parameter tables** | 78 | see below — the measurement is confounded by the test host having no GPU |
 | canvas renders | 8 | follows fonts and the raster backend; glyph rasterisation is FreeType against CoreText and is *not* provisionable |
 | codecs, WebGPU adapter, voices, keyboard, media devices | 17 | OS-provided resources the host lacks |
 | audio render | 4 | CPUID-selected FFT kernel and host libm |
@@ -263,6 +263,28 @@ That is why the split between probe families matters. A probe that measures text
 rendered *pixels* is not: the glyph outlines differ, which is the 32% of text-band
 pixels that differ between the two machines. Installing the real files is what
 closes the second, and nothing closes it short of that.
+
+**The WebGL figure is not yet trustworthy, and the reason matters.** Every
+measurement behind it was taken on a build host with no GPU, through
+ANGLE-on-SwiftShader, against a Windows reference that was itself a GPU-less VM
+running Microsoft Basic Render Driver. Software rasteriser against software
+rasteriser.
+
+The differences that result are mixed in direction. Four limits are higher on
+our side and could be clamped down safely — clamping down is always safe,
+because a page can only falsify a limit by exceeding it. But three are *lower*:
+MAX_TEXTURE_SIZE, MAX_RENDERBUFFER_SIZE and MAX_VIEWPORT_DIMS all read 8192,
+which is SwiftShader's cap, against 16384 and 32767 on the reference. Raising
+those is exactly the move that gets falsified by a second code path — allocate
+the texture and the claim collapses.
+
+But a Linux host with a real GPU reports 16384 or more natively, because it is
+the same class of silicon a Windows machine would be reporting through D3D11.
+So an unknown share of this row is the test environment rather than the
+platform, and the honest position is that the cross-OS WebGL gap has not been
+measured yet. Measuring it needs a Linux host with a discrete GPU and a
+same-GPU Windows capture to compare against; until then this row should be read
+as an upper bound, not a ceiling.
 
 None of this was assumed. The comparison that produced it — an unprofiled build
 against the same reference — is the control, and it is worth re-running whenever

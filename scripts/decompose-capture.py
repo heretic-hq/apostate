@@ -254,6 +254,37 @@ def main() -> int:
                     rec["memory_source"] = "owner-reported (%s)" % side.name
 
         if block == "gpu":
+            # Three hashes, because the block spans two different questions and
+            # one hash over all of it answers neither.
+            #
+            # caps_sha256 is the GPU's capability surface: WebGL parameters,
+            # extensions and precision formats, with the identifying strings
+            # removed. Equal caps means two GPUs report the same abilities.
+            #
+            # webgl_render_sha256 is what the GPU actually draws.
+            #
+            # canvas_sha256 is deliberately apart from both, because canvas 2D
+            # is not a GPU measurement. Measured on two Apple Silicon Macs, every
+            # WebGL parameter, extension, precision format and readback pixel was
+            # identical while canvas differed — and the canvas difference was
+            # 0.0% across the shapes and 1.8% in the text band, tracking a macOS
+            # version gap of 26.6.2 against 27.0.0. Folding canvas into GPU
+            # identity made two interchangeable GPUs look distinct.
+            caps = {}
+            for ctx in ("webgl1", "webgl2"):
+                v = content.get(ctx) or {}
+                caps[ctx] = {k: v.get(k) for k in
+                             ("parameters", "extensions", "precision",
+                              "contextAttributes", "antialiasSamples")}
+            caps["webgpu"] = strip_identity(content.get("webgpu") or {})
+            rec["caps_sha256"] = sha(caps)
+            rec["webgl_render_sha256"] = sha({
+                "webgl1": (content.get("webgl1") or {}).get("pixels_sha256"),
+                "webgl2": (content.get("webgl2") or {}).get("pixels_sha256"),
+            })
+            rec["canvas_sha256"] = sha(
+                (content.get("canvas.2d") or {}).get("pixels_sha256"))
+
             g = content.get("webgl1") or {}
             # A software or virtual renderer is a real measurement of a real
             # machine, and it is not a machine any consumer profile should

@@ -933,6 +933,9 @@
       }
     }
   },
+  "caps_sha256": "5a1555221d0a83f0dae4f4345fbfa9219a15705312f386246e03d00da41bde17",
+  "webgl_render_sha256": "52615ec345f1b448e2bc629b6e30fee74b4bcf3a1440c5988622a7852e022ae2",
+  "canvas_sha256": "8c8fd4904c152954f9d301d9a0c0909f4e4d5699ea92f79a964be92f431ff3ed",
   "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Max, Unspecified Version)",
   "vendor": "Google Inc. (Apple)",
   "render_sha256": "76728b4f482a1fccd320d6c791e90d42ca5f2d2e1ff730c4d942f5f2a93432bb"

@@ -29,3 +29,6 @@
 0029-webgl-shader-precision-from-profile.patch
 0030-css-highlight-at-the-css-emitter.patch
 0031-css-system-fonts-from-profile.patch
+0032-webgl2-clamp-uniform-and-varying-limits.patch
+0033-screen-is-extended-from-profile.patch
+0034-media-power-efficient-from-claimed-gpu.patch

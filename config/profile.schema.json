@@ -79,6 +79,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "is_extended": {
+          "type": "boolean",
+          "description": "Whether the claimed machine has more than one display. Readable with no permission, unlike everything else about the second screen, so a profile replayed from a two-screen capture contradicts itself here for free."
+        },
         "width": {
           "type": "integer"
         },
@@ -288,6 +292,15 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "hw_decode_codecs": {
+          "type": "array",
+          "description": "Video codecs the claimed GPU decodes in fixed function, lowercase. Drives MediaCapabilities.decodingInfo().powerEfficient, which is a property of the GPU generation: Intel Gen9.5 (UHD 630) decodes h264, vp9 and hevc but not av1. Never widens `supported` \u2014 that is a capability, and claiming a decoder we lack is falsified by playing one file.",
+          "items": {
+            "type": "string",
+            "enum": ["h264", "vp8", "vp9", "hevc", "av1"]
+          },
+          "uniqueItems": true
+        },
         "audioinput_count": {
           "type": "integer",
           "minimum": 0,

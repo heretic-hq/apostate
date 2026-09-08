@@ -127,6 +127,28 @@ def build(capture):
         put("audio", "hardware_buffer_frames",
             round(audio["baseLatency"] * audio["sampleRate"]))
 
+    # Which video codecs the captured GPU decodes in fixed function, read off
+    # decodingInfo().powerEfficient. This is a GPU-generation property — Intel
+    # Gen9.5 does h264, vp9 and hevc and not av1 — so it has to travel with the
+    # GPU the profile claims.
+    CODEC_MARKERS = (("avc1", "h264"), ("avc3", "h264"), ("vp08", "vp8"),
+                     ("vp8", "vp8"), ("vp09", "vp9"), ("vp9", "vp9"),
+                     ("hev1", "hevc"), ("hvc1", "hevc"), ("av01", "av1"))
+    hw = set()
+    for entry in (probe(capture, "codecs.media") or {}).get("decodingInfo") or []:
+        query = entry.get("query") or entry.get("config") or {}
+        ctype = (query.get("contentType") or "").lower()
+        if not ctype.startswith("video/"):
+            continue
+        if not (entry.get("result") or {}).get("powerEfficient"):
+            continue
+        for marker, name in CODEC_MARKERS:
+            if marker in ctype:
+                hw.add(name)
+                break
+    if hw:
+        profile.setdefault("media", {})["hw_decode_codecs"] = sorted(hw)
+
     # Capture device counts. A laptop with neither a microphone nor a camera is
     # not a laptop, and a headless host has neither.
     devs = (probe(capture, "media.devices") or {}).get("counts") or {}
@@ -173,6 +195,11 @@ def build(capture):
                                  "precision": v["precision"]}
     if precisions:
         profile["gl_precisions"] = dict(sorted(precisions.items()))
+
+    # Multi-monitor. isExtended is free to read while getScreenDetails() needs
+    # window-management, so this must come from the capture rather than from
+    # whatever display the replay host happens to have.
+    put("screen", "is_extended", screen.get("isExtended"))
 
     put("screen", "width", screen.get("width"))
     put("screen", "height", screen.get("height"))

@@ -1,0 +1,62 @@
+Subject: [PATCH] webgl: clamp the WebGL2 uniform and varying limits too
+
+Patch 0026 serves the claimed device's GL limits as min(claim, driver) but
+lists only the WebGL1 set plus a handful of WebGL2 ones. With that list served
+and the shader precision block corrected by 0029, the reference Windows machine
+still disagreed on twelve further parameters, and this adds eleven of them.
+
+They are added from measurement rather than from reading the spec: these are
+exactly the ones the V3 diff still showed, and every one reports a number
+SwiftShader sets higher than the real Intel GPU does — 60 uniform blocks against
+24, 245760 combined components against 212992, 128 varying components against
+120. The clamp needs no special casing for that; taking the minimum was already
+the rule and these simply were not on the list it consulted.
+
+Three of the sixteen are deliberately left out because min() cannot help and
+claiming them would be an over-claim a page can falsify:
+
+  MAX_SAMPLES        reference 16, SwiftShader 4. Allocating a 16x multisample
+                     renderbuffer is one call and it would fail.
+  MAX_ELEMENT_INDEX  reference 4294967294, ours 1073741823. Read through
+                     glGetInteger64v, a different entry point from this hook.
+  MAX_TEXTURE_LOD_BIAS  reference 2, ours 15. A GLfloat, read through
+                     glGetFloatv, so this integer hook never sees it — and here
+                     the reference is *lower*, so it is a clamp we could make
+                     rather than a raise we could not.
+
+Those stay red and are honestly red. Raising a limit the rasteriser cannot meet
+trades a mismatched number for a failing draw call, which is the worse of the
+two.
+
+Ledger: webgl.limits (extends).
+diff --git a/ui/gl/gl_gl_api_implementation.cc b/ui/gl/gl_gl_api_implementation.cc
+index 136e3ea..9b07c93 100644
+--- a/ui/gl/gl_gl_api_implementation.cc
++++ b/ui/gl/gl_gl_api_implementation.cc
+@@ -267,6 +267,26 @@ constexpr ApostateGlLimit kApostateGlLimits[] = {
+     {GL_MAX_SAMPLES, "MAX_SAMPLES"},
+     {GL_MAX_ELEMENTS_INDICES, "MAX_ELEMENTS_INDICES"},
+     {GL_MAX_ELEMENTS_VERTICES, "MAX_ELEMENTS_VERTICES"},
++    // WebGL2's uniform-block, varying and shader-interface limits. Added after
++    // measurement rather than by reading the spec: with the list above served
++    // and the shader precision block corrected, these were what the reference
++    // Windows machine still disagreed with, and every one of them reports a
++    // number SwiftShader happens to set higher than the real GPU does. The
++    // clamp handles that on its own — nothing here can over-claim.
++    {GL_MAX_COMBINED_UNIFORM_BLOCKS, "MAX_COMBINED_UNIFORM_BLOCKS"},
++    {GL_MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS,
++     "MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS"},
++    {GL_MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS,
++     "MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS"},
++    {GL_MAX_UNIFORM_BUFFER_BINDINGS, "MAX_UNIFORM_BUFFER_BINDINGS"},
++    {GL_MAX_VERTEX_UNIFORM_BLOCKS, "MAX_VERTEX_UNIFORM_BLOCKS"},
++    {GL_MAX_FRAGMENT_UNIFORM_BLOCKS, "MAX_FRAGMENT_UNIFORM_BLOCKS"},
++    {GL_MAX_FRAGMENT_UNIFORM_COMPONENTS, "MAX_FRAGMENT_UNIFORM_COMPONENTS"},
++    {GL_MAX_VERTEX_OUTPUT_COMPONENTS, "MAX_VERTEX_OUTPUT_COMPONENTS"},
++    {GL_MAX_FRAGMENT_INPUT_COMPONENTS, "MAX_FRAGMENT_INPUT_COMPONENTS"},
++    {GL_MAX_VARYING_COMPONENTS, "MAX_VARYING_COMPONENTS"},
++    {GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS,
++     "MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS"},
+ };
+ 
+ }  // namespace

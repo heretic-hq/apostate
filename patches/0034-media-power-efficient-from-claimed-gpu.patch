@@ -1,0 +1,147 @@
+Subject: [PATCH] media: decodingInfo powerEfficient from the claimed GPU
+
+MediaCapabilities.decodingInfo() returns powerEfficient straight from
+GpuVideoAcceleratorFactories, which on a software rasteriser answers false for
+every codec. Any profile claiming a GPU with a video engine contradicts itself
+there, and the contradiction is legible rather than merely odd: which codecs a
+GPU decodes in fixed function is a property of its generation, so the answer
+pattern identifies the hardware.
+
+The reference Intel UHD 630 reports powerEfficient true for H.264, VP9 and HEVC
+and false for AV1. That is exactly Gen9.5 — it has no AV1 decoder — and our
+build already agreed on the AV1 answer for the wrong reason, by having no
+decoder for anything.
+
+Patched at OnGpuFactoriesSupport, which is the single point where the factories'
+answer enters the callback state and still carries the codec.
+
+Scope is deliberately narrow: powerEfficient only, never `supported`. The two
+are different kinds of claim. Efficiency is a hint with no observable
+consequence — a page cannot measure that a decode was not hardware-assisted.
+Support is a capability, and a page checks it by playing a file. That is why
+HEVC's supported=false stays as it is and stays red in V3: enable_platform_hevc
+is already on in this build, so it is not a build-flag gap but a real missing
+platform decoder, and it belongs with Widevine in the set of capabilities a
+source patch cannot conjure. Claiming it would trade a mismatched boolean for a
+video that does not play.
+
+Ledger: media.power-efficient.
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index 4d594d5..52bd72f 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -272,6 +272,22 @@ class BASE_EXPORT Profile {
+   // itself for one boolean.
+   std::optional<bool> screen_is_extended() const { return screen_is_extended_; }
+ 
++  // Video codecs the claimed GPU decodes in hardware, lowercase: "h264",
++  // "vp8", "vp9", "hevc", "av1".
++  //
++  // This is what MediaCapabilities.decodingInfo() reports as powerEfficient,
++  // and it is a statement about the claimed GPU rather than about the host. The
++  // reference Intel UHD 630 answers true for H.264, VP9 and HEVC and false for
++  // AV1, which is exactly Gen9.5's fixed-function decoder set — so the field
++  // tracks the GPU the profile claims, or the two contradict each other.
++  //
++  // Deliberately scoped to powerEfficient and not to `supported`. Efficiency is
++  // a hint no page can check; support is a capability, and claiming a decoder
++  // we do not have is falsified by playing one file.
++  const std::set<std::string>& hw_decode_codecs() const {
++    return hw_decode_codecs_;
++  }
++
+   // IANA timezone name, e.g. "Europe/Warsaw".
+   //
+   // Only the zone *name* is a host fact. ICU's data is compiled into the binary
+@@ -360,6 +376,7 @@ class BASE_EXPORT Profile {
+   std::map<std::string, ShaderPrecision> gl_precisions_;
+   std::map<std::string, SystemFont> css_system_fonts_;
+   std::optional<bool> screen_is_extended_;
++  std::set<std::string> hw_decode_codecs_;
+   std::optional<std::string> timezone_;
+   std::optional<bool> prefers_dark_;
+   std::optional<std::string> accept_languages_;
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index b8732b3..cd58a4a 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -222,6 +222,16 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+     }
+   }
+ 
++  if (const DictValue* media_hw = dict->FindDict("media")) {
++    if (const ListValue* codecs = media_hw->FindList("hw_decode_codecs")) {
++      for (const auto& v : *codecs) {
++        if (const std::string* s = v.GetIfString()) {
++          profile->hw_decode_codecs_.insert(*s);
++        }
++      }
++    }
++  }
++
+   if (const DictValue* gl = dict->FindDict("gl_limits")) {
+     for (const auto [name, value] : *gl) {
+       if (std::optional<int> v = value.GetIfInt()) {
+diff --git a/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc b/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc
+index 8d900f2..14ce76b 100644
+--- a/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc
++++ b/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/modules/media_capabilities/media_capabilities.h"
+ 
++#include "base/apostate/profile.h"
++
+ #include <memory>
+ #include <optional>
+ #include <sstream>
+@@ -1550,6 +1552,49 @@ void MediaCapabilities::OnGpuFactoriesSupport(int callback_id,
+   DCHECK(pending_cb_map_.Contains(callback_id));
+   PendingCallbackState* pending_cb = pending_cb_map_.at(callback_id);
+ 
++  // Apostate: powerEfficient follows the claimed GPU's fixed-function decoder
++  // set rather than this host's.
++  //
++  // is_supported here is GpuVideoAcceleratorFactories' answer and it becomes
++  // decodingInfo().powerEfficient verbatim. On a software rasteriser it is
++  // false for every codec, which contradicts any profile claiming a GPU with a
++  // video engine — and the contradiction is legible, because which codecs a
++  // GPU decodes is a property of its generation. The reference Intel UHD 630
++  // answers true for H.264, VP9 and HEVC and false for AV1, which is exactly
++  // what Gen9.5 decodes.
++  //
++  // Only powerEfficient is touched. `supported` stays whatever this build can
++  // really do: efficiency is a hint no page can check, while support is a
++  // capability, and claiming a decoder we do not have is falsified by playing
++  // one file.
++  if (const base::apostate::Profile* profile = base::apostate::Profile::Get()) {
++    if (!profile->hw_decode_codecs().empty()) {
++      const char* name = nullptr;
++      switch (video_codec) {
++        case media::VideoCodec::kH264:
++          name = "h264";
++          break;
++        case media::VideoCodec::kVP8:
++          name = "vp8";
++          break;
++        case media::VideoCodec::kVP9:
++          name = "vp9";
++          break;
++        case media::VideoCodec::kHEVC:
++          name = "hevc";
++          break;
++        case media::VideoCodec::kAV1:
++          name = "av1";
++          break;
++        default:
++          break;
++      }
++      if (name) {
++        is_supported = profile->hw_decode_codecs().count(name) > 0;
++      }
++    }
++  }
++
+   pending_cb->is_gpu_factories_supported = is_supported;
+   pending_cb->is_builtin_video_codec =
+       media::IsDecoderBuiltInVideoCodec(video_codec);

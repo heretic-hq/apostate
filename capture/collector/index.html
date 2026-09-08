@@ -24,6 +24,7 @@
 <main>
   <h1>Device capture</h1>
   <p class="sub">Records what this device's browser emits. Nothing is uploaded until you press the button, and the data goes only to the machine serving this page.</p>
+  <p class="sub"><strong>Please click Allow</strong> if the browser asks to manage screens — one probe depends on it. The run takes about a minute; leave the tab in the foreground.</p>
 
   <div class="warn" id="autowarn"></div>
 
@@ -111,7 +112,9 @@
       if (navigator.permissions && hasScreenDetails()) {
         var st = (await navigator.permissions.query({ name: "window-management" })).state;
         if (st === "prompt") {
-          line("requesting window-management (optional; declining is fine)");
+          line("PLEASE CLICK ALLOW on the screen-permission prompt \u2014 it is the");
+          line("only source of the display label, HDR headroom and colour");
+          line("primaries, and declining loses that probe for this capture.");
           try { await window.getScreenDetails(); } catch (e) { /* declined */ }
         }
       }

@@ -14,7 +14,7 @@
 (function (global) {
   "use strict";
 
-  var CAPTURE_VERSION = 1;
+  var CAPTURE_VERSION = 2;
 
   // ---------------------------------------------------------------- helpers
 
@@ -417,7 +417,13 @@
     // rasteriser and DPR, so rounding here would destroy the signal.
     Array.prototype.forEach.call(host.querySelectorAll("span,div"), function (el) {
       var r = el.getBoundingClientRect();
-      rects.push({ x: r.x, y: r.y, width: r.width, height: r.height, top: r.top, left: r.left });
+      // Which family the stack actually resolved to, and at what line height.
+      // Without this a height mismatch says only "the box is wrong" and cannot
+      // say whether the wrong font was chosen or the right one measured
+      // differently — two problems with different fixes.
+      var cs = getComputedStyle(el);
+      rects.push({ x: r.x, y: r.y, width: r.width, height: r.height, top: r.top, left: r.left,
+                   __font: cs.fontFamily, __size: cs.fontSize, __lineHeight: cs.lineHeight });
       Array.prototype.forEach.call(el.getClientRects(), function (cr) {
         rects.push({ __client: true, x: cr.x, y: cr.y, width: cr.width, height: cr.height });
       });
@@ -426,9 +432,10 @@
     return rects;
   });
 
-  probe("fonts.detected", { deterministic: true }, function () {
-    var BASE = ["monospace", "sans-serif", "serif"];
-    var TEST = ("Andale Mono,Arial,Arial Black,Arial Hebrew,Arial Narrow,Arial Rounded MT Bold,Arial Unicode MS," +
+  // Shared by fonts.detected and fonts.metrics. One list, so a family added to
+  // the detection sweep is automatically measured for metrics too and the two
+  // can never drift apart.
+  var FONT_FAMILIES = ("Andale Mono,Arial,Arial Black,Arial Hebrew,Arial Narrow,Arial Rounded MT Bold,Arial Unicode MS," +
       "Bitstream Vera Sans Mono,Book Antiqua,Bookman Old Style,Calibri,Cambria,Cambria Math,Century,Century Gothic," +
       "Century Schoolbook,Comic Sans MS,Consolas,Courier,Courier New,Geneva,Georgia,Helvetica,Helvetica Neue," +
       "Impact,Lucida Bright,Lucida Calligraphy,Lucida Console,Lucida Fax,LUCIDA GRANDE,Lucida Handwriting," +
@@ -438,6 +445,10 @@
       "Tahoma,Times,Times New Roman,Trebuchet MS,Verdana,Wingdings,Wingdings 2,Wingdings 3,Roboto,Noto Sans," +
       "Noto Color Emoji,Droid Sans,Ubuntu,Cantarell,DejaVu Sans,Liberation Sans,PingFang SC,Hiragino Sans," +
       "Apple Color Emoji,SF Pro Text,Menlo,Optima,Papyrus,Zapfino").split(",");
+
+  probe("fonts.detected", { deterministic: true }, function () {
+    var BASE = ["monospace", "sans-serif", "serif"];
+    var TEST = FONT_FAMILIES;
 
     var span = document.createElement("span");
     span.style.cssText = "position:absolute;left:-10000px;font-size:72px";
@@ -513,6 +524,8 @@
       "prefers-reduced-motion": ["no-preference", "reduce"],
       "prefers-contrast": ["no-preference", "more", "less", "custom"],
       "forced-colors": ["none", "active"], "inverted-colors": ["none", "inverted"],
+      "prefers-reduced-transparency": ["no-preference", "reduce"],
+      "prefers-reduced-data": ["no-preference", "reduce"],
       "display-mode": ["browser", "standalone", "fullscreen", "minimal-ui"],
       "dynamic-range": ["standard", "high"], "scripting": ["none", "initial-only", "enabled"],
       "orientation": ["portrait", "landscape"], "update": ["none", "slow", "fast"],
@@ -616,10 +629,49 @@
       out.decodingInfo.push({ config: acfg, result: await navigator.mediaCapabilities.decodingInfo({ type: "file", audio: acfg }) });
     }
     var v = document.createElement("video"), a = document.createElement("audio");
-    ['video/mp4; codecs="avc1.42E01E"', "video/webm", "application/vnd.apple.mpegurl", "video/ogg"]
+    ['video/mp4; codecs="avc1.42E01E"', "video/webm", "application/vnd.apple.mpegurl", "video/ogg",
+     'video/mp4; codecs="hev1.1.6.L93.B0"', 'video/mp4; codecs="hvc1.1.6.L93.B0"',
+     'video/mp4; codecs="av01.0.05M.08"', 'video/webm; codecs="vp09.00.10.08"']
       .forEach(function (t) { out.canPlayType[t] = v.canPlayType(t); });
-    ['audio/mpeg', 'audio/ogg; codecs="vorbis"', 'audio/wav; codecs="1"']
+    ['audio/mpeg', 'audio/ogg; codecs="vorbis"', 'audio/wav; codecs="1"',
+     'audio/mp4; codecs="mp4a.40.2"', 'audio/mp4; codecs="ac-3"', 'audio/mp4; codecs="ec-3"']
       .forEach(function (t) { out.canPlayType[t] = a.canPlayType(t); });
+
+    // Three APIs answer "do you support this codec" and they do not have to
+    // agree. canPlayType is the oldest and vaguest, MediaSource gates MSE
+    // playback, MediaRecorder gates capture, and each is wired to a different
+    // part of the build. A fork that turns on a codec in one and not the others
+    // is a shape no shipping browser has.
+    out.mseSupported = {};
+    if (global.MediaSource && MediaSource.isTypeSupported) {
+      ['video/mp4; codecs="avc1.42E01E"', 'video/mp4; codecs="hev1.1.6.L93.B0"',
+       'video/mp4; codecs="av01.0.05M.08"', 'video/webm; codecs="vp9"',
+       'audio/mp4; codecs="mp4a.40.2"', 'audio/webm; codecs="opus"']
+        .forEach(function (t) { out.mseSupported[t] = MediaSource.isTypeSupported(t); });
+    }
+    out.recorderSupported = {};
+    if (global.MediaRecorder && MediaRecorder.isTypeSupported) {
+      ["video/webm", 'video/webm; codecs="vp8"', 'video/webm; codecs="vp9"',
+       'video/webm; codecs="h264"', "video/mp4", 'video/mp4; codecs="avc1.42E01E"',
+       "audio/webm", 'audio/webm; codecs="opus"']
+        .forEach(function (t) { out.recorderSupported[t] = MediaRecorder.isTypeSupported(t); });
+    }
+
+    // encodingInfo answers a different question from decodingInfo and reads a
+    // different capability (the encoder, not the decoder). We patch only
+    // decoding; this records whether that leaves the two disagreeing.
+    out.encodingInfo = [];
+    for (var ecfg of [
+      { contentType: 'video/webm; codecs="vp8"', width: 1920, height: 1080, bitrate: 2000000, framerate: 30 },
+      { contentType: 'video/mp4; codecs="avc1.42E01E"', width: 1920, height: 1080, bitrate: 2000000, framerate: 30 }
+    ]) {
+      try {
+        out.encodingInfo.push({ config: ecfg,
+          result: await navigator.mediaCapabilities.encodingInfo({ type: "record", video: ecfg }) });
+      } catch (e) {
+        out.encodingInfo.push({ config: ecfg, __error: String(e.message || e) });
+      }
+    }
     return out;
   });
 
@@ -701,7 +753,11 @@
     must(navigator.permissions, "Permissions API unsupported");
     var NAMES = ["geolocation", "notifications", "camera", "microphone", "midi",
       "background-sync", "persistent-storage", "clipboard-read", "clipboard-write",
-      "accelerometer", "gyroscope", "magnetometer", "screen-wake-lock", "payment-handler"];
+      "accelerometer", "gyroscope", "magnetometer", "screen-wake-lock", "payment-handler",
+      // window-management gates screen.details, so its state explains that
+      // probe's result rather than leaving it an unexplained error.
+      "window-management", "local-fonts", "storage-access", "idle-detection",
+      "display-capture", "top-level-storage-access"];
     var out = {};
     for (var n of NAMES) {
       try { out[n] = (await navigator.permissions.query({ name: n })).state; }
@@ -854,6 +910,302 @@
   });
 
   // ---------------------------------------------------------------- context
+
+  // ------------------------------------------------------------ new probes
+
+  probe("fonts.metrics", { deterministic: true }, function () {
+    // Full TextMetrics per family, which is the vertical half that
+    // fonts.detected does not measure.
+    //
+    // fonts.detected compares offsetWidth/offsetHeight against a fallback,
+    // which answers "is this family present" and nothing else. Line boxes are
+    // built from ascent and descent, so a height mismatch in clientrects can
+    // come either from resolving a different family or from the same family
+    // reporting different vertical metrics — and offsetHeight cannot tell those
+    // apart. TextMetrics can: fontBoundingBox* comes from the font's own
+    // tables, actualBoundingBox* from the rasterised glyphs, and the two
+    // diverging is itself the signature of a backend difference rather than a
+    // provisioning one.
+    var cvs = document.createElement("canvas");
+    var ctx = cvs.getContext("2d");
+    must(ctx, "2d context unavailable");
+    var SAMPLE = "HxpgÅ字";
+    var out = {};
+    ["monospace", "sans-serif", "serif", "cursive", "fantasy", "system-ui"]
+      .concat(FONT_FAMILIES)
+      .forEach(function (fam) {
+        var quoted = /^[a-z-]+$/.test(fam) ? fam : "'" + fam + "'";
+        ctx.font = "40px " + quoted;
+        var m = ctx.measureText(SAMPLE);
+        var o = {};
+        for (var k in m) { if (typeof m[k] === "number") o[k] = m[k]; }
+        // The resolved font, so a family that silently fell back is visible
+        // rather than being read as that family's real metrics.
+        o.__resolved = ctx.font;
+        out[fam] = o;
+      });
+    return out;
+  });
+
+  probe("eme.keysystems", { deterministic: true }, async function () {
+    // Whether the browser can negotiate DRM at all.
+    //
+    // A capability rather than a value: vanilla Chromium rejects
+    // com.widevine.alpha where every shipping browser resolves it, and no
+    // accessor patch produces a CDM that is not installed. One line for a
+    // detector to check, so it is worth knowing exactly which systems answer.
+    must(navigator.requestMediaKeySystemAccess, "EME unsupported");
+    var CONFIG = [{
+      initDataTypes: ["cenc"],
+      audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"' }],
+      videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.42E01E"' }]
+    }];
+    var SYSTEMS = ["com.widevine.alpha", "com.widevine.alpha.experiment",
+                   "com.microsoft.playready", "com.microsoft.playready.recommendation",
+                   "com.apple.fps", "com.apple.fps.1_0", "org.w3.clearkey"];
+    var out = {};
+    for (var ks of SYSTEMS) {
+      try {
+        var access = await navigator.requestMediaKeySystemAccess(ks, CONFIG);
+        var cfg = access.getConfiguration ? access.getConfiguration() : null;
+        out[ks] = {
+          supported: true,
+          keySystem: access.keySystem,
+          distinctiveIdentifier: cfg && cfg.distinctiveIdentifier,
+          persistentState: cfg && cfg.persistentState,
+          sessionTypes: cfg && cfg.sessionTypes
+        };
+      } catch (e) {
+        out[ks] = { supported: false, error: String(e.name || e) };
+      }
+    }
+    return out;
+  });
+
+  probe("worker.parity", { deterministic: true }, async function () {
+    // Every profile-derived value, read again in a worker realm.
+    //
+    // A patch that lands in a document-only path looks correct in every probe
+    // above and is wrong the moment a page asks a Worker instead. That failure
+    // is invisible to the rest of this collector by construction, which is
+    // exactly why it earns its own probe: this is the cheapest check that the
+    // C++ we patched sits below the realm boundary rather than above it.
+    var src = [
+      "self.onmessage = async function () {",
+      "  var out = { navigator: {}, offscreen: null, error: null };",
+      "  try {",
+      "    ['hardwareConcurrency','deviceMemory','platform','userAgent','language',",
+      "     'languages','vendor','maxTouchPoints','webdriver'].forEach(function (k) {",
+      "      out.navigator[k] = self.navigator[k];",
+      "    });",
+      "    out.userAgentData = self.navigator.userAgentData",
+      "      ? await self.navigator.userAgentData.getHighEntropyValues(",
+      "          ['architecture','bitness','platformVersion','model','wow64'])",
+      "      : null;",
+      "    out.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;",
+      "    out.locale = Intl.DateTimeFormat().resolvedOptions().locale;",
+      "    if (self.OffscreenCanvas) {",
+      "      var c = new OffscreenCanvas(160, 40);",
+      "      var g = c.getContext('2d');",
+      "      g.font = '20px sans-serif';",
+      "      g.fillStyle = '#123456';",
+      "      g.fillText('Apostate mLj', 4, 26);",
+      "      var d = g.getImageData(0, 0, 160, 40).data;",
+      "      var h = 0;",
+      "      for (var i = 0; i < d.length; i++) { h = (h * 31 + d[i]) >>> 0; }",
+      "      var tm = g.measureText('Apostate mLj');",
+      "      var m = {};",
+      "      for (var k2 in tm) { if (typeof tm[k2] === 'number') m[k2] = tm[k2]; }",
+      "      out.offscreen = { pixel_hash: h, measureText: m };",
+      "    }",
+      "  } catch (e) { out.error = String(e && e.message || e); }",
+      "  self.postMessage(out);",
+      "};"
+    ].join("\n");
+    var url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+    try {
+      var w = new Worker(url);
+      var result = await new Promise(function (resolve, reject) {
+        var timer = setTimeout(function () { reject(new Error("worker timed out")); }, 8000);
+        w.onmessage = function (e) { clearTimeout(timer); resolve(e.data); };
+        w.onerror = function (e) { clearTimeout(timer); reject(new Error(e.message || "worker error")); };
+        w.postMessage(null);
+      });
+      w.terminate();
+      return result;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  });
+
+  probe("prototype.shape", { deterministic: true }, function () {
+    // Property names and their order on the prototypes our patches touch.
+    //
+    // Patching an emitter buys correct values and [native code] for free. It
+    // buys nothing about the *name set*: exposing WebBluetooth on a platform
+    // that lacks it adds names, withholding WebGL extensions removes them, and
+    // both are readable with one call and no permission. Order matters as much
+    // as membership, because it follows IDL declaration order rather than
+    // anything a page controls.
+    var TARGETS = {
+      Navigator: global.Navigator, Screen: global.Screen,
+      WorkerNavigator: global.WorkerNavigator,
+      WebGLRenderingContext: global.WebGLRenderingContext,
+      WebGL2RenderingContext: global.WebGL2RenderingContext,
+      CanvasRenderingContext2D: global.CanvasRenderingContext2D,
+      OffscreenCanvas: global.OffscreenCanvas,
+      Bluetooth: global.Bluetooth, BluetoothDevice: global.BluetoothDevice,
+      MediaCapabilities: global.MediaCapabilities,
+      AudioContext: global.AudioContext, Performance: global.Performance,
+      Keyboard: global.Keyboard, ScreenDetails: global.ScreenDetails,
+      GPU: global.GPU, GPUAdapter: global.GPUAdapter
+    };
+    var out = {};
+    Object.keys(TARGETS).forEach(function (name) {
+      var ctor = TARGETS[name];
+      if (!ctor || !ctor.prototype) { out[name] = null; return; }
+      var names = Object.getOwnPropertyNames(ctor.prototype);
+      var flags = {};
+      names.forEach(function (k) {
+        var d = Object.getOwnPropertyDescriptor(ctor.prototype, k);
+        if (!d) return;
+        flags[k] = (d.get ? "g" : "") + (d.set ? "s" : "") +
+                   (typeof d.value === "function" ? "f" : d.value !== undefined ? "v" : "") +
+                   (d.enumerable ? "e" : "") + (d.configurable ? "c" : "") +
+                   (d.writable ? "w" : "");
+      });
+      out[name] = { names: names, descriptors: flags };
+    });
+    // window's own keys, in order. Extra globals are how an injected script is
+    // usually found, and their absence is worth recording as evidence too.
+    out.__windowOwnKeys = Object.getOwnPropertyNames(global);
+    return out;
+  });
+
+  probe("chrome.object", { deterministic: true }, function () {
+    // The chrome.* namespace, which vanilla Chromium and Chrome disagree about.
+    // Cited as the reason a shipping fork gets blocked by Google, so its exact
+    // shape matters more than most single values.
+    var c = global.chrome;
+    if (!c) return { present: false };
+    function shape(o) {
+      if (!o || typeof o !== "object") return typeof o;
+      return Object.keys(o).sort();
+    }
+    return {
+      present: true,
+      keys: Object.keys(c).sort(),
+      app: c.app ? { keys: Object.keys(c.app).sort(),
+                     isInstalled: c.app.isInstalled,
+                     runningState: typeof c.app.getIsInstalled } : null,
+      runtime: c.runtime ? { keys: Object.keys(c.runtime).sort(),
+                             id: c.runtime.id === undefined ? "undefined" : typeof c.runtime.id } : null,
+      loadTimes: typeof c.loadTimes,
+      csi: typeof c.csi,
+      webstore: shape(c.webstore)
+    };
+  });
+
+  probe("error.stack", { deterministic: true }, function () {
+    // Stack shape, which is engine and build specific and which automation
+    // frameworks are known to disturb. URLs are stripped: they carry the
+    // capture server's host, which is not a device fact and would differ
+    // between two captures of one machine.
+    function strip(s) {
+      return typeof s === "string"
+        ? s.replace(/\(?[a-z-]+:\/\/[^\s)]+\)?/gi, "(<url>)")
+        : s;
+    }
+    var basic = null, nested = null, thrown = null;
+    try { throw new Error("apostate"); } catch (e) { basic = strip(e.stack); }
+    (function outer() { (function inner() {
+      try { null.x; } catch (e) { thrown = strip(e.stack); }
+    })(); })();
+    function deep(n) { if (n === 0) { throw new Error("deep"); } return deep(n - 1); }
+    try { deep(6); } catch (e) { nested = strip(e.stack); }
+    return {
+      basic: basic,
+      typeError: thrown,
+      nested: nested,
+      stackTraceLimit: Error.stackTraceLimit,
+      hasCaptureStackTrace: typeof Error.captureStackTrace,
+      hasPrepareStackTrace: typeof Error.prepareStackTrace,
+      toStringTag: String(Error.prototype[Symbol.toStringTag])
+    };
+  });
+
+  probe("storage.persist", { deterministic: true }, async function () {
+    must(navigator.storage, "StorageManager unsupported");
+    var out = {};
+    try { out.persisted = await navigator.storage.persisted(); }
+    catch (e) { out.persisted = { __error: String(e.message || e) }; }
+    // The quota is derived from disk size and must agree with the other
+    // hardware values; recorded here separately from storage.estimate because
+    // that probe is excluded as volatile for its usage figure, which throws the
+    // quota away with it.
+    try {
+      var est = await navigator.storage.estimate();
+      out.quota = est.quota;
+      out.usageDetails = est.usageDetails ? Object.keys(est.usageDetails).sort() : null;
+    } catch (e2) { out.quota = { __error: String(e2.message || e2) }; }
+    out.hasGetDirectory = typeof navigator.storage.getDirectory;
+    out.hasBuckets = !!global.navigator.storageBuckets;
+    return out;
+  });
+
+  probe("webrtc.ice", { deterministic: false }, async function () {
+    // Candidate *shape*, never the address.
+    //
+    // Addresses are not a device fact, they are where the machine was sitting,
+    // and these captures live in a public repository. What identifies the stack
+    // is the rest: how many candidates, in what order, with what foundations
+    // and priorities, and whether mDNS replaced the host address at all — a
+    // suppressed or empty candidate list reads as tampering more loudly than a
+    // leak does.
+    must(global.RTCPeerConnection, "RTCPeerConnection unsupported");
+    var pc = new RTCPeerConnection({ iceServers: [] });
+    try {
+      pc.createDataChannel("apostate");
+      var seen = [];
+      var done = new Promise(function (resolve) {
+        var timer = setTimeout(resolve, 5000);
+        pc.onicecandidate = function (e) {
+          if (!e.candidate) { clearTimeout(timer); resolve(); return; }
+          var c = e.candidate;
+          var addr = c.address || "";
+          seen.push({
+            type: c.type, protocol: c.protocol, component: c.component,
+            priority: c.priority, foundation: c.foundation,
+            relatedPort: c.relatedPort,
+            tcpType: c.tcpType,
+            // Classification only. .local means mDNS obfuscation is on, which
+            // is stock Chrome's behaviour and whose absence is the tell.
+            addressClass: /\.local$/.test(addr) ? "mdns"
+                        : /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(addr) ? "rfc1918"
+                        : /^fe80:/i.test(addr) ? "link-local"
+                        : addr ? "public" : "empty",
+            portClass: c.port === 0 ? "zero" : c.port < 1024 ? "low" : "ephemeral"
+          });
+        };
+      });
+      var offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await done;
+      return {
+        count: seen.length,
+        candidates: seen,
+        // SDP lines that describe the stack rather than the session. Fingerprint
+        // and ufrag are per-session random and are dropped.
+        sdpShape: (pc.localDescription ? pc.localDescription.sdp : "")
+          .split("\r\n")
+          .filter(function (l) { return /^(m=|a=(rtpmap|fmtp|rtcp-fb|extmap|setup|mid|sctp))/.test(l); })
+          .length,
+        gatheringState: pc.iceGatheringState
+      };
+    } finally {
+      pc.close();
+    }
+  });
 
   function automationSignals() {
     var sig = [];

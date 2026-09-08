@@ -1,0 +1,71 @@
+Subject: [PATCH] swiftshader: raise the render target limits to match a real GPU
+
+SwiftShader reported MAX_TEXTURE_SIZE and MAX_RENDERBUFFER_SIZE of 8192 and
+MAX_VIEWPORT_DIMS of 8192, where every real Windows machine measured reports
+16384, 16384 and 32767 — an NVIDIA RTX 3070 Ti, an Intel UHD 630 and even
+Microsoft's own software Basic Render Driver all agree on those three, because
+the numbers come from the ANGLE backend rather than the hardware.
+
+That gap mattered more than it looks, because SwiftShader is the deployment
+reality rather than a test artefact. An anti-detect browser runs on headless
+Linux servers with no GPU far more often than not, so measuring on a machine
+with a discrete card and declaring the gap closed would be assuming away the
+case that actually ships.
+
+The 8192 was never a hardware limit. It is OUTLINE_RESOLUTION, a constant sizing
+the rasteriser's per-primitive span array, and MAX_FRAMEBUFFER_DIM and
+MAX_VIEWPORT_DIM were both derived from it. Raising it raises a real capability
+rather than reporting a false one, which is the whole distinction: patch 0026
+clamps a profile's claim to what the driver can actually do, so lifting the
+driver is the only honest way to let a claim of 16384 through.
+
+Viewport is decoupled from the framebuffer because D3D11 decouples them —
+32767 viewport against a 16384 framebuffer — and the span array is indexed by
+framebuffer height, not viewport.
+
+Verified, and the falsification test is the important one. A page that binary
+searches the limit now finds what it was told:
+
+  MAX_TEXTURE_SIZE      16384    a 16384x16384 texture allocates
+  MAX_RENDERBUFFER_SIZE 16384    a 16384x16384 renderbuffer allocates
+  MAX_VIEWPORT_DIMS     32767
+  32768x32768                    correctly refused
+
+This is the failure a competitor was caught by: a spoofed
+MAX_VERTEX_UNIFORM_VECTORS of 4095 against a real Mesa limit of 1024, recovered
+by a twelve-step binary search compiling `uniform vec4 u[N]`. Raising the real
+limit cannot be caught that way because there is nothing to catch.
+
+Rendering is unchanged, which had to be checked: raising dimensions can silently
+overflow fixed-point coordinate math, and Span packs its endpoints into unsigned
+shorts. WebGL readback hashes to 918f09f66eeb4cf8 and canvas to e6f9e629fe8af205
+both before and after, byte-identical.
+
+Cost is memory. The span array is 4 bytes per entry, 128 primitives per batch,
+16 draw calls, so the arrays double from roughly 64 MB to 128 MB per GPU
+process. Measured GPU process RSS after the change is 221 MB. That is worth
+paying once per browser and worth counting when running many.
+
+Ledger: webgl.max-limits.
+diff --git a/third_party/swiftshader/src/Device/Config.hpp b/third_party/swiftshader/src/Device/Config.hpp
+index d030354..6303467 100644
+--- a/third_party/swiftshader/src/Device/Config.hpp
++++ b/third_party/swiftshader/src/Device/Config.hpp
+@@ -17,7 +17,7 @@
+ 
+ namespace sw {
+ 
+-constexpr int OUTLINE_RESOLUTION = 8192;  // Maximum vertical resolution of the render target
++constexpr int OUTLINE_RESOLUTION = 16384;  // Maximum vertical resolution of the render target
+ constexpr int MIPMAP_LEVELS = 15;
+ constexpr int MAX_CLIP_DISTANCES = 8;
+ constexpr int MAX_CULL_DISTANCES = 8;
+@@ -27,7 +27,7 @@ constexpr int MAX_TEXTURE_LOD = MIPMAP_LEVELS - 2;  // Trilinear accesses lod+1
+ constexpr int MAX_COLOR_BUFFERS = 8;
+ constexpr int MAX_INTERFACE_COMPONENTS = 32 * 4;  // Must be multiple of 4 for 16-byte alignment.
+ constexpr int MAX_FRAMEBUFFER_DIM = OUTLINE_RESOLUTION;
+-constexpr int MAX_VIEWPORT_DIM = MAX_FRAMEBUFFER_DIM;
++constexpr int MAX_VIEWPORT_DIM = 32767;  // decoupled from the framebuffer: D3D11 reports 32767 with a 16384 framebuffer, and the outline array is indexed by framebuffer height, not viewport
+ 
+ }  // namespace sw
+ 

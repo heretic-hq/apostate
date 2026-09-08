@@ -271,9 +271,9 @@ def main() -> int:
             # version gap of 26.6.2 against 27.0.0. Folding canvas into GPU
             # identity made two interchangeable GPUs look distinct.
             caps = {}
-            for ctx in ("webgl1", "webgl2"):
-                v = content.get(ctx) or {}
-                caps[ctx] = {k: v.get(k) for k in
+            for gl in ("webgl1", "webgl2"):
+                v = content.get(gl) or {}
+                caps[gl] = {k: v.get(k) for k in
                              ("parameters", "extensions", "precision",
                               "contextAttributes", "antialiasSamples")}
             caps["webgpu"] = strip_identity(content.get("webgpu") or {})

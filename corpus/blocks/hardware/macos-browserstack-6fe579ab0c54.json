@@ -1,0 +1,63 @@
+{
+  "block": "hardware",
+  "label": "macos-browserstack",
+  "source_capture": "macos-browserstack-20260907T211852Z.json",
+  "source_taken_at": "2026-09-07T21:18:52.141Z",
+  "browser_version": "152.0.7977.65",
+  "captured_browser": "Google Chrome",
+  "captured_platform": "macOS",
+  "content_sha256": "6fe579ab0c54e083c19976dcace78bf610ea9caf1f1af7642462fb2e78b94273",
+  "identity_sha256": "6fe579ab0c54e083c19976dcace78bf610ea9caf1f1af7642462fb2e78b94273",
+  "content": {
+    "memory.heap": {
+      "jsHeapSizeLimit": 4395630592,
+      "totalJSHeapSize": 5290415,
+      "usedJSHeapSize": 2607447,
+      "deviceMemory": 16
+    },
+    "audio.properties": {
+      "sampleRate": 44100,
+      "baseLatency": 0.005804988662131519,
+      "outputLatency": 0,
+      "destinationMaxChannelCount": 2,
+      "destinationChannelCount": 2,
+      "state": "running",
+      "analyser.fftSize": 2048,
+      "analyser.frequencyBinCount": 1024,
+      "analyser.minDecibels": -100,
+      "analyser.maxDecibels": -30,
+      "analyser.smoothingTimeConstant": 0.8,
+      "compressor.threshold": {
+        "value": -24,
+        "min": -100,
+        "max": 0
+      },
+      "compressor.knee": {
+        "value": 30,
+        "min": 0,
+        "max": 40
+      },
+      "compressor.ratio": {
+        "value": 12,
+        "min": 1,
+        "max": 20
+      },
+      "compressor.attack": {
+        "value": 0.003000000026077032,
+        "min": 0,
+        "max": 1
+      },
+      "compressor.release": {
+        "value": 0.25,
+        "min": 0,
+        "max": 1
+      }
+    }
+  },
+  "logical_cores": 10,
+  "audio_buffer_frames": 256,
+  "audio_sample_rate": 44100,
+  "memory_total_bytes": 17179869184,
+  "memory_is_floor": true,
+  "evidence": "measured-floor"
+}

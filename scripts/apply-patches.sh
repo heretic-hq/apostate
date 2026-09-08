@@ -16,6 +16,18 @@ git -C "$SRC" checkout -q --detach "refs/tags/$CHROMIUM_VERSION"
 git -C "$SRC" clean -qfd
 git -C "$SRC" reset -q --hard
 
+# DEPS-managed directories are their own git checkouts, so the reset above
+# does not touch them. A patch that edits one — third_party/swiftshader, for
+# instance — would survive a reset and then be applied a second time, leaving
+# the tree in a state no series describes. Reset every sub-repo any patch in
+# the series writes to.
+while read -r sub; do
+  [ -d "$SRC/$sub/.git" ] || continue
+  git -C "$SRC/$sub" reset -q --hard
+  git -C "$SRC/$sub" clean -qfd
+done < <(grep -h "^+++ b/" "$REPO_ROOT"/patches/*.patch 2>/dev/null \
+         | sed "s|^+++ b/||" | cut -d/ -f1-2 | sort -u)
+
 count=0
 while IFS= read -r line; do
   line="${line%%#*}"; line="$(printf '%s' "$line" | xargs || true)"

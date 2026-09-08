@@ -1,0 +1,135 @@
+{
+  "block": "display",
+  "label": "macos-browserstack",
+  "source_capture": "macos-browserstack-20260907T211852Z.json",
+  "source_taken_at": "2026-09-07T21:18:52.141Z",
+  "browser_version": "152.0.7977.65",
+  "captured_browser": "Google Chrome",
+  "captured_platform": "macOS",
+  "content_sha256": "f2775fc4f6cfa68db96ca8d7839027a2e16d0dc3ef7dbab404a9935d75305dd5",
+  "identity_sha256": "f2775fc4f6cfa68db96ca8d7839027a2e16d0dc3ef7dbab404a9935d75305dd5",
+  "content": {
+    "screen.geometry": {
+      "width": 1920,
+      "height": 1080,
+      "availWidth": 1920,
+      "availHeight": 1050,
+      "availLeft": 0,
+      "availTop": 30,
+      "colorDepth": 24,
+      "pixelDepth": 24,
+      "orientation": {
+        "angle": 0,
+        "type": "landscape-primary"
+      },
+      "isExtended": false,
+      "devicePixelRatio": 1,
+      "outerWidth": 1728,
+      "outerHeight": 890,
+      "innerWidth": 1728,
+      "innerHeight": 803,
+      "screenX": 0,
+      "screenY": 30
+    },
+    "screen.details": {
+      "screenCount": 1,
+      "currentIsPrimary": true,
+      "screens": [
+        {
+          "label": "BStack Display",
+          "isPrimary": true,
+          "isInternal": false,
+          "devicePixelRatio": 1,
+          "width": 1920,
+          "height": 1080,
+          "availWidth": 1920,
+          "availHeight": 1050,
+          "left": 0,
+          "top": 0,
+          "colorDepth": 24,
+          "hdrHeadroom": null
+        }
+      ]
+    },
+    "css.media": {
+      "any-hover": [
+        "hover"
+      ],
+      "any-pointer": [
+        "fine"
+      ],
+      "hover": [
+        "hover"
+      ],
+      "pointer": [
+        "fine"
+      ],
+      "color-gamut": [
+        "srgb"
+      ],
+      "display-mode": [
+        "browser"
+      ],
+      "dynamic-range": [
+        "standard"
+      ],
+      "scripting": [
+        "enabled"
+      ],
+      "orientation": [
+        "landscape"
+      ],
+      "update": [
+        "fast"
+      ],
+      "overflow-block": [
+        "scroll"
+      ]
+    },
+    "media.devices": {
+      "counts": {
+        "audioinput": 1,
+        "audiooutput": 1
+      },
+      "hasLabels": false,
+      "supportedConstraints": {
+        "aspectRatio": true,
+        "autoGainControl": true,
+        "brightness": true,
+        "channelCount": true,
+        "colorTemperature": true,
+        "contrast": true,
+        "deviceId": true,
+        "displaySurface": true,
+        "echoCancellation": true,
+        "exposureCompensation": true,
+        "exposureMode": true,
+        "exposureTime": true,
+        "facingMode": true,
+        "focusDistance": true,
+        "focusMode": true,
+        "frameRate": true,
+        "groupId": true,
+        "height": true,
+        "iso": true,
+        "latency": true,
+        "noiseSuppression": true,
+        "pan": true,
+        "pointsOfInterest": true,
+        "resizeMode": true,
+        "restrictOwnAudio": true,
+        "sampleRate": true,
+        "sampleSize": true,
+        "saturation": true,
+        "sharpness": true,
+        "suppressLocalAudioPlayback": true,
+        "tilt": true,
+        "torch": true,
+        "voiceIsolation": true,
+        "whiteBalanceMode": true,
+        "width": true,
+        "zoom": true
+      }
+    }
+  }
+}

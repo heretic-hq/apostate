@@ -1,0 +1,108 @@
+{
+  "block": "theme",
+  "label": "win-intel-uhd630-chrome",
+  "source_capture": "win-intel-uhd630-chrome.json",
+  "source_taken_at": "2026-09-08T06:42:19.287Z",
+  "browser_version": "152.0.7977.76",
+  "captured_browser": "Google Chrome",
+  "captured_platform": "Windows",
+  "content_sha256": "abbb47b373e2031830e51ca69ca3f2a0ecf74525494696f24693e050009d7d79",
+  "identity_sha256": "abbb47b373e2031830e51ca69ca3f2a0ecf74525494696f24693e050009d7d79",
+  "content": {
+    "css.system": {
+      "colors": {
+        "ActiveBorder": "rgb(255, 255, 255)",
+        "ActiveCaption": "rgb(18, 18, 18)",
+        "ActiveText": "rgb(255, 0, 0)",
+        "AppWorkspace": "rgb(18, 18, 18)",
+        "Background": "rgb(18, 18, 18)",
+        "ButtonBorder": "rgb(255, 255, 255)",
+        "ButtonFace": "rgb(107, 107, 107)",
+        "ButtonHighlight": "rgb(107, 107, 107)",
+        "ButtonShadow": "rgb(107, 107, 107)",
+        "ButtonText": "rgb(255, 255, 255)",
+        "Canvas": "rgb(18, 18, 18)",
+        "CanvasText": "rgb(255, 255, 255)",
+        "CaptionText": "rgb(255, 255, 255)",
+        "Field": "rgb(59, 59, 59)",
+        "FieldText": "rgb(255, 255, 255)",
+        "GrayText": "rgb(128, 128, 128)",
+        "Highlight": "rgb(25, 103, 210)",
+        "HighlightText": "rgb(255, 255, 255)",
+        "InactiveBorder": "rgb(255, 255, 255)",
+        "InactiveCaption": "rgb(18, 18, 18)",
+        "InactiveCaptionText": "rgb(128, 128, 128)",
+        "InfoBackground": "rgb(18, 18, 18)",
+        "InfoText": "rgb(255, 255, 255)",
+        "LinkText": "rgb(158, 158, 255)",
+        "Mark": "rgb(255, 255, 0)",
+        "MarkText": "rgb(0, 0, 0)",
+        "Menu": "rgb(18, 18, 18)",
+        "MenuText": "rgb(255, 255, 255)",
+        "Scrollbar": "rgb(18, 18, 18)",
+        "ThreeDDarkShadow": "rgb(255, 255, 255)",
+        "ThreeDFace": "rgb(107, 107, 107)",
+        "ThreeDHighlight": "rgb(255, 255, 255)",
+        "ThreeDLightShadow": "rgb(255, 255, 255)",
+        "ThreeDShadow": "rgb(255, 255, 255)",
+        "VisitedText": "rgb(208, 173, 240)",
+        "Window": "rgb(18, 18, 18)",
+        "WindowFrame": "rgb(255, 255, 255)",
+        "WindowText": "rgb(255, 255, 255)"
+      },
+      "fonts": {
+        "caption": {
+          "fontFamily": "Arial",
+          "fontSize": "16px",
+          "fontWeight": "400",
+          "fontStyle": "normal"
+        },
+        "icon": {
+          "fontFamily": "Arial",
+          "fontSize": "16px",
+          "fontWeight": "400",
+          "fontStyle": "normal"
+        },
+        "menu": {
+          "fontFamily": "\"Segoe UI\"",
+          "fontSize": "12px",
+          "fontWeight": "400",
+          "fontStyle": "normal"
+        },
+        "message-box": {
+          "fontFamily": "Arial",
+          "fontSize": "16px",
+          "fontWeight": "400",
+          "fontStyle": "normal"
+        },
+        "small-caption": {
+          "fontFamily": "\"Segoe UI\"",
+          "fontSize": "12px",
+          "fontWeight": "400",
+          "fontStyle": "normal"
+        },
+        "status-bar": {
+          "fontFamily": "\"Segoe UI\"",
+          "fontSize": "12px",
+          "fontWeight": "400",
+          "fontStyle": "normal"
+        }
+      }
+    },
+    "css.media": {
+      "prefers-color-scheme": [
+        "dark"
+      ],
+      "prefers-reduced-motion": [
+        "no-preference"
+      ],
+      "prefers-contrast": [
+        "no-preference"
+      ],
+      "forced-colors": [
+        "none"
+      ],
+      "inverted-colors": []
+    }
+  }
+}

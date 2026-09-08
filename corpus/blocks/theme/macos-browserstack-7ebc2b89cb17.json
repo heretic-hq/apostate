@@ -1,0 +1,108 @@
+{
+  "block": "theme",
+  "label": "macos-browserstack",
+  "source_capture": "macos-browserstack-20260907T211852Z.json",
+  "source_taken_at": "2026-09-07T21:18:52.141Z",
+  "browser_version": "152.0.7977.65",
+  "captured_browser": "Google Chrome",
+  "captured_platform": "macOS",
+  "content_sha256": "7ebc2b89cb177a9bd5ed0d5b71dc20afa1cb27f2bf6c21711df2efe44f905b5d",
+  "identity_sha256": "7ebc2b89cb177a9bd5ed0d5b71dc20afa1cb27f2bf6c21711df2efe44f905b5d",
+  "content": {
+    "css.system": {
+      "colors": {
+        "ActiveBorder": "rgb(0, 0, 0)",
+        "ActiveCaption": "rgb(255, 255, 255)",
+        "ActiveText": "rgb(255, 0, 0)",
+        "AppWorkspace": "rgb(255, 255, 255)",
+        "Background": "rgb(255, 255, 255)",
+        "ButtonBorder": "rgb(0, 0, 0)",
+        "ButtonFace": "rgb(239, 239, 239)",
+        "ButtonHighlight": "rgb(239, 239, 239)",
+        "ButtonShadow": "rgb(239, 239, 239)",
+        "ButtonText": "rgb(0, 0, 0)",
+        "Canvas": "rgb(255, 255, 255)",
+        "CanvasText": "rgb(0, 0, 0)",
+        "CaptionText": "rgb(0, 0, 0)",
+        "Field": "rgb(255, 255, 255)",
+        "FieldText": "rgb(0, 0, 0)",
+        "GrayText": "rgb(128, 128, 128)",
+        "Highlight": "rgba(128, 188, 254, 0.6)",
+        "HighlightText": "rgb(0, 0, 0)",
+        "InactiveBorder": "rgb(0, 0, 0)",
+        "InactiveCaption": "rgb(255, 255, 255)",
+        "InactiveCaptionText": "rgb(128, 128, 128)",
+        "InfoBackground": "rgb(255, 255, 255)",
+        "InfoText": "rgb(0, 0, 0)",
+        "LinkText": "rgb(0, 0, 238)",
+        "Mark": "rgb(255, 255, 0)",
+        "MarkText": "rgb(0, 0, 0)",
+        "Menu": "rgb(255, 255, 255)",
+        "MenuText": "rgb(0, 0, 0)",
+        "Scrollbar": "rgb(255, 255, 255)",
+        "ThreeDDarkShadow": "rgb(0, 0, 0)",
+        "ThreeDFace": "rgb(239, 239, 239)",
+        "ThreeDHighlight": "rgb(0, 0, 0)",
+        "ThreeDLightShadow": "rgb(0, 0, 0)",
+        "ThreeDShadow": "rgb(0, 0, 0)",
+        "VisitedText": "rgb(85, 26, 139)",
+        "Window": "rgb(255, 255, 255)",
+        "WindowFrame": "rgb(0, 0, 0)",
+        "WindowText": "rgb(0, 0, 0)"
+      },
+      "fonts": {
+        "caption": {
+          "fontFamily": "Arial",
+          "fontSize": "16px",
+          "fontWeight": "400",
+          "fontStyle": "normal"
+        },
+        "icon": {
+          "fontFamily": "Arial",
+          "fontSize": "16px",
+          "fontWeight": "400",
+          "fontStyle": "normal"
+        },
+        "menu": {
+          "fontFamily": "Arial",
+          "fontSize": "16px",
+          "fontWeight": "400",
+          "fontStyle": "normal"
+        },
+        "message-box": {
+          "fontFamily": "Arial",
+          "fontSize": "16px",
+          "fontWeight": "400",
+          "fontStyle": "normal"
+        },
+        "small-caption": {
+          "fontFamily": "Arial",
+          "fontSize": "16px",
+          "fontWeight": "400",
+          "fontStyle": "normal"
+        },
+        "status-bar": {
+          "fontFamily": "Arial",
+          "fontSize": "16px",
+          "fontWeight": "400",
+          "fontStyle": "normal"
+        }
+      }
+    },
+    "css.media": {
+      "prefers-color-scheme": [
+        "light"
+      ],
+      "prefers-reduced-motion": [
+        "no-preference"
+      ],
+      "prefers-contrast": [
+        "no-preference"
+      ],
+      "forced-colors": [
+        "none"
+      ],
+      "inverted-colors": []
+    }
+  }
+}

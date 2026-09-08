@@ -68,7 +68,7 @@ TEMPLATE = """<?xml version="1.0"?>
     <edit name="antialias" mode="assign"><bool>true</bool></edit>
     <edit name="rgba" mode="assign"><const>none</const></edit>
   </match>
-%(emoji)s</fontconfig>
+%(emoji)s%(rejects)s</fontconfig>
 """
 
 ALIAS = """  <match target="pattern">
@@ -102,6 +102,14 @@ def main() -> int:
                     help="fontconfig cache dir (default: <out>.cache)")
     ap.add_argument("--reference", type=pathlib.Path,
                     help="T0 capture whose font list the directory should supply")
+    ap.add_argument("--subject", type=pathlib.Path,
+                    help="a capture taken from THIS host WITHOUT rejection "
+                         "rules. With --reference, families this host enumerated "
+                         "and the reference did not are rejected. Two-pass by "
+                         "necessity: what a host enumerates cannot be predicted "
+                         "from the directory, only measured. Feeding back a "
+                         "capture that already had rejects applied finds no "
+                         "surplus and silently drops them.")
     ap.add_argument("--serif", default="Times New Roman")
     ap.add_argument("--sans", default="Arial")
     ap.add_argument("--monospace", default="Courier New")
@@ -122,6 +130,12 @@ def main() -> int:
 
     cache = args.cache or pathlib.Path(str(args.out) + ".cache")
     cache.mkdir(parents=True, exist_ok=True)
+    # families_in() reads the directory through a config, so a minimal one has
+    # to exist before the surplus can be computed.
+    if not args.out.exists():
+        args.out.write_text(TEMPLATE % {"fontdir": args.fonts.resolve(),
+                                        "cachedir": cache.resolve(),
+                                        "aliases": "", "emoji": "", "rejects": ""})
 
     pairs = [("serif", args.serif), ("sans-serif", args.sans),
              ("monospace", args.monospace)]
@@ -132,6 +146,34 @@ def main() -> int:
         old_name, new_name = a.split("=", 1)
         pairs.append((old_name.strip(), new_name.strip()))
     aliases = "\n".join(ALIAS % (src, dst) for src, dst in pairs)
+    # Reject families the directory supplies that the reference device does not
+    # report. A font export taken off a machine contains everything on its disk,
+    # and a disk holds fonts the system never activates — Book Antiqua, Bookman
+    # Old Style, Century Gothic and Century Schoolbook were all present in a
+    # complete macOS export and absent from what that same machine enumerates.
+    # Provisioning them made conformance worse, not better: the target is the
+    # set the reference reports, not the set it stores.
+    rejects = ""
+    if args.reference and args.subject:
+        det = {d.lower() for d in
+               json.loads(args.reference.read_text())["probes"]
+               ["fonts.detected"]["value"]["detected"]}
+        mine = json.loads(args.subject.read_text())["probes"] \
+                   ["fonts.detected"]["value"]["detected"]
+        # Only what this host actually enumerated and the reference did not.
+        # Deriving the surplus from the font directory instead was wrong: it
+        # rejected Apple Color Emoji and Arial Hebrew, which the reference has
+        # and the width-comparison probe simply cannot see — a colour emoji face
+        # renders Latin text at the fallback width, so it reads as absent. A
+        # font being undetectable is not a font being absent.
+        surplus = sorted(f for f in mine if f.lower() not in det)
+        if True:
+            if surplus:
+                rejects = "\n  <selectfont>\n" + "\n".join(
+                    '    <rejectfont><pattern><patelt name="family">'
+                    '<string>%s</string></patelt></pattern></rejectfont>' % s
+                    for s in surplus) + "\n  </selectfont>\n"
+
     emoji = ""
     if args.emoji:
         emoji = ('  <alias binding="strong"><family>emoji</family>'
@@ -139,7 +181,8 @@ def main() -> int:
     args.out.write_text(TEMPLATE % {"fontdir": args.fonts.resolve(),
                                     "cachedir": cache.resolve(),
                                     "aliases": aliases,
-                                    "emoji": emoji})
+                                    "emoji": emoji,
+                                    "rejects": rejects})
     print("wrote %s" % args.out)
     print("  use with: FONTCONFIG_FILE=%s" % args.out.resolve())
 

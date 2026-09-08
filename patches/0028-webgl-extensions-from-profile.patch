@@ -1,0 +1,142 @@
+Subject: [PATCH] webgl: withhold extensions the claimed device does not expose
+
+Measured against a real Windows machine with an Intel UHD 630, our build
+advertises three WebGL extensions it never sees:
+
+  WEBGL_compressed_texture_astc
+  WEBGL_compressed_texture_etc
+  WEBGL_compressed_texture_etc1
+
+These are mobile and Apple compressed-texture formats. SwiftShader supports them
+and a Windows D3D11 machine does not, so a profile claiming Windows advertised a
+set no Windows Chrome reports. Fingerprinting scripts hash the extension list,
+so three extra entries are enough to match nothing real.
+
+Only removal is implemented, and that asymmetry is the design rather than a
+limitation. Adding an extension cannot be done safely: a page calls
+getExtension() and then calls methods on the object it receives, so one claimed
+but unimplemented fails at first use — the same shape as claiming a WebGL limit
+the driver cannot meet, which patch 0026 exists to prevent. Removal has no such
+failure mode; the page is told no exactly as the real device would tell it.
+
+Served at ExtensionSupportedAndAllowed, which both getSupportedExtensions() and
+getExtension() run through, so the list and the objects obtainable from it
+cannot disagree. Withholding from the list alone would leave getExtension()
+handing out an extension the list denies, which is a worse contradiction than
+the one being fixed.
+
+The profile carries WebGL extension names as getSupportedExtensions() spells
+them, not GL names — the two are different namespaces, and ANGLE's existing
+disabled-extension machinery works on the GL side, so it is the wrong layer for
+a list captured from a browser.
+
+An empty list in the profile disables the filter entirely, so a profile that
+does not describe its extensions does not silently lose all of them.
+
+Note this closes the removable half of the gap. Our host still lacks two
+extensions the reference has on WebGL1 and five on WebGL2 —
+KHR_parallel_shader_compile, WEBGL_blend_func_extended and friends — and those
+cannot be added for the reason above. They are a host capability question, the
+same class as the render limits raised in patch 0027.
+
+Ledger: webgl.extensions.
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index 709e5bd..696db16 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -229,6 +229,14 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+     }
+   }
+ 
++  if (const ListValue* exts = dict->FindList("gl_extensions")) {
++    for (const auto& v : *exts) {
++      if (const std::string* s = v.GetIfString()) {
++        profile->gl_extensions_.insert(*s);
++      }
++    }
++  }
++
+   if (const DictValue* keyboard = dict->FindDict("keyboard")) {
+     if (const DictValue* map = keyboard->FindDict("layout_map")) {
+       for (const auto [code, value] : *map) {
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index 77bd5b3..a077b58 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -7,6 +7,7 @@
+ 
+ #include <cstdint>
+ #include <map>
++#include <set>
+ #include <optional>
+ #include <string>
+ 
+@@ -202,6 +203,17 @@ class BASE_EXPORT Profile {
+   // validates every allocation against the value it reported.
+   const std::map<std::string, int>& gl_limits() const { return gl_limits_; }
+ 
++  // WebGL extension names the claimed device exposes, as
++  // getSupportedExtensions() spells them.
++  //
++  // Used only to *remove* extensions this host advertises and the claimed
++  // device does not. Adding one is not possible and must not be attempted: a
++  // page calls getExtension() and then calls methods on the object it gets
++  // back, so an extension claimed but unimplemented fails at first use. Removal
++  // has no such failure mode — the page is simply told no, exactly as it would
++  // be on the real device.
++  const std::set<std::string>& gl_extensions() const { return gl_extensions_; }
++
+   // IANA timezone name, e.g. "Europe/Warsaw".
+   //
+   // Only the zone *name* is a host fact. ICU's data is compiled into the binary
+@@ -286,6 +298,7 @@ class BASE_EXPORT Profile {
+   std::optional<int> media_videoinput_count_;
+   std::map<std::string, std::string> keyboard_layout_map_;
+   std::map<std::string, int> gl_limits_;
++  std::set<std::string> gl_extensions_;
+   std::optional<std::string> timezone_;
+   std::optional<bool> prefers_dark_;
+   std::optional<std::string> accept_languages_;
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index fb1bc7c..045a3e5 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -25,6 +25,10 @@
+ 
+ #include "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h"
+ 
++#include <set>
++
++#include "base/apostate/profile.h"
++
+ #include <inttypes.h>
+ 
+ #include <memory>
+@@ -3839,6 +3843,27 @@ bool WebGLRenderingContextBase::ExtensionSupportedAndAllowed(
+     return false;
+   if (disabled_extensions_.Contains(String(tracker->ExtensionName())))
+     return false;
++
++  // Withhold extensions the claimed device does not expose.
++  //
++  // Measured: SwiftShader advertises WEBGL_compressed_texture_astc, _etc and
++  // _etc1 — mobile and Apple compressed-texture formats — which a Windows
++  // D3D11 machine never exposes. The extension list is hashed by fingerprinting
++  // scripts, so three extra entries make the hash match no real Windows Chrome.
++  //
++  // This is the removal direction only, and that is the whole point. Adding an
++  // extension is unsafe because a page calls getExtension() and then calls
++  // methods on the object; removal cannot fail, because the page is told no
++  // exactly as the real device would tell it. Serving here rather than at
++  // getSupportedExtensions() covers both, since getExtension() reaches the same
++  // check — a list and an object that disagreed would be worse than either.
++  if (const base::apostate::Profile* profile = base::apostate::Profile::Get()) {
++    const std::set<std::string>& allowed = profile->gl_extensions();
++    if (!allowed.empty() &&
++        allowed.find(std::string(tracker->ExtensionName())) == allowed.end()) {
++      return false;
++    }
++  }
+   return true;
+ }
+ 

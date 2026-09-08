@@ -25,3 +25,4 @@
 0025-bluetooth-follows-claimed-platform.patch
 0026-gl-limits-from-profile-clamped.patch
 0027-swiftshader-raise-render-limits.patch
+0028-webgl-extensions-from-profile.patch

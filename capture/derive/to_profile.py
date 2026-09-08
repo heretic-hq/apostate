@@ -102,6 +102,63 @@ def build(capture):
 
     put("browser", "user_agent", nav.get("userAgent"))
 
+    # Everything below exists because a patch reads it. A field a patch supports
+    # and this tool does not emit is a patch that silently does nothing: the
+    # build is correct, the profile is valid, and the surface stays wrong.
+    # Four patches were in exactly that state — colour gamut and HDR, the audio
+    # buffer, capture device counts and the keyboard layout — because compose
+    # emitted them and this did not.
+
+    # Display gamut and HDR drive ScreenInfo::display_color_spaces, which is the
+    # single source for both the color-gamut and dynamic-range media features.
+    gamut = "srgb"
+    for g in ("rec2020", "p3"):
+        if g in (media.get("color-gamut") or []):
+            gamut = g
+            break
+    put("screen", "color_gamut", gamut)
+    put("screen", "hdr", "high" in (media.get("dynamic-range") or []))
+
+    # baseLatency is buffer size over sample rate, so the frame count is exact.
+    # Stored as frames because that is what the emitter takes; storing the
+    # latency would lose the rate it was derived against.
+    audio = probe(capture, "audio.properties") or {}
+    if audio.get("baseLatency") and audio.get("sampleRate"):
+        put("audio", "hardware_buffer_frames",
+            round(audio["baseLatency"] * audio["sampleRate"]))
+
+    # Capture device counts. A laptop with neither a microphone nor a camera is
+    # not a laptop, and a headless host has neither.
+    devs = (probe(capture, "media.devices") or {}).get("counts") or {}
+    if devs:
+        put("media", "audioinput_count", devs.get("audioinput", 0))
+        put("media", "videoinput_count", devs.get("videoinput", 0))
+
+    # The keyboard layout is a user setting and is not derivable from anything
+    # else in the profile, so it is replayed verbatim (axiom A3).
+    layout = probe(capture, "keyboard.layout")
+    if layout:
+        put("keyboard", "layout_map", layout)
+
+    # WebGL limits and extensions. Both are served clamped: a limit is reported
+    # as the smaller of the claim and the driver's real value, and an extension
+    # is withheld rather than invented, so neither can over-claim.
+    gl1 = probe(capture, "webgl1") or {}
+    gl2 = probe(capture, "webgl2") or {}
+    limits = {}
+    for src in (gl1, gl2):
+        for k, v in (src.get("parameters") or {}).items():
+            if not k.startswith("MAX_"):
+                continue
+            n = min(v) if isinstance(v, list) and v and isinstance(v[0], int) else v
+            if isinstance(n, int) and n > 0:
+                limits[k] = min(limits.get(k, n), n)
+    if limits:
+        profile["gl_limits"] = limits
+    exts = sorted(set(gl1.get("extensions") or []) | set(gl2.get("extensions") or []))
+    if exts:
+        profile["gl_extensions"] = exts
+
     put("screen", "width", screen.get("width"))
     put("screen", "height", screen.get("height"))
     put("screen", "avail_left", screen.get("availLeft"))

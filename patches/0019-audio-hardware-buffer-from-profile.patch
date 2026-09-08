@@ -27,10 +27,15 @@ clamps a claimed 256 straight back up and the override silently does nothing.
 Cleared, the code falls through to kMinWebAudioBufferSize and
 kMaxWebAudioBufferSize, which is what a device with unknown limits already gets.
 
-The loader accepts only powers of two in [128, 8192]. Every backend Chromium
-ships uses a power of two and the web audio path clamps to that range anyway,
-so anything else is a typo, and rejecting it produces a log line instead of a
-silently clamped value that no longer matches the profile it came from.
+The loader accepts any frame count in [128, 8192], which is exactly
+media::limits::kMinWebAudioBufferSize to kMaxWebAudioBufferSize. An earlier
+version additionally required a power of two. That rule was generalised from a
+single sample — CoreAudio's 256 — and it is wrong: Windows shared-mode WASAPI
+runs a 10 ms period, which is 480 frames at 48 kHz, and the reference Intel
+UHD 630 capture reports exactly that. The check rejected the real value, logged
+an error nothing read, and left the host's 2048 in place, so the patch appeared
+to land and did nothing. Chromium imposes no power-of-two requirement anywhere
+on this path.
 
 Ledger: audio.base-latency.
 diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
@@ -43,15 +48,15 @@ index 0f66556..cd466fc 100644
  
 +  if (const DictValue* audio = dict->FindDict("audio")) {
 +    if (std::optional<int> v = audio->FindInt("hardware_buffer_frames")) {
-+      // Audio buffers are powers of two in every backend Chromium ships, and
-+      // the web audio path clamps to [256, 8192] anyway. Refusing the rest
-+      // here means a typo produces a log line rather than a silently clamped
-+      // value that no longer matches the profile it came from.
-+      if (*v >= 128 && *v <= 8192 && (*v & (*v - 1)) == 0) {
++      // Range only, matching media::limits::kMinWebAudioBufferSize and
++      // kMaxWebAudioBufferSize. An earlier version also required a power of
++      // two, generalised from one sample (CoreAudio's 256); it rejected the
++      // real Windows value of 480 and silently kept the host's buffer.
++      if (*v >= 128 && *v <= 8192) {
 +        profile->audio_hardware_buffer_frames_ = *v;
 +      } else {
-+        LOG(ERROR) << "apostate: audio.hardware_buffer_frames must be a power "
-+                      "of two in [128, 8192]; ignoring";
++        LOG(ERROR) << "apostate: audio.hardware_buffer_frames must be in "
++                      "[128, 8192]; ignoring";
 +      }
 +    }
 +  }

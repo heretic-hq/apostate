@@ -191,16 +191,9 @@
       "properties": {
         "hardware_buffer_frames": {
           "type": "integer",
-          "enum": [
-            128,
-            256,
-            512,
-            1024,
-            2048,
-            4096,
-            8192
-          ],
-          "description": "Frames per buffer of the claimed device's audio output, at its native sample rate. CoreAudio reports 256 on Apple hardware; Linux backends report 2048 or 480. Drives AudioContext.baseLatency, which is max(framesPerBuffer, renderQuantumSize) / sampleRate."
+          "minimum": 128,
+          "maximum": 8192,
+          "description": "Frames per buffer of the claimed device's audio output, at its native sample rate. CoreAudio reports 256 on Apple hardware; Windows shared-mode WASAPI reports 480 (a 10 ms period at 48 kHz); the Linux backends we build on report 2048. Not constrained to powers of two \u2014 real devices are not. Drives AudioContext.baseLatency, which is max(framesPerBuffer, renderQuantumSize) / sampleRate."
         }
       }
     },

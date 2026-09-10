@@ -162,6 +162,7 @@ def run(args):
         "diagnostic_only": True, "angle_backend": args.angle_backend,
         "enable_gpu": args.enable_gpu,
         "disable_web_audio_rust_fft": args.disable_web_audio_rust_fft,
+        "grant_display_controls": args.grant_display_controls,
         "timeout_seconds": args.timeout,
         "requested": {name: str(getattr(args, name)) if getattr(args, name) else None
                       for name in ("browser", "fixture", "profile", "fontconfig",
@@ -180,6 +181,18 @@ def run(args):
         (out / "fixture.html").write_bytes(fixture_bytes)
         inputs = {"browser": file_receipt(browser), "fixture": file_receipt(out / "fixture.html")}
         inputs["fixture"]["source"] = str(fixture)
+        extension = None
+        if getattr(args, "extension_dir", None):
+            extension = args.extension_dir.resolve(strict=True)
+            if not extension.is_dir() or not (extension / "manifest.json").is_file():
+                raise ValueError("extension directory requires its original manifest.json")
+            manifest = strict_json((extension / "manifest.json").read_bytes())
+            extension_files = sorted(path for path in extension.rglob('*') if path.is_file())
+            if any(path.is_symlink() for path in extension.rglob('*')):
+                raise ValueError("extension directory must not contain symlinks")
+            inputs["extension"] = {"path": str(extension), "version": manifest.get("version"),
+                "files": {str(path.relative_to(extension)): file_receipt(path)["sha256"]
+                          for path in extension_files}}
         if args.profile:
             source = args.profile.resolve(strict=True)
             profile_bytes = source.read_bytes()
@@ -194,6 +207,7 @@ def run(args):
             inputs["profile"] = file_receipt(out / "profile.json")
             inputs["profile"]["source"] = str(source)
             parameters["expected_limits"] = profile.get("gl_limits", {})
+            parameters["expected_displays"] = profile.get("screen", {}).get("displays", [])
         if args.parameters:
             parameter_bytes = args.parameters.read_bytes()
             supplied = strict_json(parameter_bytes)
@@ -219,6 +233,7 @@ def run(args):
         write_json(out / "configuration.json", {"inputs": inputs, "angle_backend": args.angle_backend,
                    "enable_gpu": args.enable_gpu,
                    "disable_web_audio_rust_fft": args.disable_web_audio_rust_fft,
+                   "grant_display_controls": args.grant_display_controls,
                    "timeout_seconds": args.timeout, "diagnostic_only": True})
         token = secrets.token_urlsafe(24)
         server = ResultServer(fixture_bytes, parameters, token, out)
@@ -226,6 +241,17 @@ def run(args):
         server_thread.start()
         with tempfile.TemporaryDirectory(prefix="apostate-browser-check-") as user_data:
             receipt["user_data_dir"] = user_data
+            if args.grant_display_controls:
+                # Ordinary per-origin permissions for the authored movement
+                # fixture. No user input or page API is synthesized.
+                preferences = Path(user_data) / "Default/Preferences"
+                preferences.parent.mkdir(parents=True)
+                pattern = server.origin + ",*"
+                write_json(preferences, {"profile": {"content_settings": {"exceptions": {
+                    "window_placement": {pattern: {"setting": 1}},
+                    "automatic_fullscreen": {pattern: {"setting": 1}},
+                    "popups": {pattern: {"setting": 1}}
+                }}}})
             if args.widevine_source:
                 provision = subprocess.run(
                     [sys.executable, str(ROOT / "scripts/provision-widevine.py"),
@@ -245,6 +271,8 @@ def run(args):
                 command.append("--disable-blink-features=WebAudioRustFft")
             if profile_bytes is not None:
                 command.append("--apostate-profile=" + base64.b64encode(profile_bytes).decode("ascii"))
+            if extension is not None:
+                command.append("--load-extension=" + str(extension))
             command += backend_args(args.angle_backend) + [url]
             launch = {"command": command, "url": url, "user_data_dir": user_data,
                       "fontconfig": env.get("FONTCONFIG_FILE"), "diagnostic_only": True}
@@ -298,11 +326,15 @@ def main():
     parser.add_argument("--fontconfig", type=Path)
     parser.add_argument("--parameters", type=Path)
     parser.add_argument("--widevine-source", type=Path)
+    parser.add_argument("--extension-dir", type=Path,
+                        help="load an operator-provisioned extension only in this fresh diagnostic profile")
     parser.add_argument("--angle-backend", choices=BACKENDS, default="swiftshader")
     parser.add_argument("--enable-gpu", action="store_true",
                         help="allow headless default GPU selection; does not bypass driver blocklists")
     parser.add_argument("--disable-web-audio-rust-fft", action="store_true",
                         help="diagnostic A/B control for the WebAudioRustFft implementation")
+    parser.add_argument("--grant-display-controls", action="store_true",
+                        help="pregrant window management, fullscreen and popups to the local diagnostic origin")
     parser.add_argument("--timeout", type=float, default=120)
     args = parser.parse_args()
     if not 0 < args.timeout <= 3600:

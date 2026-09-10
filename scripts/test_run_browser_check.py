@@ -20,6 +20,7 @@ spec.loader.exec_module(browser_check)
 
 FAKE_CHILD = '''#!/usr/bin/env python3
 import json,sys,time,urllib.request,urllib.parse
+from pathlib import Path
 url=sys.argv[-1]
 parts=urllib.parse.urlsplit(url)
 base=urllib.parse.urlunsplit((parts.scheme,parts.netloc,"","",""))
@@ -27,6 +28,9 @@ query=urllib.parse.urlencode({"token":urllib.parse.parse_qs(parts.query)["token"
 parameters=json.load(urllib.request.urlopen(base+"/parameters?"+query))
 result={"passed":True,"synthetic_process":True,"parameters":parameters,
         "has_profile":any(a.startswith("--apostate-profile=") for a in sys.argv)}
+userdata=Path(next(a.split("=",1)[1] for a in sys.argv if a.startswith("--user-data-dir=")))
+prefs=userdata/"Default/Preferences"
+result["preferences"]=json.loads(prefs.read_text()) if prefs.exists() else None
 request=urllib.request.Request(base+"/result?"+query,data=json.dumps(result).encode(),
     headers={"Content-Type":"application/json","Origin":base})
 urllib.request.urlopen(request).read()
@@ -100,6 +104,20 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(configuration["enable_gpu"])
         self.assertTrue(configuration["disable_web_audio_rust_fft"])
         self.assertFalse(any("remote-debugging" in arg for arg in launch["command"]))
+
+    def test_display_permissions_are_limited_to_diagnostic_origin(self):
+        run = self.invoke("--grant-display-controls", "--timeout", "5")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        result = json.loads((self.out / "result.json").read_text())
+        exceptions = result["preferences"]["profile"]["content_settings"]["exceptions"]
+        self.assertEqual(set(exceptions), {"window_placement", "popups", "automatic_fullscreen"})
+        for rules in exceptions.values():
+            self.assertEqual(len(rules), 1)
+            pattern, value = next(iter(rules.items()))
+            self.assertRegex(pattern, r"^http://127\.0\.0\.1:[0-9]+,\*$")
+            self.assertEqual(value, {"setting": 1})
+        receipt = json.loads((self.out / "receipt.json").read_text())
+        self.assertTrue(receipt["userdata_removed"])
 
     def test_existing_output_refused_without_modification(self):
         self.out.mkdir()

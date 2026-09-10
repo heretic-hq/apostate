@@ -42,7 +42,7 @@ def derive_gl_limits(gl1, gl2):
     parameters = {}
     for src in (gl1, gl2):
         for name, value in (src.get("parameters") or {}).items():
-            if not name.startswith("MAX_"):
+            if not name.startswith("MAX_") and name != "ALIASED_POINT_SIZE_RANGE":
                 continue
             if name in parameters and parameters[name] != value:
                 raise ValueError(f"WebGL1/WebGL2 disagree on {name}; "
@@ -51,7 +51,19 @@ def derive_gl_limits(gl1, gl2):
 
     limits = {}
     for name, value in parameters.items():
-        if name == "MAX_VIEWPORT_DIMS":
+        if name == "ALIASED_POINT_SIZE_RANGE":
+            if (not isinstance(value, list) or len(value) != 2
+                    or any(type(v) not in (int, float) or not math.isfinite(v)
+                           or not 0 < v <= 2**31 - 1 for v in value)
+                    or value[0] > value[1]):
+                raise ValueError("ALIASED_POINT_SIZE_RANGE must be a finite positive ordered pair")
+            if all(float(v).is_integer() for v in value):
+                limits["ALIASED_POINT_SIZE_RANGE_MIN"] = int(value[0])
+                limits["ALIASED_POINT_SIZE_RANGE_MAX"] = int(value[1])
+            else:
+                print(f"WARNING: nonintegral ALIASED_POINT_SIZE_RANGE {value!r} "
+                      "stays inherited; integer profile caps cannot represent it", file=sys.stderr)
+        elif name == "MAX_VIEWPORT_DIMS":
             if (not isinstance(value, list) or len(value) != 2
                     or any(type(v) is not int or not 0 < v <= 2**31 - 1
                            for v in value)):
@@ -65,6 +77,33 @@ def derive_gl_limits(gl1, gl2):
         elif type(value) is int and value > 0:
             limits[name] = value
     return limits
+
+
+GENERIC_FONT_DEFAULTS = {
+    "macOS": {"serif": "Times", "sans-serif": "Helvetica", "monospace": "Menlo",
+              "cursive": "Apple Chancery", "fantasy": "Papyrus"},
+    "Windows": {"serif": "Times New Roman", "sans-serif": "Arial",
+                "monospace": "Consolas", "cursive": "Comic Sans MS", "fantasy": "Impact"},
+}
+
+
+def derive_generic_fonts(capture, platform):
+    probes = capture.get("probes", {})
+    metric_probe = probes.get("fonts.metrics") or {}
+    detection_probe = probes.get("fonts.detected") or {}
+    if not metric_probe.get("ok") or not detection_probe.get("ok"):
+        return {}
+    metrics = metric_probe.get("value") or {}
+    detected = (detection_probe.get("value") or {}).get("detected") or []
+    result = {}
+    for generic, family in GENERIC_FONT_DEFAULTS.get(platform, {}).items():
+        if family not in detected or not isinstance(metrics.get(family), dict):
+            continue
+        expected = {k: v for k, v in metrics[family].items() if k != "__resolved"}
+        actual = {k: v for k, v in (metrics.get(generic) or {}).items() if k != "__resolved"}
+        if expected and expected == actual:
+            result[generic] = family
+    return result
 
 
 def derive_screen_displays(capture):
@@ -159,6 +198,38 @@ def derive_screen_displays(capture):
     if type(geometry.get("isExtended")) is bool and geometry["isExtended"] != (len(displays) > 1):
         raise ValueError("screen.geometry isExtended disagrees with display count")
     return displays
+
+
+def derive_speech_voices(capture):
+    """Constraints for real provider voices; missing metadata stays unknown."""
+    voices = probe(capture, "speech.voices")
+    if voices is None:
+        return None
+    if not isinstance(voices, list):
+        raise ValueError("speech.voices must be a list")
+    result = []
+    for voice in voices:
+        if not isinstance(voice, dict):
+            raise ValueError("speech.voices entry must be an object")
+        name, lang = voice.get("name"), voice.get("lang")
+        if not isinstance(name, str) or not name or not isinstance(lang, str) or not lang:
+            raise ValueError("speech.voices entry needs nonempty name and lang")
+        # Chrome emits voiceURI from VoiceData.name. A different URI cannot be
+        # represented by this provider-matching model and must not be discarded.
+        if "voiceURI" in voice and voice["voiceURI"] != name:
+            raise ValueError("speech voiceURI differs from name; provider identity is unresolved")
+        entry = {"name": name, "lang": lang}
+        if "default" in voice:
+            if type(voice["default"]) is not bool:
+                raise ValueError("speech default must be boolean when present")
+            if voice["default"]:
+                entry["default"] = True
+        if "localService" in voice:
+            if type(voice["localService"]) is not bool:
+                raise ValueError("speech localService must be boolean when present")
+            entry["local_service"] = voice["localService"]
+        result.append(entry)
+    return result
 
 
 def build(capture):
@@ -274,22 +345,11 @@ def build(capture):
     if hw:
         profile.setdefault("media", {})["hw_decode_codecs"] = sorted(hw)
 
-    # TTS voices. Replayed rather than derived: the names encode the OS and
-    # its installed language packs, and nothing about the platform string
-    # predicts which twenty-odd voices a given Windows install carries.
-    voices = probe(capture, "speech.voices") or []
-    if isinstance(voices, list) and voices:
-        out = []
-        for v in voices:
-            name, lang = v.get("name"), v.get("lang")
-            if not name or not lang:
-                continue
-            entry = {"name": name, "lang": lang}
-            if v.get("default"):
-                entry["default"] = True
-            out.append(entry)
-        if out:
-            profile.setdefault("speech", {})["voices"] = out
+    # Constrain the actual provider list. Profile names never create voices,
+    # and local_service is a matching condition, not a metadata override.
+    voices = derive_speech_voices(capture)
+    if voices is not None:
+        profile.setdefault("speech", {})["voices"] = voices
 
     # Capture device counts. A laptop with neither a microphone nor a camera is
     # not a laptop, and a headless host has neither.
@@ -396,6 +456,10 @@ def build(capture):
 
     put("theme", "highlight_argb", css_rgb_to_argb(system.get("Highlight")))
     put("theme", "highlight_text_argb", css_rgb_to_argb(system.get("HighlightText")))
+
+    generic_fonts = derive_generic_fonts(capture, (profile.get("platform") or {}).get("name"))
+    if generic_fonts:
+        profile.setdefault("fonts", {})["generic_family_map"] = generic_fonts
 
     return profile
 

@@ -1,0 +1,576 @@
+Subject: [PATCH] speech: require real providers and remove silent synthetic completion
+
+Patch0037 invented start/end events on a character-count timer without audio,
+forced platform readiness, and emitted profile names without providers. Restore
+the native Linux readiness, voice enumeration and speech event path.
+
+At the TTS controller, filter actual registered voices by profile name, language
+and optional local_service. Preserve native IDs, engine IDs, event support,
+remote/local metadata and provider ordering. Chrome maps voiceURI from name and
+localService from !VoiceData.remote, so the profile constrains that existing
+identity instead of overwriting metadata. Missing local_service stays unknown.
+An absent speech.voices field inherits native behavior; an explicit empty list
+permits no voices.
+
+When no eligible provider matches, prevent the controller's native-default
+fallback and report the existing synthesis failure callback. Also reject a
+selected Linux voice that disappears before speech-dispatcher lookup, rather
+than passing an empty voice object that chooses a different default. Successful
+speech still requires real native/provider callbacks. Autoplay/user activation
+code is untouched.
+
+References: resources/fingerprints/raw/unlabelled-20260910T140818Z.json and
+resources/fingerprints/raw/m4-max-chrome-20260908T163229Z.json, speech.voices.
+Both require19remote Google voices; the i3 also needs3local Microsoft voices,
+and the M4 needs its captured Apple voices. Missing provider assets remain
+capability failures. A shorter empty-list diff is not a conformance fix.
+
+Primary source at Chromium79460ebecaa5625e57a5fb679a735659e73dc687:
+content/browser/speech/speech_synthesis_impl.cc:99-113 maps provider metadata.
+content/browser/speech/tts_controller_impl.cc:GetVoices/SpeakNow/GetMatchingVoice
+content/browser/speech/tts_linux.cc:ProcessSpeech
+third_party/blink/renderer/modules/speech/speech_synthesis.cc:IsAllowedToStartByAutoplay
+
+Adds provider-routing unit tests; V1 and real audio/event conformance remain
+required. Ledger proposal: speech.provider-validation.
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index 684bc83..a0babac 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -317,6 +317,7 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+ 
+   if (const DictValue* speech = dict->FindDict("speech")) {
+     if (const ListValue* voices = speech->FindList("voices")) {
++      profile->has_speech_voice_filter_ = true;
+       for (const auto& v : *voices) {
+         const DictValue* entry = v.GetIfDict();
+         if (!entry) {
+@@ -329,8 +330,13 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+                         "ignoring";
+           continue;
+         }
+-        profile->speech_voices_.push_back(
+-            SpeechVoice{*name, *lang, entry->FindBool("default").value_or(false)});
++        std::optional<bool> local_service = entry->FindBool("local_service");
++        if (entry->Find("local_service") && !local_service) {
++          LOG(ERROR) << "apostate: speech local_service must be boolean";
++          return nullptr;
++        }
++        profile->speech_voices_.push_back(SpeechVoice{
++            *name, *lang, entry->FindBool("default").value_or(false), local_service});
+       }
+     }
+   }
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index 41a18d7..0d2f224 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -315,16 +315,12 @@ class BASE_EXPORT Profile {
+     std::string name;
+     std::string lang;
+     bool is_default = false;
++    std::optional<bool> local_service;
+   };
+ 
+-  // The claimed machine's TTS voices.
+-  //
+-  // An empty list is a strong container tell: every real desktop has voices,
+-  // Windows ships around twenty SAPI ones, and a Linux box without
+-  // speech-dispatcher installed reports none at all. The list is also
+-  // platform-shaped rather than arbitrary — "Microsoft Hazel - English (United
+-  // Kingdom)" is not a name any other OS produces — so it has to be replayed
+-  // rather than invented.
++  // Constraints on real registered voices, never a source of synthesized
++  // names or capabilities. Missing local_service inherits provider metadata.
++  bool has_speech_voice_filter() const { return has_speech_voice_filter_; }
+   const std::vector<SpeechVoice>& speech_voices() const {
+     return speech_voices_;
+   }
+@@ -384,6 +380,7 @@ class BASE_EXPORT Profile {
+   const std::string& source_id() const { return source_id_; }
+ 
+  private:
++  friend class ProfileTestPeer;
+   static Profile* ParseOrNull(const std::string& encoded);
+ 
+   std::optional<int> cpu_logical_cores_;
+@@ -419,6 +416,7 @@ class BASE_EXPORT Profile {
+   std::map<std::string, SystemFont> css_system_fonts_;
+   std::optional<bool> screen_is_extended_;
+   std::set<std::string> hw_decode_codecs_;
++  bool has_speech_voice_filter_ = false;
+   std::vector<SpeechVoice> speech_voices_;
+   std::optional<std::string> timezone_;
+   std::optional<bool> prefers_dark_;
+diff --git a/content/browser/speech/tts_controller_impl.cc b/content/browser/speech/tts_controller_impl.cc
+index 5a345f7..543d9f0 100644
+--- a/content/browser/speech/tts_controller_impl.cc
++++ b/content/browser/speech/tts_controller_impl.cc
+@@ -10,9 +10,11 @@
+ #include <string>
+ #include <vector>
+ 
++#include "base/apostate/profile.h"
+ #include "base/containers/queue.h"
+ #include "base/functional/bind.h"
+ #include "base/json/json_reader.h"
++#include "base/logging.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "base/metrics/user_metrics.h"
+ #include "base/observer_list.h"
+@@ -415,6 +417,23 @@ void TtsControllerImpl::GetVoices(BrowserContext* browser_context,
+                        [](const VoiceData& voice) { return voice.remote; });
+     out_voices->resize(it - out_voices->begin());
+   }
++
++  if (const auto* profile = base::apostate::Profile::Get();
++      profile && profile->has_speech_voice_filter()) {
++    // Keep provider identity, remote/local status, native identifier, event
++    // support and ordering. A captured name cannot create a working voice.
++    std::erase_if(*out_voices, [&](const VoiceData& voice) {
++      if (!voice.native && voice.engine_id.empty())
++        return true;
++      return std::none_of(profile->speech_voices().begin(),
++                          profile->speech_voices().end(),
++                          [&](const auto& requested) {
++        return voice.name == requested.name && voice.lang == requested.lang &&
++               (!requested.local_service ||
++                *requested.local_service == !voice.remote);
++      });
++    });
++  }
+ }
+ 
+ bool TtsControllerImpl::IsSpeaking() {
+@@ -585,6 +604,18 @@ void TtsControllerImpl::SpeakNow(std::unique_ptr<TtsUtterance> utterance) {
+   // TODO(katie): Move most of the GetMatchingVoice logic into content/ and
+   // use the TTS controller delegate to get chrome-specific info as needed.
+   int index = GetMatchingVoice(utterance.get(), voices);
++  if (const auto* profile = base::apostate::Profile::Get();
++      profile && profile->has_speech_voice_filter() && index < 0) {
++    // Upstream may retry an unmatched request with the native default voice.
++    // That would speak a different identity after a profile filter removed
++    // unavailable providers. Use the normal synthesis failure callback instead.
++    LOG(ERROR) << "apostate: requested speech voice has no available provider";
++    const int utterance_id = utterance->GetId();
++    SetCurrentUtterance(std::move(utterance));
++    GetTtsPlatform()->SetError("Requested speech voice is unavailable");
++    OnSpeakFinished(utterance_id, false);
++    return;
++  }
+   VoiceData voice;
+   if (index >= 0) {
+     voice = voices[index];
+diff --git a/content/browser/speech/tts_controller_unittest.cc b/content/browser/speech/tts_controller_unittest.cc
+index 5b7d4ee..0a09b87 100644
+--- a/content/browser/speech/tts_controller_unittest.cc
++++ b/content/browser/speech/tts_controller_unittest.cc
+@@ -4,6 +4,9 @@
+ 
+ // Unit tests for the TTS Controller.
+ 
++#include "base/apostate/profile.h"
++#include "base/base64.h"
++#include "base/check.h"
+ #include "base/memory/ptr_util.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/values.h"
+@@ -24,7 +27,44 @@
+ #include "content/public/browser/tts_controller_delegate.h"
+ #endif
+ 
++namespace base::apostate {
++class ProfileTestPeer {
++ public:
++  static std::unique_ptr<Profile> Parse(std::string_view json) {
++    return std::unique_ptr<Profile>(Profile::ParseOrNull(base::Base64Encode(json)));
++  }
++};
++}  // namespace base::apostate
++
+ namespace content {
++namespace {
++class ScopedSpeechProfile {
++ public:
++  explicit ScopedSpeechProfile(std::string_view json)
++      : previous_(base::apostate::Profile::Get()),
++        profile_(base::apostate::ProfileTestPeer::Parse(json)) {
++    CHECK(profile_);
++    base::apostate::Profile::SetForTesting(profile_.get());
++  }
++  ~ScopedSpeechProfile() { base::apostate::Profile::SetForTesting(previous_); }
++
++ private:
++  const raw_ptr<const base::apostate::Profile> previous_;
++  std::unique_ptr<base::apostate::Profile> profile_;
++};
++
++class RecordingSpeechEvents : public UtteranceEventDelegate {
++ public:
++  explicit RecordingSpeechEvents(std::vector<TtsEventType>& events)
++      : events_(events) {}
++  void OnTtsEvent(TtsUtterance*, TtsEventType type, int, int,
++                  const std::string&) override {
++    events_.push_back(type);
++  }
++ private:
++  std::vector<TtsEventType>& events_;
++};
++}  // namespace
+ 
+ // Platform Tts implementation that does nothing.
+ class MockTtsPlatformImpl : public TtsPlatform {
+@@ -48,6 +88,7 @@ class MockTtsPlatformImpl : public TtsPlatform {
+       const VoiceData& voice,
+       const UtteranceContinuousParameters& params,
+       base::OnceCallback<void(bool)> did_start_speaking_callback) override {
++    ++speak_called_;
+     utterance_id_ = utterance_id;
+     did_start_speaking_callback_ = std::move(did_start_speaking_callback);
+     utterance_voice_ = voice;
+@@ -79,6 +120,8 @@ class MockTtsPlatformImpl : public TtsPlatform {
+   // Returns the VoiceData passed in by mock Speak API.
+   VoiceData get_utterance_voice() const { return utterance_voice_; }
+ 
++  int speak_called() const { return speak_called_; }
++
+   // Returns the amount of calls to Mock API.
+   int pause_called() const { return pause_called_; }
+   int resume_called() const { return resume_called_; }
+@@ -111,6 +154,7 @@ class MockTtsPlatformImpl : public TtsPlatform {
+   int pause_called_ = 0;
+   int resume_called_ = 0;
+   int stop_speaking_called_ = 0;
++  int speak_called_ = 0;
+   std::string error_;
+   base::OnceCallback<void(bool)> did_start_speaking_callback_;
+ };
+@@ -1139,4 +1183,139 @@ TEST_F(TtsControllerTest, SpeakWhenLoadingBuiltInEngine) {
+ }
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ 
++TEST_F(TtsControllerTest, ProfileVoicesRequireActualProviderAndLocality) {
++  ScopedSpeechProfile profile(R"({"speech":{"voices":[
++      {"name":"Allowed","lang":"en-US","local_service":true}]}})");
++  controller()->set_allow_remote_voices(true);
++  VoiceData local;
++  local.name = "Allowed";
++  local.lang = "en-US";
++  local.native = true;
++  local.native_voice_identifier = "native-provider-id";
++  local.events = {TTS_EVENT_START, TTS_EVENT_END, TTS_EVENT_WORD};
++  VoiceData wrong_language(local);
++  wrong_language.lang = "en-GB";
++  VoiceData wrong_name(local);
++  wrong_name.name = "Unconfigured";
++  VoiceData remote(local);
++  remote.remote = true;
++  remote.native = false;
++  remote.engine_id = "real-remote-provider";
++  VoiceData unroutable(local);
++  unroutable.native = false;
++  platform_impl()->set_voices({wrong_language, local, wrong_name, unroutable});
++  engine_delegate()->set_voices({remote});
++  std::vector<VoiceData> voices;
++  controller()->GetVoices(browser_context(), GURL(), &voices);
++  ASSERT_EQ(1u, voices.size());
++  EXPECT_EQ(local.native_voice_identifier, voices[0].native_voice_identifier);
++  EXPECT_EQ(local.events, voices[0].events);
++  EXPECT_TRUE(voices[0].native);
++  EXPECT_FALSE(voices[0].remote);
++}
++
++TEST_F(TtsControllerTest, ProfileUnknownLocalityPreservesRemoteProviderMetadata) {
++  ScopedSpeechProfile profile(R"({"speech":{"voices":[
++      {"name":"Allowed","lang":"en-US"}]}})");
++  controller()->set_allow_remote_voices(true);
++  VoiceData remote;
++  remote.name = "Allowed";
++  remote.lang = "en-US";
++  remote.remote = true;
++  remote.engine_id = "actual-engine";
++  remote.events = {TTS_EVENT_START, TTS_EVENT_END};
++  engine_delegate()->set_voices({remote});
++  std::vector<VoiceData> voices;
++  controller()->GetVoices(browser_context(), GURL(), &voices);
++#if BUILDFLAG(IS_ANDROID)
++  EXPECT_TRUE(voices.empty());
++#else
++  ASSERT_EQ(1u, voices.size());
++  EXPECT_TRUE(voices[0].remote);
++  EXPECT_EQ("actual-engine", voices[0].engine_id);
++#endif
++}
++
++TEST_F(TtsControllerTest, ProfileMissingProviderErrorsWithoutNativeFallback) {
++  ScopedSpeechProfile profile(R"({"speech":{"voices":[
++      {"name":"Unavailable","lang":"en-US","local_service":true}]}})");
++  platform_impl()->SetPlatformImplSupported(false);
++  std::vector<TtsEventType> events;
++  auto utterance = CreateUtteranceImpl();
++  utterance->SetText("Must not pretend to speak");
++  utterance->SetEventDelegate(std::make_unique<RecordingSpeechEvents>(events));
++  controller()->SpeakOrEnqueue(std::move(utterance));
++  EXPECT_EQ(0, platform_impl()->speak_called());
++  EXPECT_EQ(nullptr, controller()->current_utterance());
++  EXPECT_EQ(std::vector<TtsEventType>{TTS_EVENT_ERROR}, events);
++}
++
++TEST_F(TtsControllerTest, ProfileExplicitMissingVoiceDoesNotSpeakOtherAllowedVoice) {
++  ScopedSpeechProfile profile(R"({"speech":{"voices":[
++      {"name":"Allowed","lang":"en-US","local_service":true},
++      {"name":"Unavailable","lang":"en-US","local_service":true}]}})");
++  VoiceData available;
++  available.name = "Allowed";
++  available.lang = "en-US";
++  available.native = true;
++  platform_impl()->set_voices({available});
++  std::vector<TtsEventType> events;
++  auto utterance = CreateUtteranceImpl();
++  utterance->SetVoiceName("Unavailable");
++  utterance->SetEventDelegate(std::make_unique<RecordingSpeechEvents>(events));
++  controller()->SpeakOrEnqueue(std::move(utterance));
++  EXPECT_EQ(0, platform_impl()->speak_called());
++  EXPECT_EQ(std::vector<TtsEventType>{TTS_EVENT_ERROR}, events);
++}
++
++TEST_F(TtsControllerTest, ProfileEmptyVoiceFilterPreventsDefaultSpeech) {
++  ScopedSpeechProfile profile(R"({"speech":{"voices":[]}})");
++  VoiceData native;
++  native.name = "Real default";
++  native.lang = "en-US";
++  native.native = true;
++  platform_impl()->set_voices({native});
++  std::vector<VoiceData> voices;
++  controller()->GetVoices(browser_context(), GURL(), &voices);
++  EXPECT_TRUE(voices.empty());
++  std::vector<TtsEventType> events;
++  auto utterance = CreateUtteranceImpl();
++  utterance->SetEventDelegate(std::make_unique<RecordingSpeechEvents>(events));
++  controller()->SpeakOrEnqueue(std::move(utterance));
++  EXPECT_EQ(0, platform_impl()->speak_called());
++  EXPECT_EQ(std::vector<TtsEventType>{TTS_EVENT_ERROR}, events);
++}
++
++TEST_F(TtsControllerTest, ProfileAvailableVoiceUsesProviderCallbacks) {
++  ScopedSpeechProfile profile(R"({"speech":{"voices":[
++      {"name":"Allowed","lang":"en-US","local_service":true}]}})");
++  VoiceData native;
++  native.name = "Allowed";
++  native.lang = "en-US";
++  native.native = true;
++  native.events = {TTS_EVENT_START, TTS_EVENT_END};
++  platform_impl()->set_voices({native});
++  std::vector<TtsEventType> events;
++  auto utterance = CreateUtteranceImpl();
++  const int id = utterance->GetId();
++  utterance->SetVoiceName(native.name);
++  utterance->SetEventDelegate(std::make_unique<RecordingSpeechEvents>(events));
++  controller()->SpeakOrEnqueue(std::move(utterance));
++  EXPECT_EQ(1, platform_impl()->speak_called());
++  EXPECT_TRUE(events.empty());
++  platform_impl()->StartSpeaking(true);
++  controller()->OnTtsEvent(id, TTS_EVENT_START, 0, 1, "");
++  platform_impl()->FinishSpeaking();
++  EXPECT_EQ((std::vector<TtsEventType>{TTS_EVENT_START, TTS_EVENT_END}), events);
++}
++
++TEST_F(TtsControllerTest, ProfileWithoutSpeechRetainsNativeFallback) {
++  ScopedSpeechProfile profile("{}");
++  auto utterance = CreateUtteranceImpl();
++  utterance->SetVoiceName("Missing native name");
++  controller()->SpeakOrEnqueue(std::move(utterance));
++  EXPECT_EQ(1, platform_impl()->speak_called());
++  EXPECT_EQ("Missing native name", platform_impl()->get_utterance_voice().name);
++}
++
+ }  // namespace content
+diff --git a/content/browser/speech/tts_linux.cc b/content/browser/speech/tts_linux.cc
+index 0738577..4876cbc 100644
+--- a/content/browser/speech/tts_linux.cc
++++ b/content/browser/speech/tts_linux.cc
+@@ -9,6 +9,7 @@
+ #include <map>
+ #include <memory>
+ 
++#include "base/apostate/profile.h"
+ #include "base/command_line.h"
+ #include "base/compiler_specific.h"
+ #include "base/debug/leak_annotations.h"
+@@ -21,8 +22,6 @@
+ #include "base/task/task_traits.h"
+ #include "base/task/thread_pool.h"
+ #include "base/threading/sequence_bound.h"
+-#include "base/apostate/profile.h"
+-#include "base/time/time.h"
+ #include "content/browser/speech/tts_platform_impl.h"
+ #include "content/public/browser/browser_task_traits.h"
+ #include "content/public/browser/browser_thread.h"
+@@ -126,8 +125,6 @@ class TtsPlatformImplLinux : public TtsPlatformImpl {
+   void Shutdown() override;
+ 
+   void OnInitialized(bool success, PlatformVoices voices);
+-  // Completes a profile-supplied utterance. See Speak().
+-  void FinishApostateUtterance(int utterance_id, int text_length);
+   void OnSpeakScheduled(base::OnceCallback<void(bool)> on_speak_finished,
+                         bool success);
+   void OnSpeakFinished(int utterance_id);
+@@ -418,45 +415,11 @@ TtsPlatformImplLinux::TtsPlatformImplLinux()
+   worker_.AsyncCall(&TtsPlatformImplBackgroundWorker::Initialize);
+ }
+ 
+-namespace {
+-
+-// Voices the profile supplies, or nullptr when it supplies none.
+-//
+-// When present they replace the host's entirely rather than adding to them.
+-// speech-dispatcher on the build host offers espeak voices with names no
+-// Windows or macOS machine produces, so merging would report a device running
+-// two synthesisers at once.
+-const std::vector<base::apostate::Profile::SpeechVoice>* ApostateVoices() {
+-  const base::apostate::Profile* profile = base::apostate::Profile::Get();
+-  if (!profile || profile->speech_voices().empty()) {
+-    return nullptr;
+-  }
+-  return &profile->speech_voices();
+-}
+-
+-// Characters per second of synthesised speech at rate 1.0. Measured against
+-// the SAPI voices on the reference machine, which is also roughly where every
+-// other synthesiser sits — the exact figure matters only because a page can
+-// time an utterance, and an instant one is as wrong as a silent one.
+-constexpr double kApostateCharsPerSecond = 15.0;
+-
+-}  // namespace
+-
+ bool TtsPlatformImplLinux::PlatformImplSupported() {
+-  // A profile carrying voices makes this platform "supported" whether or not
+-  // speech-dispatcher is installed. Without this the controller never asks for
+-  // voices at all — TtsPlatformReady() gates the call — and the list stays
+-  // empty no matter what GetVoices() would have returned.
+-  if (ApostateVoices()) {
+-    return true;
+-  }
+   return is_supported_;
+ }
+ 
+ bool TtsPlatformImplLinux::PlatformImplInitialized() {
+-  if (ApostateVoices()) {
+-    return true;
+-  }
+   return is_initialized_;
+ }
+ 
+@@ -475,37 +438,6 @@ void TtsPlatformImplLinux::Speak(
+     return;
+   }
+ 
+-  // Speaking, when the voices came from the profile and the host has no
+-  // synthesiser behind them.
+-  //
+-  // Serving a voice list that cannot speak would be worse than serving none.
+-  // A page sets utterance.volume = 0, calls speak(), and listens for onend
+-  // against onerror: silent, instant, and it catches a list of voices that are
+-  // only a list. So the utterance runs — start, then end after the time real
+-  // speech would have taken — and the only thing missing is audio, which
+-  // nothing can observe.
+-  //
+-  // Deferred to the real synthesiser whenever there is one, so a host with
+-  // speech-dispatcher installed still speaks for real.
+-  if (ApostateVoices() && !is_initialized_) {
+-    is_speaking_ = true;
+-    utterance_id_ = utterance_id;
+-    const int text_length = static_cast<int>(utterance.size());
+-    TtsController::GetInstance()->OnTtsEvent(utterance_id, TTS_EVENT_START, 0,
+-                                             text_length, std::string());
+-    const double rate = params.rate > 0.0 ? params.rate : 1.0;
+-    base::TimeDelta duration = base::Milliseconds(static_cast<int64_t>(
+-        text_length * 1000.0 / (kApostateCharsPerSecond * rate)));
+-    duration = std::clamp(duration, base::Milliseconds(120), base::Seconds(300));
+-    GetUIThreadTaskRunner({})->PostDelayedTask(
+-        FROM_HERE,
+-        base::BindOnce(&TtsPlatformImplLinux::FinishApostateUtterance,
+-                       base::Unretained(this), utterance_id, text_length),
+-        duration);
+-    std::move(on_speak_finished).Run(true);
+-    return;
+-  }
+-
+   // Flag that a utterance is getting emitted. The |is_speaking_| flag will be
+   // set back to false when the utterance will be fully spoken, stopped or if
+   // the voice synthetizer was not able to emit it.
+@@ -522,32 +454,10 @@ void TtsPlatformImplLinux::Speak(
+                                     std::move(on_speak_finished))));
+ }
+ 
+-void TtsPlatformImplLinux::FinishApostateUtterance(int utterance_id,
+-                                                   int text_length) {
+-  DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
+-  // A stop or a newer utterance already moved on; the timer is stale.
+-  if (utterance_id != utterance_id_) {
+-    return;
+-  }
+-  is_speaking_ = false;
+-  utterance_id_ = kInvalidUtteranceId;
+-  TtsController::GetInstance()->OnTtsEvent(utterance_id, TTS_EVENT_END,
+-                                           text_length, 0, std::string());
+-}
+-
+ bool TtsPlatformImplLinux::StopSpeaking() {
+   DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
+   DCHECK(PlatformImplInitialized());
+ 
+-  // Nothing to stop in the worker when there is no synthesiser behind it, and
+-  // calling into an uninitialised speech-dispatcher connection is not safe.
+-  if (ApostateVoices() && !is_initialized_) {
+-    paused_ = false;
+-    is_speaking_ = false;
+-    utterance_id_ = kInvalidUtteranceId;
+-    return true;
+-  }
+-
+   worker_.AsyncCall(&TtsPlatformImplBackgroundWorker::StopSpeaking);
+   paused_ = false;
+ 
+@@ -587,25 +497,6 @@ void TtsPlatformImplLinux::GetVoices(std::vector<VoiceData>* out_voices) {
+   DCHECK(BrowserThread::CurrentlyOn(content::BrowserThread::UI));
+   DCHECK(PlatformImplInitialized());
+ 
+-  if (const auto* claimed = ApostateVoices()) {
+-    for (const auto& v : *claimed) {
+-      out_voices->push_back(VoiceData());
+-      VoiceData& voice = out_voices->back();
+-      voice.native = true;
+-      voice.name = v.name;
+-      voice.lang = v.lang;
+-      // The same event set the real path advertises. A voice claiming fewer
+-      // events than it delivers, or more, is its own mismatch.
+-      voice.events.insert(TTS_EVENT_START);
+-      voice.events.insert(TTS_EVENT_END);
+-      voice.events.insert(TTS_EVENT_CANCELLED);
+-      voice.events.insert(TTS_EVENT_MARKER);
+-      voice.events.insert(TTS_EVENT_PAUSE);
+-      voice.events.insert(TTS_EVENT_RESUME);
+-    }
+-    return;
+-  }
+-
+   for (auto it = voices_.begin(); it != voices_.end(); ++it) {
+     out_voices->push_back(VoiceData());
+     VoiceData& voice = out_voices->back();
+@@ -676,6 +567,15 @@ void TtsPlatformImplLinux::ProcessSpeech(
+ 
+   SPDChromeVoice matched_voice;
+   auto it = voices_.find(voice.name);
++  if (const auto* profile = base::apostate::Profile::Get();
++      profile && profile->has_speech_voice_filter() &&
++      (it == voices_.end() || it->second.language != voice.lang)) {
++    // A provider may disappear after enumeration. Do not let an empty
++    // SPDChromeVoice silently select speech-dispatcher's default voice.
++    SetError("Requested speech voice is unavailable");
++    std::move(on_speak_finished).Run(false);
++    return;
++  }
+   if (it != voices_.end())
+     matched_voice = it->second;
+ 

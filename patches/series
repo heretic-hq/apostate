@@ -39,3 +39,8 @@
 0039-angle-profile-caps.patch
 0040-font-metric-platform-policy.patch
 0041-headless-display-layout.patch
+0043-speech-require-real-provider.patch
+0044-windows-simplified-han-fallback.patch
+0045-angle-point-size-clamp.patch
+0046-mac-font-family-ascent.patch
+0047-generic-font-preferences.patch

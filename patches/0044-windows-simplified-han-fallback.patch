@@ -1,0 +1,125 @@
+Subject: [PATCH] fonts: use Windows candidate families for Simplified Han fallback
+
+Windows resolves a missing Han glyph using the Han script selected from
+content/accept/system locale, then probes an ordered list of actual families.
+Linux currently asks Fontconfig with the unmodified locale; for English in the
+supplied Windows set that chooses Malgun Gothic rather than Microsoft YaHei.
+
+Select the upstream Windows Simplified Han list only for a Windows profile
+and only when the existing locale policy resolves the missing Han glyph to
+Simplified Han. Verify actual family names and glyph coverage. Existing faces
+that already cover the glyph, other scripts, other Han locales, non-Windows
+profiles and no-profile behavior retain their existing paths. Unavailable or
+non-covering candidates fall through. No font metric, numeric glyph bound,
+fontconfig file, profile/schema field or JavaScript API is replaced.
+
+Reference: resources/fingerprints/raw/unlabelled-20260910T140818Z.json,
+fonts.metrics: 76 right edges differ by 2 px in the 41-patch subject. A
+separate Windows-profile control measured the right bound of 字 at 40 px:
+38 for Malgun and 40 for YaHei, both with 40 px advances. This is a selector candidate, not a claim
+that remaining raster/DirectWrite metric differences are resolved.
+
+Primary source at Chromium79460ebecaa5625e57a5fb679a735659e73dc687:
+- platform/fonts/win/font_fallback_win.cc:210-211,539-557 (candidate/script policy)
+- platform/fonts/win/font_cache_skia_win.cc:159-175,284-294 (family then coverage)
+- platform/text/layout_locale.cc:198-216,226-256 (Han locale/default)
+Paths above are under third_party/blink/renderer/. Uses existing loader/IPC.
+
+V1 compilation and V3 conformance remain required. Broader Windows fallback
+and DirectWrite line-gap policy remain unresolved.
+diff --git a/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc b/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
+--- a/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
++++ b/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
+@@ -24,15 +24,64 @@
+ 
+ #include "third_party/blink/renderer/platform/fonts/font_cache.h"
+ 
++#include <unicode/uscript.h>
++
++#include "base/apostate/profile.h"
++#include "base/strings/string_util.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/platform/linux/web_sandbox_support.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/renderer/platform/fonts/font_fallback_priority.h"
+ #include "third_party/blink/renderer/platform/fonts/font_platform_data.h"
+ #include "third_party/blink/renderer/platform/fonts/simple_font_data.h"
++#include "third_party/blink/renderer/platform/text/layout_locale.h"
++#include "third_party/skia/include/core/SkTypeface.h"
+ #include "ui/gfx/font_fallback_linux.h"
+ 
+ namespace blink {
++
++namespace {
++
++bool UseWindowsSimplifiedHanFallback(const FontDescription& description,
++                                     UChar32 character) {
++  const auto* profile = base::apostate::Profile::Get();
++  if (!profile || !profile->ua_platform() ||
++      *profile->ua_platform() != "Windows") {
++    return false;
++  }
++  UErrorCode error = U_ZERO_ERROR;
++  if (uscript_getScript(character, &error) != USCRIPT_HAN || U_FAILURE(error)) {
++    return false;
++  }
++  const LayoutLocale* locale = LayoutLocale::LocaleForHan(description.Locale());
++  if (!locale) {
++    locale = &LayoutLocale::GetSystem();
++  }
++  return locale->GetScriptForHan() == USCRIPT_SIMPLIFIED_HAN;
++}
++
++bool TypefaceHasFamily(SkTypeface* face, const char* family) {
++  // Fontconfig can substitute a different family for an absent candidate.
++  // Check actual localized names before treating it as an available face.
++  auto* names = face->createFamilyNameIterator();
++  SkTypeface::LocalizedString name;
++  bool matches = false;
++  while (names->next(&name)) {
++    if (base::EqualsCaseInsensitiveASCII(name.fString.c_str(), family)) {
++      matches = true;
++      break;
++    }
++  }
++  names->unref();
++  if (!matches) {
++    SkString primary;
++    face->getFamilyName(&primary);
++    matches = base::EqualsCaseInsensitiveASCII(primary.c_str(), family);
++  }
++  return matches;
++}
++
++}  // namespace
+ 
+ static AtomicString& MutableSystemFontFamily() {
+   DEFINE_THREAD_SAFE_STATIC_LOCAL(AtomicString, system_font_family, ());
+@@ -86,6 +135,27 @@
+       return font_data;
+   }
+ 
++  if (UseWindowsSimplifiedHanFallback(font_description, c)) {
++    // Reuse the Windows Simplified Han candidate order from
++    // win/font_fallback_win.cc. This runs only after the requested face and
++    // standard-style fallback have failed to cover the character.
++    static constexpr const char* kFamilies[] = {
++        "Noto Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", "simsun"};
++    for (const char* family : kFamilies) {
++      const FontPlatformData* data = GetFontPlatformData(
++          font_description, FontFaceCreationParams(AtomicString(family)));
++      if (!data || !TypefaceHasFamily(data->Typeface(), family)) {
++        continue;
++      }
++      if (data->FontContainsCharacter(c)) {
++        return FontDataFromFontPlatformData(data);
++      }
++      // Windows first chooses an available family, then checks its glyph
++      // coverage. Preserve the existing fallback when that check fails.
++      break;
++    }
++  }
++
+   gfx::FallbackFontData fallback_font;
+   if (!FontCache::GetFontForCharacter(
+           c,

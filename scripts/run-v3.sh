@@ -57,6 +57,22 @@ done
 B64="$(base64 -w0 < "$PROFILE" 2>/dev/null || base64 < "$PROFILE" | tr -d '\n')"
 USERDIR="$OUTDIR/userdata"
 
+# currentScreen depends on window placement. Reproduce the measured fixture
+# position through Chromium's ordinary window placement, not a screen accessor.
+WINDOW_ARGS=()
+WINDOW_POSITION="$(python3 - "$REFERENCE" <<'PY'
+import json, sys
+probe = json.load(open(sys.argv[1])).get("probes", {}).get("screen.geometry", {})
+value = probe.get("value") or {}
+x, y = value.get("screenX"), value.get("screenY")
+if probe.get("ok") and all(type(n) is int and abs(n) <= 1000000 for n in (x, y)):
+    print(f"{x},{y}")
+PY
+)"
+if [ -n "$WINDOW_POSITION" ]; then
+  WINDOW_ARGS=("--window-position=$WINDOW_POSITION")
+fi
+
 # Grant the collector origin access to display details. Chromium registers this
 # as "window-placement" but stores preference keys with underscores:
 # components/content_settings/core/browser/website_settings_info.cc:23-26
@@ -90,6 +106,7 @@ env ${FONTCONF:+FONTCONFIG_FILE="$FONTCONF"} \
   --user-data-dir="$USERDIR" \
   --apostate-profile="$B64" \
   "${GPU_ARGS[@]}" \
+  "${WINDOW_ARGS[@]}" \
   "http://127.0.0.1:$PORT/?auto=1&label=${APOSTATE_V3_LABEL:-v3}" \
   > "$OUTDIR/browser.log" 2>&1 &
 BROWSER_PID=$!

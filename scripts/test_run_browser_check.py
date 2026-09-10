@@ -89,6 +89,18 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("TimeoutError", receipt["error"])
         self.assertTrue(receipt["userdata_removed"])
 
+    def test_audio_fft_control_preserves_gpu_option(self):
+        run = self.invoke("--angle-backend", "default", "--enable-gpu",
+                          "--disable-web-audio-rust-fft", "--timeout", "5")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        launch = json.loads((self.out / "launch.json").read_text())
+        self.assertIn("--enable-gpu", launch["command"])
+        self.assertIn("--disable-blink-features=WebAudioRustFft", launch["command"])
+        configuration = json.loads((self.out / "configuration.json").read_text())
+        self.assertTrue(configuration["enable_gpu"])
+        self.assertTrue(configuration["disable_web_audio_rust_fft"])
+        self.assertFalse(any("remote-debugging" in arg for arg in launch["command"]))
+
     def test_existing_output_refused_without_modification(self):
         self.out.mkdir()
         saved = self.out / "saved"

@@ -160,6 +160,8 @@ def run(args):
                "status": "preflight", "started_unix": time.time()}
     write_json(out / "configuration.json", {
         "diagnostic_only": True, "angle_backend": args.angle_backend,
+        "enable_gpu": args.enable_gpu,
+        "disable_web_audio_rust_fft": args.disable_web_audio_rust_fft,
         "timeout_seconds": args.timeout,
         "requested": {name: str(getattr(args, name)) if getattr(args, name) else None
                       for name in ("browser", "fixture", "profile", "fontconfig",
@@ -215,6 +217,8 @@ def run(args):
             (out / "widevine-pin.json").write_bytes((ROOT / "build/widevine-local.json").read_bytes())
         write_json(out / "parameters.json", parameters)
         write_json(out / "configuration.json", {"inputs": inputs, "angle_backend": args.angle_backend,
+                   "enable_gpu": args.enable_gpu,
+                   "disable_web_audio_rust_fft": args.disable_web_audio_rust_fft,
                    "timeout_seconds": args.timeout, "diagnostic_only": True})
         token = secrets.token_urlsafe(24)
         server = ResultServer(fixture_bytes, parameters, token, out)
@@ -233,6 +237,12 @@ def run(args):
             url = f"{server.origin}/?report=1&token={token}"
             command = [str(browser), "--headless=new", "--no-sandbox", "--disable-gpu-sandbox",
                        "--no-first-run", "--no-default-browser-check", f"--user-data-dir={user_data}"]
+            # Chromium 152.0.7977.83 headless_mode_init.cc:106-113 selects
+            # SwiftShader when neither GL/ANGLE nor enable-gpu is supplied.
+            if args.enable_gpu:
+                command.append("--enable-gpu")
+            if args.disable_web_audio_rust_fft:
+                command.append("--disable-blink-features=WebAudioRustFft")
             if profile_bytes is not None:
                 command.append("--apostate-profile=" + base64.b64encode(profile_bytes).decode("ascii"))
             command += backend_args(args.angle_backend) + [url]
@@ -289,6 +299,10 @@ def main():
     parser.add_argument("--parameters", type=Path)
     parser.add_argument("--widevine-source", type=Path)
     parser.add_argument("--angle-backend", choices=BACKENDS, default="swiftshader")
+    parser.add_argument("--enable-gpu", action="store_true",
+                        help="allow headless default GPU selection; does not bypass driver blocklists")
+    parser.add_argument("--disable-web-audio-rust-fft", action="store_true",
+                        help="diagnostic A/B control for the WebAudioRustFft implementation")
     parser.add_argument("--timeout", type=float, default=120)
     args = parser.parse_args()
     if not 0 < args.timeout <= 3600:

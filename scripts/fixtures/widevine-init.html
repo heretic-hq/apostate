@@ -65,8 +65,17 @@ window.widevineResultPromise = (async () => {
       try { await session.close(); } catch (_) {}
     }
   }
+  result.diagnosticOnly = true;
+  result.corpusAdmission = false;
   document.querySelector("pre").textContent = JSON.stringify(result, null, 2);
   document.documentElement.dataset.complete = "true";
+  const query = new URLSearchParams(location.search);
+  if (query.get("report") === "1") {
+    const response = await fetch("/result?" + new URLSearchParams({token: query.get("token") || ""}), {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(result)
+    });
+    if (!response.ok) throw new Error("Result POST failed: " + response.status);
+  }
   return result;
 })();
 </script>

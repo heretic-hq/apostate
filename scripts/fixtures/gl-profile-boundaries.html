@@ -1,0 +1,175 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Native GL profile boundaries</title>
+<pre id="out">Running...</pre>
+<script>
+const query = new URLSearchParams(location.search);
+const tokenQuery = new URLSearchParams({token: query.get('token') || ''});
+
+async function report(result) {
+  document.querySelector('#out').textContent = JSON.stringify(result, null, 2);
+  if (query.get('report') === '1') {
+    const response = await fetch('/result?' + tokenQuery, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(result)
+    });
+    if (!response.ok) throw new Error('Result POST failed: ' + response.status);
+  }
+  return result;
+}
+
+function expectedViewport(limits) {
+  const width = limits.MAX_VIEWPORT_DIMS_WIDTH ?? limits.MAX_VIEWPORT_DIMS;
+  const height = limits.MAX_VIEWPORT_DIMS_HEIGHT ?? limits.MAX_VIEWPORT_DIMS;
+  if (width === undefined && height === undefined) return null;
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) {
+    throw new Error('Expected viewport must supply two positive integer dimensions');
+  }
+  return [width, height];
+}
+
+function uniformBlockProgram(gl, vectors) {
+  // The uniform-controlled index keeps every element potentially live. Shader
+  // source contains one array declaration, not one statement per element.
+  const vertexSource = `#version 300 es
+precision highp float;
+precision highp int;
+layout(std140) uniform BoundaryBlock { vec4 entries[${vectors}]; };
+uniform int selected;
+out vec4 value;
+void main() {
+  int index = clamp(selected, 0, ${vectors - 1});
+  value = entries[index];
+  gl_Position = vec4(value.xy, 0.0, 1.0);
+}`;
+  const fragmentSource = `#version 300 es
+precision highp float;
+in vec4 value;
+out vec4 color;
+void main() { color = value; }`;
+  const shaders = [];
+  const compile = (type, source) => {
+    const shader = gl.createShader(type);
+    if (!shader) throw new Error('createShader returned null');
+    shaders.push(shader);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    return {shader, compiled: gl.getShaderParameter(shader, gl.COMPILE_STATUS),
+            log: gl.getShaderInfoLog(shader)};
+  };
+  let program;
+  try {
+    const vertex = compile(gl.VERTEX_SHADER, vertexSource);
+    const fragment = compile(gl.FRAGMENT_SHADER, fragmentSource);
+    program = gl.createProgram();
+    if (!program) throw new Error('createProgram returned null');
+    gl.attachShader(program, vertex.shader);
+    gl.attachShader(program, fragment.shader);
+    gl.linkProgram(program);
+    const linked = gl.getProgramParameter(program, gl.LINK_STATUS);
+    let blockBytes = null;
+    if (linked) {
+      const index = gl.getUniformBlockIndex(program, 'BoundaryBlock');
+      if (index !== gl.INVALID_INDEX) {
+        blockBytes = gl.getActiveUniformBlockParameter(program, index, gl.UNIFORM_BLOCK_DATA_SIZE);
+      }
+    }
+    return {vectors, requestedBytes: vectors * 16, vertexCompiled: vertex.compiled,
+            fragmentCompiled: fragment.compiled, vertexLog: vertex.log,
+            fragmentLog: fragment.log, linked, linkLog: gl.getProgramInfoLog(program),
+            activeBlockBytes: blockBytes, glError: gl.getError()};
+  } finally {
+    if (program) gl.deleteProgram(program);
+    for (const shader of shaders) gl.deleteShader(shader);
+  }
+}
+
+function checkContext(kind, limits) {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 1;
+  const gl = canvas.getContext(kind, {antialias: false});
+  if (!gl) return {kind, created: false, passed: false, error: 'context unavailable'};
+  const result = {kind, created: true, checks: [], capabilityGaps: []};
+  const add = (name, passed, details) => result.checks.push({name, passed, ...details});
+  const viewport = Array.from(gl.getParameter(gl.MAX_VIEWPORT_DIMS));
+  const expected = expectedViewport(limits);
+  result.reportedViewport = viewport;
+  if (expected) {
+    add('reported viewport matches expected', viewport.every((v, i) => v === expected[i]), {expected});
+    if (viewport.some((v, i) => v < expected[i])) {
+      result.capabilityGaps.push({name: 'viewport below claim', reported: viewport, expected});
+    }
+  }
+  if (viewport.every(v => Number.isInteger(v) && v > 0 && v < 2147483000)) {
+    const requested = [viewport[0] + 17, viewport[1] + 31];
+    gl.viewport(0, 0, ...requested);
+    const actual = Array.from(gl.getParameter(gl.VIEWPORT));
+    const error = gl.getError();
+    add('viewport clamps to reported pair', error === gl.NO_ERROR && actual[0] === 0 &&
+        actual[1] === 0 && actual[2] === viewport[0] && actual[3] === viewport[1],
+        {requested, actual, error});
+    gl.viewport(0, 0, 1, 1);
+  } else {
+    add('viewport boundary testable', false, {reported: viewport});
+  }
+  if (kind === 'webgl2') {
+    const components = gl.getParameter(gl.MAX_VERTEX_UNIFORM_COMPONENTS);
+    const vectors = gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS);
+    add('vertex components equal four vectors', components === 4 * vectors, {components, vectors});
+    for (const name of ['MAX_VERTEX_UNIFORM_COMPONENTS', 'MAX_VERTEX_UNIFORM_VECTORS']) {
+      if (limits[name] !== undefined) {
+        const actual = gl.getParameter(gl[name]);
+        add(name + ' matches expected', actual === limits[name], {actual, expected: limits[name]});
+        if (actual < limits[name]) result.capabilityGaps.push({name, reported: actual, expected: limits[name]});
+      }
+    }
+    const bytes = gl.getParameter(gl.MAX_UNIFORM_BLOCK_SIZE);
+    result.reportedUniformBlockBytes = bytes;
+    if (limits.MAX_UNIFORM_BLOCK_SIZE !== undefined) {
+      add('uniform block limit matches expected', bytes === limits.MAX_UNIFORM_BLOCK_SIZE,
+          {actual: bytes, expected: limits.MAX_UNIFORM_BLOCK_SIZE});
+      if (bytes < limits.MAX_UNIFORM_BLOCK_SIZE) result.capabilityGaps.push({
+        name: 'uniform block below claim', reported: bytes, expected: limits.MAX_UNIFORM_BLOCK_SIZE});
+    }
+    // Bound compiler work. This test creates no GPU buffer or render target.
+    if (Number.isInteger(bytes) && bytes >= 16 && bytes <= 1048576 && bytes % 16 === 0) {
+      const exact = uniformBlockProgram(gl, bytes / 16);
+      add('uniform block at reported limit links', exact.vertexCompiled && exact.fragmentCompiled &&
+          exact.linked && exact.activeBlockBytes === bytes && exact.glError === gl.NO_ERROR, exact);
+      const above = uniformBlockProgram(gl, bytes / 16 + 1);
+      add('uniform block one vec4 above limit rejected', !above.linked && above.glError === gl.NO_ERROR, above);
+    } else {
+      add('uniform block boundary testable', false, {reported: bytes,
+          reason: 'requires a positive vec4-aligned limit no larger than 1 MiB'});
+    }
+  }
+  result.contextLost = gl.isContextLost();
+  result.passed = !result.contextLost && result.checks.every(check => check.passed);
+  return result;
+}
+
+window.glBoundaryResultPromise = (async () => {
+  const result = {diagnosticOnly: true, corpusAdmission: false, contexts: [], passed: false};
+  try {
+    const response = await fetch('/parameters?' + tokenQuery);
+    if (!response.ok) throw new Error('Parameters GET failed: ' + response.status);
+    const parameters = await response.json();
+    const limits = parameters.expected_limits || {};
+    if (typeof limits !== 'object' || Array.isArray(limits)) {
+      throw new Error('expected_limits must be an object');
+    }
+    for (const name of ['MAX_UNIFORM_BLOCK_SIZE', 'MAX_VERTEX_UNIFORM_COMPONENTS',
+                        'MAX_VERTEX_UNIFORM_VECTORS']) {
+      if (limits[name] !== undefined && (!Number.isInteger(limits[name]) || limits[name] < 1)) {
+        throw new Error(name + ' must be a positive integer');
+      }
+    }
+    result.expectedLimits = limits;
+    for (const kind of ['webgl', 'webgl2']) {
+      try { result.contexts.push(checkContext(kind, limits)); }
+      catch (error) { result.contexts.push({kind, passed: false, error: String(error)}); }
+    }
+    result.passed = result.contexts.every(context => context.passed);
+  } catch (error) { result.error = String(error); }
+  return report(result);
+})();
+</script>

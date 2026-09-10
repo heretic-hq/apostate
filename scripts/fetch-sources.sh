@@ -2,6 +2,9 @@
 # Sync Chromium to the pinned version. Safe to re-run; resumes a partial sync.
 source "$(dirname "$0")/lib.sh"
 
+MODE="${1:-sync}"
+case "$MODE" in sync|--fetch-only) ;; *) die "usage: fetch-sources.sh [--fetch-only]" ;; esac
+
 [ -x "$DEPOT_TOOLS/gclient" ] || die "run scripts/bootstrap.sh first"
 mkdir -p "$WORKSPACE"
 cd "$WORKSPACE"
@@ -34,9 +37,13 @@ if [ ! -d "$SRC/.git" ]; then
     https://chromium.googlesource.com/chromium/src.git "$SRC"
 fi
 
+say "fetching pinned tag $CHROMIUM_VERSION"
+git -C "$SRC" fetch -q --no-tags origin "refs/tags/$CHROMIUM_VERSION:refs/tags/$CHROMIUM_VERSION"
+if [ "$MODE" = "--fetch-only" ]; then
+  git -C "$SRC" rev-parse "refs/tags/$CHROMIUM_VERSION^{commit}"
+  exit 0
+fi
 say "checking out $CHROMIUM_VERSION"
-git -C "$SRC" fetch -q --tags origin "refs/tags/$CHROMIUM_VERSION:refs/tags/$CHROMIUM_VERSION" 2>/dev/null || \
-  git -C "$SRC" fetch -q --tags origin
 git -C "$SRC" checkout -q --detach "refs/tags/$CHROMIUM_VERSION"
 
 # --with_branch_heads and --with_tags are required for a release tag to resolve.

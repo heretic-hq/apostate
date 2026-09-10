@@ -7,11 +7,16 @@
 # silently.
 source "$(dirname "$0")/lib.sh"
 
+MODE="${1:-apply}"
+case "$MODE" in apply|--reset-only) ;; *) die "usage: apply-patches.sh [--reset-only]" ;; esac
+
 SERIES="$REPO_ROOT/patches/series"
 [ -d "$SRC" ] || die "no checkout; run scripts/fetch-sources.sh"
 [ -f "$SERIES" ] || die "no patches/series"
 
 say "resetting checkout to pristine $CHROMIUM_VERSION"
+git -C "$SRC" rev-parse --verify "refs/tags/$CHROMIUM_VERSION^{commit}" >/dev/null
+git -C "$SRC" reset -q --hard
 git -C "$SRC" checkout -q --detach "refs/tags/$CHROMIUM_VERSION"
 git -C "$SRC" clean -qfd
 git -C "$SRC" reset -q --hard
@@ -27,6 +32,11 @@ while read -r sub; do
   git -C "$SRC/$sub" clean -qfd
 done < <(grep -h "^+++ b/" "$REPO_ROOT"/patches/*.patch 2>/dev/null \
          | sed "s|^+++ b/||" | cut -d/ -f1-2 | sort -u)
+
+if [ "$MODE" = "--reset-only" ]; then
+  say "checkout reset; patches not applied"
+  exit 0
+fi
 
 count=0
 while IFS= read -r line; do

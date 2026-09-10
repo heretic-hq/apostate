@@ -36,3 +36,6 @@
 0036-webgl-clamp-float-query-path.patch
 0037-speech-voices-from-profile.patch
 0038-swiftshader-raise-max-point-size.patch
+0039-angle-profile-caps.patch
+0040-font-metric-platform-policy.patch
+0041-headless-display-layout.patch

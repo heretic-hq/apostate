@@ -1,0 +1,384 @@
+Subject: [PATCH] headless: construct native virtual monitors from captured layout
+
+Read screen.displays through the existing profile loader and construct real
+Ozone headless Display objects with measured bounds, workarea dimensions,
+DPR, labels, primary status, internal status and color depth. Window matching,
+movement, fullscreen and ScreenDetails consume the existing display manager.
+There is no new switch, IPC interface or renderer accessor override.
+
+The capture measures CSS DIP. The native SetDisplayGeometry helper consumes
+pixel sizes/insets, inverse-scales them, and keeps origin coordinates. Convert
+sizes and insets once, keeping origins in desktop coordinates. Preserve optional
+workarea origins as absent when unmeasured; only their missing coordinates use
+the virtual manager's native origin. Do not infer taskbar placement from a
+workarea size. The first inserted display is primary as DisplayList requires.
+
+Mark native profile-created Display objects internally. DisplayUtil retains
+those objects' geometry, DPR, bit depth and actual display count instead of
+applying legacy single-screen values to every monitor. Headful and other
+unmarked displays keep their previous behavior. Existing gamut/HDR policy is
+retained separately; per-monitor HDR was not measured by these captures.
+
+References:
+resources/fingerprints/raw/unlabelled-20260910T140818Z.json: screen.details and
+screen.geometry, two1920x1080 monitors, current VZ229 at1920,0. VA270A workarea
+origin is unmeasured and remains inherited, not recorded as a capture value.
+resources/fingerprints/raw/m4-max-chrome-20260908T163229Z.json: one1728x1117 DIP
+internal display, DPR2, depth30, top33 and bottom86 DIP workarea insets.
+
+Primary source at Chromium79460ebecaa5625e57a5fb679a735659e73dc687:
+ui/ozone/platform/headless/headless_screen.cc:GetScreenInfo/CreateDisplayList
+ui/display/headless/headless_screen_util.cc:SetDisplayGeometry
+ui/display/display_list.cc:AddDisplay
+
+Ledger proposal: screen.display-layout, profile field screen.displays.
+V1, real display movement/fullscreen and V3 checks remain required.
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+index 86238a3..684bc83 100644
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "base/apostate/profile.h"
+ 
++#include <algorithm>
++#include <cmath>
+ #include <memory>
+ #include <utility>
+ 
+@@ -21,6 +23,59 @@ namespace {
+ 
+ const Profile* g_profile_for_testing = nullptr;
+ 
++bool ParseScreenDisplay(const DictValue& value, Profile::ScreenDisplay* out) {
++  auto bounded_int = [&](const char* key) -> std::optional<int> {
++    auto result = value.FindInt(key);
++    if (!result || *result < -1000000 || *result > 1000000)
++      return std::nullopt;
++    return result;
++  };
++  const auto left = bounded_int("left");
++  const auto top = bounded_int("top");
++  const auto width = bounded_int("width");
++  const auto height = bounded_int("height");
++  const auto avail_width = bounded_int("avail_width");
++  const auto avail_height = bounded_int("avail_height");
++  const auto ratio = value.FindDouble("device_pixel_ratio");
++  const auto depth = value.FindInt("color_depth");
++  const auto primary = value.FindBool("is_primary");
++  const auto internal = value.FindBool("is_internal");
++  const auto* label = value.FindString("label");
++  if (!left || !top || !width || !height || !avail_width || !avail_height ||
++      *width <= 0 || *height <= 0 || *avail_width <= 0 || *avail_height <= 0 ||
++      *avail_width > *width || *avail_height > *height || !ratio ||
++      !std::isfinite(*ratio) || *ratio < 1 || *ratio > 8 ||
++      !depth || (*depth != 24 && *depth != 30) || !primary || !internal ||
++      !label || label->size() > 1024) {
++    return false;
++  }
++  out->avail_left = bounded_int("avail_left");
++  out->avail_top = bounded_int("avail_top");
++  if ((value.Find("avail_left") && !out->avail_left) ||
++      (value.Find("avail_top") && !out->avail_top)) {
++    return false;
++  }
++  if ((out->avail_left && (*out->avail_left < *left ||
++                          *out->avail_left > *left + *width - *avail_width)) ||
++      (out->avail_top && (*out->avail_top < *top ||
++                         *out->avail_top > *top + *height - *avail_height))) {
++    return false;
++  }
++  out->left = *left;
++  out->top = *top;
++  out->width = *width;
++  out->height = *height;
++  out->avail_width = *avail_width;
++  out->avail_height = *avail_height;
++  out->device_pixel_ratio = static_cast<float>(*ratio);
++  out->color_depth = *depth;
++  out->is_primary = *primary;
++  out->is_internal = *internal;
++  out->label = *label;
++  return true;
++}
++
++
+ }  // namespace
+ 
+ Profile::Profile() = default;
+@@ -144,6 +199,34 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+   }
+ 
+   if (const DictValue* screen = dict->FindDict("screen")) {
++    if (const Value* raw_displays = screen->Find("displays")) {
++      const ListValue* displays = raw_displays->GetIfList();
++      if (!displays || displays->empty() || displays->size() > 16) {
++        LOG(ERROR) << "apostate: screen.displays must contain 1..16 displays";
++        return nullptr;
++      }
++      int primary_count = 0;
++      for (const Value& value : *displays) {
++        Profile::ScreenDisplay display;
++        const DictValue* entry = value.GetIfDict();
++        if (!entry || !ParseScreenDisplay(*entry, &display)) {
++          LOG(ERROR) << "apostate: invalid screen.displays geometry or metadata";
++          return nullptr;
++        }
++        primary_count += display.is_primary;
++        profile->screen_displays_.push_back(std::move(display));
++      }
++      if (primary_count != 1 ||
++          (profile->screen_is_extended_ &&
++           *profile->screen_is_extended_ != (displays->size() > 1))) {
++        LOG(ERROR) << "apostate: screen.displays primary/count contradiction";
++        return nullptr;
++      }
++      // DisplayList requires its first inserted display to be primary.
++      std::stable_partition(profile->screen_displays_.begin(),
++                            profile->screen_displays_.end(),
++                            [](const auto& display) { return display.is_primary; });
++    }
+     if (std::optional<int> v = screen->FindInt("width")) {
+       profile->screen_width_ = *v;
+     }
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+index 82ecce0..41a18d7 100644
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -118,7 +118,7 @@ class BASE_EXPORT Profile {
+   }
+   const std::optional<std::string>& user_agent() const { return user_agent_; }
+ 
+-  // Display geometry, in physical pixels, as the claimed device reports it.
++  // Display geometry, in CSS device-independent pixels, as captured.
+   //
+   // Consumed where ScreenInfo is built in the browser process, because nothing
+   // a page reads about the display originates in the renderer — it arrives over
+@@ -127,6 +127,27 @@ class BASE_EXPORT Profile {
+   // available_* is the work area: screen minus the OS window furniture. Its
+   // inset varies with dock and taskbar state on a real machine, so it is stored
+   // rather than derived, but it must stay plausible for the claimed OS.
++  // CSS DIP monitor geometry. Missing workarea origins inherit the native
++  // virtual display origin; they are not measurements of taskbar placement.
++  struct ScreenDisplay {
++    int left = 0;
++    int top = 0;
++    int width = 0;
++    int height = 0;
++    int avail_width = 0;
++    int avail_height = 0;
++    std::optional<int> avail_left;
++    std::optional<int> avail_top;
++    float device_pixel_ratio = 1.0f;
++    int color_depth = 24;
++    bool is_primary = false;
++    bool is_internal = false;
++    std::string label;
++  };
++  const std::vector<ScreenDisplay>& screen_displays() const {
++    return screen_displays_;
++  }
++
+   std::optional<int> screen_width() const { return screen_width_; }
+   std::optional<int> screen_height() const { return screen_height_; }
+   // Origin of the work area within the screen. On macOS availTop is the menu
+@@ -377,6 +398,7 @@ class BASE_EXPORT Profile {
+   std::optional<bool> ua_mobile_;
+   std::optional<std::string> navigator_platform_;
+   std::optional<std::string> user_agent_;
++  std::vector<ScreenDisplay> screen_displays_;
+   std::optional<int> screen_width_;
+   std::optional<int> screen_height_;
+   std::optional<int> screen_avail_left_;
+diff --git a/ui/display/display.cc b/ui/display/display.cc
+index ec7fc06..1b99495 100644
+--- a/ui/display/display.cc
++++ b/ui/display/display.cc
+@@ -335,6 +335,7 @@ bool Display::EqualExceptForHdrHeadroom(const Display& lhs,
+               lhs.GetColorSpaces(), rhs.GetColorSpaces())) &&
+          lhs.color_depth_ == rhs.color_depth_ &&
+          lhs.depth_per_component_ == rhs.depth_per_component_ &&
++         lhs.has_profile_geometry_ == rhs.has_profile_geometry_ &&
+          lhs.is_monochrome_ == rhs.is_monochrome_ &&
+          lhs.display_frequency_ == rhs.display_frequency_ &&
+          lhs.label_ == rhs.label_;
+diff --git a/ui/display/display.h b/ui/display/display.h
+index c27439b..8fb20af 100644
+--- a/ui/display/display.h
++++ b/ui/display/display.h
+@@ -284,6 +284,11 @@ class DISPLAY_EXPORT Display final {
+ 
+   // The number of bits per color component (all color components are assumed to
+   // have the same number of bits). Used by media query APIs.
++  // Set only by the native virtual-display producer. Never sent to the page;
++  // prevents legacy single-screen profile overrides from flattening this model.
++  bool has_profile_geometry() const { return has_profile_geometry_; }
++  void set_has_profile_geometry(bool value) { has_profile_geometry_ = value; }
++
+   int depth_per_component() const { return depth_per_component_; }
+   void set_depth_per_component(int depth_per_component) {
+     depth_per_component_ = depth_per_component;
+@@ -341,6 +346,7 @@ class DISPLAY_EXPORT Display final {
+   scoped_refptr<const gfx::DisplayColorSpacesRef> color_spaces_;
+   int color_depth_ = kDefaultBitsPerPixel;
+   int depth_per_component_ = kDefaultBitsPerComponent;
++  bool has_profile_geometry_ = false;
+   bool is_monochrome_ = false;
+   bool detected_ = true;
+   float display_frequency_ = 0;
+diff --git a/ui/display/display_util.cc b/ui/display/display_util.cc
+index 63f88a2..0161c05 100644
+--- a/ui/display/display_util.cc
++++ b/ui/display/display_util.cc
+@@ -67,33 +67,35 @@ void DisplayUtil::DisplayToScreenInfo(ScreenInfo* screen_info,
+   // Chromium uses depth as an HDR flag with only 24 and 30 valid, and a profile
+   // that set the two independently could describe a display that cannot exist.
+   if (const base::apostate::Profile* profile = base::apostate::Profile::Get()) {
+-    gfx::Rect rect = screen_info->rect;
+-    gfx::Rect available = screen_info->available_rect;
+-
+-    if (profile->screen_width().has_value() &&
+-        profile->screen_height().has_value()) {
+-      rect = gfx::Rect(rect.x(), rect.y(), *profile->screen_width(),
+-                       *profile->screen_height());
+-      screen_info->rect = rect;
+-    }
+-    if (profile->screen_avail_width().has_value() &&
+-        profile->screen_avail_height().has_value()) {
+-      // The origin matters as much as the size: screen.availTop is the height
+-      // of the menu bar on macOS and of a top-docked taskbar on Windows, and it
+-      // cannot be derived from the sizes — a 114px total inset says nothing
+-      // about how it divides between space above and below.
+-      const int left = profile->screen_avail_left().value_or(available.x());
+-      const int top = profile->screen_avail_top().value_or(available.y());
+-      available = gfx::Rect(left, top, *profile->screen_avail_width(),
+-                            *profile->screen_avail_height());
+-      screen_info->available_rect = available;
+-    }
+-    if (profile->device_scale_factor().has_value()) {
+-      screen_info->device_scale_factor = *profile->device_scale_factor();
+-    }
+-    if (profile->screen_color_depth().has_value()) {
+-      screen_info->depth = *profile->screen_color_depth();
+-      screen_info->depth_per_component = *profile->screen_color_depth() / 3;
++    if (!display.has_profile_geometry()) {
++      gfx::Rect rect = screen_info->rect;
++      gfx::Rect available = screen_info->available_rect;
++
++      if (profile->screen_width().has_value() &&
++          profile->screen_height().has_value()) {
++        rect = gfx::Rect(rect.x(), rect.y(), *profile->screen_width(),
++                         *profile->screen_height());
++        screen_info->rect = rect;
++      }
++      if (profile->screen_avail_width().has_value() &&
++          profile->screen_avail_height().has_value()) {
++        // The origin matters as much as the size: screen.availTop is the height
++        // of the menu bar on macOS and of a top-docked taskbar on Windows, and it
++        // cannot be derived from the sizes — a 114px total inset says nothing
++        // about how it divides between space above and below.
++        const int left = profile->screen_avail_left().value_or(available.x());
++        const int top = profile->screen_avail_top().value_or(available.y());
++        available = gfx::Rect(left, top, *profile->screen_avail_width(),
++                              *profile->screen_avail_height());
++        screen_info->available_rect = available;
++      }
++      if (profile->device_scale_factor().has_value()) {
++        screen_info->device_scale_factor = *profile->device_scale_factor();
++      }
++      if (profile->screen_color_depth().has_value()) {
++        screen_info->depth = *profile->screen_color_depth();
++        screen_info->depth_per_component = *profile->screen_color_depth() / 3;
++      }
+     }
+ 
+     // The color-gamut and dynamic-range media features both read
+@@ -169,7 +171,8 @@ void DisplayUtil::DisplayToScreenInfo(ScreenInfo* screen_info,
+   // browser process and sent to every renderer; overriding it at the accessor
+   // would leave the browser's own copy saying something else.
+   if (const base::apostate::Profile* profile = base::apostate::Profile::Get()) {
+-    if (profile->screen_is_extended().has_value()) {
++    if (!display.has_profile_geometry() &&
++        profile->screen_is_extended().has_value()) {
+       screen_info->is_extended = *profile->screen_is_extended();
+     }
+   }
+diff --git a/ui/ozone/platform/headless/headless_screen.cc b/ui/ozone/platform/headless/headless_screen.cc
+index 8d7bd27..90446c2 100644
+--- a/ui/ozone/platform/headless/headless_screen.cc
++++ b/ui/ozone/platform/headless/headless_screen.cc
+@@ -5,8 +5,10 @@
+ #include "ui/ozone/platform/headless/headless_screen.h"
+ 
+ #include <string_view>
++#include <utility>
+ #include <vector>
+ 
++#include "base/apostate/profile.h"
+ #include "base/check_deref.h"
+ #include "base/command_line.h"
+ #include "base/containers/flat_set.h"
+@@ -18,6 +20,8 @@
+ #include "ui/display/headless/headless_screen_manager.h"
+ #include "ui/display/headless/headless_screen_util.h"
+ #include "ui/display/util/display_util.h"
++#include "ui/gfx/geometry/insets_conversions.h"
++#include "ui/gfx/geometry/size_conversions.h"
+ #include "ui/gfx/switches.h"
+ #include "ui/ozone/platform/headless/headless_window.h"
+ #include "ui/ozone/platform/headless/headless_window_manager.h"
+@@ -80,6 +84,32 @@ gfx::Rect GetHeadlessDisplayBounds() {
+ std::vector<HeadlessScreenInfo> GetScreenInfo() {
+   std::vector<HeadlessScreenInfo> screen_info;
+ 
++  if (const auto* profile = base::apostate::Profile::Get();
++      profile && !profile->screen_displays().empty()) {
++    for (const auto& source : profile->screen_displays()) {
++      HeadlessScreenInfo info;
++      // SetDisplayGeometry divides size/insets by DPR but preserves origin.
++      // Floor before its inverse ceil so integral DIP geometry round-trips,
++      // including fractional desktop DPR, without multiplying origins twice.
++      const float ratio = source.device_pixel_ratio;
++      info.bounds = gfx::Rect(
++          gfx::Point(source.left, source.top),
++          gfx::ScaleToFlooredSize(gfx::Size(source.width, source.height), ratio));
++      const int left = source.avail_left.value_or(source.left) - source.left;
++      const int top = source.avail_top.value_or(source.top) - source.top;
++      const auto insets = gfx::Insets::TLBR(
++          top, left, source.height - top - source.avail_height,
++          source.width - left - source.avail_width);
++      info.work_area_insets = gfx::ScaleToFlooredInsets(insets, ratio);
++      info.device_pixel_ratio = ratio;
++      info.color_depth = source.color_depth;
++      info.is_internal = source.is_internal;
++      info.label = source.label;
++      screen_info.push_back(std::move(info));
++    }
++    return screen_info;
++  }
++
+   const base::CommandLine& command_line =
+       CHECK_DEREF(base::CommandLine::ForCurrentProcess());
+   if (command_line.HasSwitch(switches::kScreenInfo)) {
+@@ -122,10 +152,21 @@ void HeadlessScreen::CreateDisplayList() {
+ 
+   base::flat_set<int64_t> internal_display_ids;
+   DisplayList::Type type = DisplayList::Type::PRIMARY;
++  const auto* profile = base::apostate::Profile::Get();
++  const bool profile_layout = profile && !profile->screen_displays().empty();
++  size_t profile_index = 0;
+   for (const auto& it : screen_info) {
+     Display display(display::HeadlessScreenManager::GetNewDisplayId());
+     display.set_label(it.label);
+     display.set_color_depth(it.color_depth);
++    if (profile_layout) {
++      display.set_has_profile_geometry(true);
++      display.set_depth_per_component(it.color_depth / 3);
++      type = profile->screen_displays()[profile_index++].is_primary
++                 ? DisplayList::Type::PRIMARY
++                 : DisplayList::Type::NOT_PRIMARY;
++    }
++
+ 
+     headless::SetDisplayGeometry(display, it.bounds, it.work_area_insets,
+                                  it.device_pixel_ratio);

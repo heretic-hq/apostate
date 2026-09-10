@@ -34,6 +34,11 @@ blink_symbol_level = 0
 proprietary_codecs = true
 ffmpeg_branding = "Chrome"
 
+# Register an operator-provided CDM through Chromium's component mechanism.
+# Proprietary CDM bytes remain an external runtime input.
+enable_widevine = true
+bundle_widevine_cdm = false
+
 # No developer-only surfaces in a shipped binary.
 dcheck_always_on = false
 enable_dsyms = false

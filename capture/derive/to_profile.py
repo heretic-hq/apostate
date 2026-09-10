@@ -14,6 +14,7 @@ in a way no consumer can detect.
 
 import argparse
 import json
+import math
 import pathlib
 import re
 import sys
@@ -34,6 +35,130 @@ def css_rgb_to_argb(value):
     r, g, b = (int(m.group(i)) for i in (1, 2, 3))
     a = round(float(m.group(4)) * 255) if m.group(4) else 255
     return (a << 24) | (r << 16) | (g << 8) | b
+
+
+def derive_gl_limits(gl1, gl2):
+    """Preserve measured limits; reject conflicting context measurements."""
+    parameters = {}
+    for src in (gl1, gl2):
+        for name, value in (src.get("parameters") or {}).items():
+            if not name.startswith("MAX_"):
+                continue
+            if name in parameters and parameters[name] != value:
+                raise ValueError(f"WebGL1/WebGL2 disagree on {name}; "
+                                 "one gl_limits map cannot represent both")
+            parameters[name] = value
+
+    limits = {}
+    for name, value in parameters.items():
+        if name == "MAX_VIEWPORT_DIMS":
+            if (not isinstance(value, list) or len(value) != 2
+                    or any(type(v) is not int or not 0 < v <= 2**31 - 1
+                           for v in value)):
+                raise ValueError("MAX_VIEWPORT_DIMS must contain two positive int32 values")
+            width, height = value
+            limits["MAX_VIEWPORT_DIMS_WIDTH"] = width
+            limits["MAX_VIEWPORT_DIMS_HEIGHT"] = height
+            if width == height:
+                # Older binaries understand the scalar square bound.
+                limits[name] = width
+        elif type(value) is int and value > 0:
+            limits[name] = value
+    return limits
+
+
+def derive_screen_displays(capture):
+    """Carry measured monitor topology; omitted workarea origins stay inherited."""
+    details = probe(capture, "screen.details")
+    if details is None:
+        return None
+    if not isinstance(details, dict):
+        raise ValueError("screen.details must be an object")
+    if "screens" not in details:
+        return None
+    screens = details["screens"]
+    if not isinstance(screens, list) or not 1 <= len(screens) <= 16:
+        raise ValueError("screen.details must contain 1..16 screens")
+    if type(details.get("screenCount")) is not int or details["screenCount"] != len(screens):
+        raise ValueError("screen.details screenCount disagrees with screens")
+    mapping = {
+        "left": "left", "top": "top", "width": "width", "height": "height",
+        "avail_width": "availWidth", "avail_height": "availHeight",
+        "device_pixel_ratio": "devicePixelRatio", "color_depth": "colorDepth",
+        "is_primary": "isPrimary", "is_internal": "isInternal", "label": "label",
+    }
+    displays = []
+    for screen in screens:
+        if not isinstance(screen, dict) or any(key not in screen for key in mapping.values()):
+            raise ValueError("screen.details has an incomplete display")
+        display = {dest: screen[src] for dest, src in mapping.items()}
+        if any(type(display[name]) is not int for name in
+               ("left", "top", "width", "height", "avail_width", "avail_height")):
+            raise ValueError("screen.details display geometry must use integers")
+        for dest, src in (("avail_left", "availLeft"), ("avail_top", "availTop")):
+            if screen.get(src) is not None:
+                display[dest] = screen[src]
+        displays.append(display)
+
+    geometry = probe(capture, "screen.geometry") or {}
+    current_primary = details.get("currentIsPrimary")
+    candidates = []
+    for display in displays:
+        if type(current_primary) is bool and display["is_primary"] != current_primary:
+            continue
+        comparisons = (("width", "width"), ("height", "height"),
+                       ("avail_width", "availWidth"), ("avail_height", "availHeight"),
+                       ("device_pixel_ratio", "devicePixelRatio"), ("color_depth", "colorDepth"))
+        if any(key in geometry and display[field] != geometry[key]
+               for field, key in comparisons):
+            continue
+        # A measured workarea must fit inside the monitor. This can identify
+        # the current display without assuming the window's top-left monitor.
+        if all(type(geometry.get(k)) is int for k in ("availLeft", "availTop")):
+            if not (display["left"] <= geometry["availLeft"] <=
+                    display["left"] + display["width"] - display["avail_width"] and
+                    display["top"] <= geometry["availTop"] <=
+                    display["top"] + display["height"] - display["avail_height"]):
+                continue
+        candidates.append(display)
+    if len(candidates) == 1:
+        current = candidates[0]
+        for field, key in (("avail_left", "availLeft"), ("avail_top", "availTop")):
+            if geometry.get(key) is not None:
+                if field in current and current[field] != geometry[key]:
+                    raise ValueError("current display workarea origins disagree between probes")
+                current[field] = geometry[key]
+
+    for display in displays:
+        for name in ("left", "top", "width", "height", "avail_width", "avail_height",
+                     "avail_left", "avail_top"):
+            if name not in display:
+                continue
+            value = display[name]
+            if type(value) is not int or not -1000000 <= value <= 1000000:
+                raise ValueError(f"screen.displays {name} must be a bounded integer")
+        for size, available in (("width", "avail_width"), ("height", "avail_height")):
+            if not 0 < display[available] <= display[size] <= 1000000:
+                raise ValueError("screen.displays workarea must fit inside positive bounds")
+        for origin, available, size, extent in (("left", "avail_left", "width", "avail_width"),
+                                                ("top", "avail_top", "height", "avail_height")):
+            if available in display and not (display[origin] <= display[available] <=
+                    display[origin] + display[size] - display[extent]):
+                raise ValueError("screen.displays workarea origin is outside its monitor")
+        ratio = display["device_pixel_ratio"]
+        if type(ratio) not in (int, float) or not math.isfinite(ratio) or not 1 <= ratio <= 8:
+            raise ValueError("screen.displays device_pixel_ratio must be finite and in [1,8]")
+        if type(display["color_depth"]) is not int or display["color_depth"] not in (24, 30):
+            raise ValueError("screen.displays color_depth must be 24 or 30")
+        if any(type(display[field]) is not bool for field in ("is_primary", "is_internal")):
+            raise ValueError("screen.displays primary/internal flags must be booleans")
+        if not isinstance(display["label"], str) or len(display["label"].encode()) > 1024:
+            raise ValueError("screen.displays label must be a string of at most 1024 UTF-8 bytes")
+    if sum(display["is_primary"] for display in displays) != 1:
+        raise ValueError("screen.displays must have exactly one primary display")
+    if type(geometry.get("isExtended")) is bool and geometry["isExtended"] != (len(displays) > 1):
+        raise ValueError("screen.geometry isExtended disagrees with display count")
+    return displays
 
 
 def build(capture):
@@ -184,14 +309,7 @@ def build(capture):
     # is withheld rather than invented, so neither can over-claim.
     gl1 = probe(capture, "webgl1") or {}
     gl2 = probe(capture, "webgl2") or {}
-    limits = {}
-    for src in (gl1, gl2):
-        for k, v in (src.get("parameters") or {}).items():
-            if not k.startswith("MAX_"):
-                continue
-            n = min(v) if isinstance(v, list) and v and isinstance(v[0], int) else v
-            if isinstance(n, int) and n > 0:
-                limits[k] = min(limits.get(k, n), n)
+    limits = derive_gl_limits(gl1, gl2)
     if limits:
         profile["gl_limits"] = limits
     exts = sorted(set(gl1.get("extensions") or []) | set(gl2.get("extensions") or []))
@@ -226,6 +344,14 @@ def build(capture):
     put("screen", "avail_height", screen.get("availHeight"))
     put("screen", "device_pixel_ratio", screen.get("devicePixelRatio"))
     put("screen", "color_depth", screen.get("colorDepth"))
+    displays = derive_screen_displays(capture)
+    if displays:
+        put("screen", "displays", displays)
+        for index, display in enumerate(displays):
+            missing = [name for name in ("avail_left", "avail_top") if name not in display]
+            if missing:
+                warn(f"screen.displays[{index}] has no measured {', '.join(missing)}; "
+                     "those workarea origins remain inherited")
 
     put("gpu", "unmasked_renderer", gl.get("unmaskedRenderer"))
     put("gpu", "unmasked_vendor", gl.get("unmaskedVendor"))
@@ -289,7 +415,11 @@ def main() -> int:
               f"is not ground truth and must not become a profile.", file=sys.stderr)
         return 2
 
-    profile = build(capture)
+    try:
+        profile = build(capture)
+    except ValueError as error:
+        print(f"REFUSED: {error}", file=sys.stderr)
+        return 2
     text = json.dumps(profile, indent=1)
     if args.out:
         args.out.write_text(text + "\n")

@@ -99,6 +99,106 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "displays": {
+          "type": "array",
+          "description": "Native virtual-monitor model derived from screen.details. Coordinates and dimensions are CSS DIP. Missing workarea origins are unmeasured and inherit the headless display origin; dimensions remain measured. Consumed by the Ozone headless display manager, not ScreenDetailed accessors. Exactly one primary is required.",
+          "minItems": 1,
+          "maxItems": 16,
+          "contains": {
+            "type": "object",
+            "properties": {
+              "is_primary": {
+                "const": true
+              }
+            },
+            "required": [
+              "is_primary"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "left",
+              "top",
+              "width",
+              "height",
+              "avail_width",
+              "avail_height",
+              "device_pixel_ratio",
+              "color_depth",
+              "is_primary",
+              "is_internal",
+              "label"
+            ],
+            "properties": {
+              "left": {
+                "type": "integer",
+                "minimum": -1000000,
+                "maximum": 1000000
+              },
+              "top": {
+                "type": "integer",
+                "minimum": -1000000,
+                "maximum": 1000000
+              },
+              "avail_left": {
+                "type": "integer",
+                "minimum": -1000000,
+                "maximum": 1000000
+              },
+              "avail_top": {
+                "type": "integer",
+                "minimum": -1000000,
+                "maximum": 1000000
+              },
+              "width": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000000
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000000
+              },
+              "avail_width": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000000
+              },
+              "avail_height": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000000
+              },
+              "device_pixel_ratio": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 8
+              },
+              "color_depth": {
+                "type": "integer",
+                "enum": [
+                  24,
+                  30
+                ]
+              },
+              "is_primary": {
+                "type": "boolean"
+              },
+              "is_internal": {
+                "type": "boolean"
+              },
+              "label": {
+                "type": "string",
+                "maxLength": 1024
+              }
+            }
+          }
+        },
         "is_extended": {
           "type": "boolean",
           "description": "Whether the claimed machine has more than one display. Readable with no permission, unlike everything else about the second screen, so a profile replayed from a two-screen capture contradicts itself here for free."

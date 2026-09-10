@@ -2,6 +2,10 @@
 # Full build, then write build/MANIFEST.lock recording exactly what produced it.
 source "$(dirname "$0")/lib.sh"
 
+if [ "$(uname -s)" = Linux ] && [ -z "${APOSTATE_BUILD_IMAGE_ID:-}" ]; then
+  exec bash "$REPO_ROOT/scripts/in-linux-build-container.sh" scripts/build.sh "$@"
+fi
+
 TARGET="${1:-$(target_default)}"
 OUT="$SRC/out/$TARGET"
 [ -f "$OUT/args.gn" ] || die "not configured; run scripts/configure.sh $TARGET"
@@ -24,7 +28,18 @@ manifest="$REPO_ROOT/build/MANIFEST.lock"
   echo "chromium_version     = \"$CHROMIUM_VERSION\""
   echo "chromium_commit      = \"$(git -C "$SRC" rev-parse HEAD)\""
   echo "depot_tools_revision = \"$DEPOT_TOOLS_REVISION\""
+  echo "build_container_image = \"${APOSTATE_BUILD_IMAGE_ID:-native}\""
   echo "patch_series_sha256  = \"$(shasum -a 256 "$REPO_ROOT/patches/series" | cut -d' ' -f1)\""
+  python3 - "$REPO_ROOT" <<'PY'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+digest = hashlib.sha256()
+for line in (root / "patches/series").read_text().splitlines():
+    name = line.partition("#")[0].strip()
+    if name:
+        digest.update(name.encode() + b"\0" + (root / "patches" / name).read_bytes() + b"\0")
+print(f'patch_contents_sha256 = "{digest.hexdigest()}"')
+PY
   echo "args_sha256          = \"$(shasum -a 256 "$OUT/args.gn" | cut -d' ' -f1)\""
   echo
   echo "[outputs]"

@@ -3,6 +3,10 @@
 # in docs/BUILD.md is actually being honoured rather than merely intended.
 source "$(dirname "$0")/lib.sh"
 
+if [ "$(uname -s)" = Linux ] && [ -z "${APOSTATE_BUILD_IMAGE_ID:-}" ]; then
+  exec bash "$REPO_ROOT/scripts/in-linux-build-container.sh" scripts/verify-reproducible.sh "$@"
+fi
+
 TARGET="${1:-$(target_default)}"
 
 # --against-manifest compares one fresh build against the committed

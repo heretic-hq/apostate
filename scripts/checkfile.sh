@@ -14,6 +14,10 @@
 # object builds whatever that file needs and nothing else.
 source "$(dirname "$0")/lib.sh"
 
+if [ "$(uname -s)" = Linux ] && [ -z "${APOSTATE_BUILD_IMAGE_ID:-}" ]; then
+  exec bash "$REPO_ROOT/scripts/in-linux-build-container.sh" scripts/checkfile.sh "$@"
+fi
+
 FILE="${1:?usage: checkfile.sh <chromium-relative-path> [target]}"
 TARGET="${2:-$(target_default)}"
 OUT="$SRC/out/$TARGET"

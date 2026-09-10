@@ -2,6 +2,10 @@
 # Write args.gn from the pinned target file and run gn gen.
 source "$(dirname "$0")/lib.sh"
 
+if [ "$(uname -s)" = Linux ] && [ -z "${APOSTATE_BUILD_IMAGE_ID:-}" ]; then
+  exec bash "$REPO_ROOT/scripts/in-linux-build-container.sh" scripts/configure.sh "$@"
+fi
+
 TARGET="${1:-$(target_default)}"
 ARGS_FILE="$REPO_ROOT/build/args/$TARGET.gn"
 [ -f "$ARGS_FILE" ] || die "no args for target '$TARGET' (build/args/$TARGET.gn)"

@@ -57,7 +57,9 @@ function checkPoints(kind, expected) {
   if (!range.every(Number.isInteger) || range[0] < 1 || range[1] > 1024 || range[0] > range[1]) {
     return {...result, passed: false, error: 'pixel test requires an integral native range within1..1024'};
   }
-  const side = range[1] + 64;
+  // An odd viewport puts NDC (0,0) on a pixel center. With an even viewport,
+  // a one-pixel point lies on the boundary of the row sampled below.
+  const side = range[1] + 64 + (range[1] % 2 === 0 ? 1 : 0);
   const viewport = Array.from(gl.getParameter(gl.MAX_VIEWPORT_DIMS));
   if (viewport.some(limit => limit < side)) {
     return {...result, passed: false, error: 'insufficient viewport margin to distinguish unclamped points'};

@@ -66,6 +66,70 @@ class ConformTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("ERROR example", output)
 
+    def test_invalid_ice_on_both_sides_is_error(self):
+        reference = capture()
+        reference["probes"]["webrtc.ice"] = {
+            "ok": True, "value": {"candidates": [{"foundation": "invalid"}]}}
+        status, output = self.compare(reference, reference)
+        self.assertEqual(status, 1)
+        self.assertIn("ERROR webrtc.ice", output)
+
+
+class IceTests(unittest.TestCase):
+    def sample(self, foundations=("15", "20", "15")):
+        return {"count": len(foundations), "gatheringState": "complete", "sdpShape": 5,
+                "candidates": [
+                    {"foundation": foundation, "priority": 100 + index,
+                     "protocol": "udp", "type": "host", "component": "rtp",
+                     "addressClass": "mdns", "portClass": "ephemeral",
+                     "relatedPort": None, "tcpType": None}
+                    for index, foundation in enumerate(foundations)]}
+
+    def test_session_rename_preserves_groups_without_mutating_input(self):
+        original = self.sample()
+        before = copy.deepcopy(original)
+        self.assertEqual(conform.normalise_ice(original),
+                         conform.normalise_ice(self.sample(("200", "300", "200"))))
+        self.assertEqual(original, before)
+
+    def test_split_and_merged_groups_still_differ(self):
+        for foundations in (("15", "15", "15"), ("15", "20", "30")):
+            self.assertNotEqual(conform.normalise_ice(self.sample()),
+                                conform.normalise_ice(self.sample(foundations)))
+
+    def test_invalid_foundations_are_rejected(self):
+        for value in (None, "", "-1", "01", "4294967296", 15, "abc"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                conform.normalise_ice(self.sample((value,)))
+        sample = self.sample()
+        del sample["candidates"][0]["foundation"]
+        with self.assertRaises(ValueError):
+            conform.normalise_ice(sample)
+
+    def test_other_candidate_fields_and_order_still_differ(self):
+        expected = conform.normalise_ice(self.sample())
+        for field in self.sample()["candidates"][0]:
+            if field == "foundation":
+                continue
+            sample = self.sample()
+            sample["candidates"][0][field] = "changed"
+            self.assertNotEqual(expected, conform.normalise_ice(sample), field)
+        sample = self.sample()
+        sample["candidates"].reverse()
+        self.assertNotEqual(expected, conform.normalise_ice(sample))
+
+    def test_top_level_state_and_count_still_differ(self):
+        expected = conform.normalise_ice(self.sample())
+        for field in ("count", "gatheringState", "sdpShape"):
+            sample = self.sample()
+            sample[field] = "changed"
+            self.assertNotEqual(expected, conform.normalise_ice(sample), field)
+
+    def test_empty_candidates_and_uint32_boundaries(self):
+        self.assertEqual(conform.normalise_ice(self.sample(())), self.sample(()))
+        self.assertEqual(conform.normalise_ice(self.sample(("0", "4294967295"))),
+                         conform.normalise_ice(self.sample(("10", "20"))))
+
 
 if __name__ == "__main__":
     unittest.main()

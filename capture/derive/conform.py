@@ -23,6 +23,7 @@ observed.
 import argparse
 import json
 import pathlib
+import re
 import sys
 
 # Values that describe the moment of measurement rather than the device.
@@ -104,6 +105,29 @@ def normalise_headers(value):
         for k, v in value["headers"]
     ]
     return out
+
+
+def normalise_ice(value):
+    """Preserve candidate groups while removing session-specific foundation IDs.
+
+    WebRTC 6f37672d358475cd17544121a12494da454d85fb, api/candidate.cc:567-595,
+    hashes the base IP and ICE tiebreaker into a decimal CRC32 foundation.
+    RFC 8445 section 5.1.1.3 assigns meaning to equality between foundations,
+    not to their numeric identities across sessions.
+    """
+    if not isinstance(value, dict) or not isinstance(value.get("candidates"), list):
+        raise ValueError("missing ICE candidate list")
+    groups, candidates = {}, []
+    for index, candidate in enumerate(value["candidates"]):
+        foundation = candidate.get("foundation") if isinstance(candidate, dict) else None
+        if (not isinstance(foundation, str)
+                or not re.fullmatch(r"0|[1-9][0-9]{0,9}", foundation)
+                or int(foundation) > 0xffffffff):
+            raise ValueError(f"candidate {index} has an invalid decimal uint32 foundation")
+        if foundation not in groups:
+            groups[foundation] = f"<foundation-{len(groups)}>"
+        candidates.append({**candidate, "foundation": groups[foundation]})
+    return {**value, "candidates": candidates}
 
 
 def browser_version(capture):
@@ -213,6 +237,12 @@ def main() -> int:
             # Host and Referer; normalising only the first left two captures of
             # one machine differing because they used different ports.
             rv, sv = normalise_headers(rv), normalise_headers(sv)
+        if pid == "webrtc.ice":
+            try:
+                rv, sv = normalise_ice(rv), normalise_ice(sv)
+            except ValueError as exc:
+                errored.append((pid, str(exc)))
+                continue
 
         mismatches = [
             m for m in diff(rv, sv)

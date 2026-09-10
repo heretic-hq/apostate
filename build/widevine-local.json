@@ -1,0 +1,14 @@
+{
+  "format": 1,
+  "description": "Pinned external Widevine input for opted-in local validation. The operator supplies the existing installation; no CDM bytes are distributed.",
+  "version": "4.10.3050.0",
+  "platform": "linux_x64",
+  "manifest_sha256": "3b7248e61f17bc5f077f180a1bfb09fc5bd1bc5abd5b5819781b26a13f1f5208",
+  "library_sha256": "529de3168220c0a8784e19499bfcb84a3fb47001f2175a53b2e8477ece9e97b5",
+  "library_size": 21681344,
+  "module_versions": [4],
+  "interface_versions": [10],
+  "host_versions": [10],
+  "codecs": ["vp8", "vp09", "avc1", "av01"],
+  "encryption_schemes": ["cenc", "cbcs"]
+}

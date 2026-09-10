@@ -18,6 +18,13 @@ source "$(dirname "$0")/lib.sh"
 PROFILE="${1:?usage: run-v3.sh PROFILE.json REFERENCE.json [FONTCONFIG_FILE]}"
 REFERENCE="${2:?usage: run-v3.sh PROFILE.json REFERENCE.json [FONTCONFIG_FILE]}"
 FONTCONF="${3:-}"
+ANGLE_BACKEND="${APOSTATE_V3_ANGLE_BACKEND:-swiftshader}"
+case "$ANGLE_BACKEND" in
+  swiftshader) GPU_ARGS=(--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader) ;;
+  default) GPU_ARGS=() ;;
+  gl|gl-egl|gles|gles-egl|vulkan) GPU_ARGS=(--use-gl=angle "--use-angle=$ANGLE_BACKEND") ;;
+  *) die "unsupported APOSTATE_V3_ANGLE_BACKEND: $ANGLE_BACKEND" ;;
+esac
 
 TARGET="${APOSTATE_TARGET:-$(target_default)}"
 CHROME="$SRC/out/$TARGET/chrome"
@@ -60,7 +67,12 @@ cat > "$USERDIR/Default/Preferences" <<PREFS
   "http://127.0.0.1:$PORT,*":{"setting":1}}}}}}
 PREFS
 
-say "launching browser"
+if [ -n "${APOSTATE_V3_WIDEVINE_DIR:-}" ]; then
+  python3 "$REPO_ROOT/scripts/provision-widevine.py" \
+    --source "$APOSTATE_V3_WIDEVINE_DIR" --user-data-dir "$USERDIR"
+fi
+
+say "launching browser (ANGLE backend: $ANGLE_BACKEND)"
 # APOSTATE_V3_HEADFUL=1 runs under Xvfb for comparisons that require a headed
 # browser. Display permissions are pre-granted in either launch mode.
 if [ -n "${APOSTATE_V3_HEADFUL:-}" ]; then
@@ -77,7 +89,7 @@ env ${FONTCONF:+FONTCONFIG_FILE="$FONTCONF"} \
   --no-first-run --no-default-browser-check \
   --user-data-dir="$USERDIR" \
   --apostate-profile="$B64" \
-  --use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader \
+  "${GPU_ARGS[@]}" \
   "http://127.0.0.1:$PORT/?auto=1&label=${APOSTATE_V3_LABEL:-v3}" \
   > "$OUTDIR/browser.log" 2>&1 &
 BROWSER_PID=$!

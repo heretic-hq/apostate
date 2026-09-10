@@ -1,0 +1,72 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Widevine initialization check</title>
+<p>This local check initializes the CDM and requests a license message. It does
+not contact a license server, submit a license, or establish encrypted playback.</p>
+<video id="media" hidden></video>
+<pre id="result">Running...</pre>
+<script>
+// Serve on localhost or HTTPS with a fresh, explicitly provisioned profile.
+// The common-system PSSH follows W3C cenc initialization data section 4.1:
+// https://www.w3.org/TR/eme-initdata-cenc/#common-system
+// One public test KID, no content key or protected media, no system payload.
+const pssh = new Uint8Array([
+  0, 0, 0, 52, 0x70, 0x73, 0x73, 0x68,
+  1, 0, 0, 0,
+  0x10, 0x77, 0xef, 0xec, 0xc0, 0xb2, 0x4d, 0x02,
+  0xac, 0xe3, 0x3c, 0x1e, 0x52, 0xe2, 0xfb, 0x4b,
+  0, 0, 0, 1,
+  0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+  0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+  0, 0, 0, 0
+]);
+
+window.widevineResultPromise = (async () => {
+  const result = {
+    stage: "requestMediaKeySystemAccess", passed: false,
+    encryptedPlaybackTested: false, licenseServerContacted: false
+  };
+  let session;
+  let timer;
+  try {
+    const access = await navigator.requestMediaKeySystemAccess("com.widevine.alpha", [{
+      initDataTypes: ["cenc"],
+      audioCapabilities: [{contentType: 'audio/mp4; codecs="mp4a.40.2"'}],
+      distinctiveIdentifier: "not-allowed", persistentState: "not-allowed",
+      sessionTypes: ["temporary"]
+    }]);
+    result.keySystem = access.keySystem;
+    result.stage = "createMediaKeys";
+    const keys = await access.createMediaKeys();
+    result.stage = "setMediaKeys";
+    await document.querySelector("video").setMediaKeys(keys);
+    result.stage = "generateRequest";
+    session = keys.createSession("temporary");
+    const message = new Promise((resolve, reject) => {
+      session.addEventListener("message", event => resolve({
+        type: event.messageType, bytes: event.message.byteLength
+      }), {once: true});
+      timer = setTimeout(() => reject(new Error("No CDM message within 10 seconds")), 10000);
+    });
+    const [, licenseMessage] = await Promise.all([
+      session.generateRequest("cenc", pssh), message
+    ]);
+    result.stage = "license-message";
+    result.message = licenseMessage;
+    if (result.message.type !== "license-request" || result.message.bytes === 0) {
+      throw new Error("CDM did not emit a nonempty license-request message");
+    }
+    result.passed = true;
+  } catch (error) {
+    result.error = {name: error.name, message: error.message};
+  } finally {
+    clearTimeout(timer);
+    if (session) {
+      try { await session.close(); } catch (_) {}
+    }
+  }
+  document.querySelector("pre").textContent = JSON.stringify(result, null, 2);
+  document.documentElement.dataset.complete = "true";
+  return result;
+})();
+</script>

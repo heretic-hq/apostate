@@ -8,7 +8,8 @@ device emitted (docs/METHODOLOGY.md §1).
     python3 capture/derive/conform.py REFERENCE.json SUBJECT.json
     python3 capture/derive/conform.py REFERENCE.json SUBJECT.json --show-volatile
 
-Exit status is 0 only when every non-volatile field matches.
+Exit status is 0 only when every non-volatile field matches and both captures
+report the same full browser build. Exit 2 means the comparison is incomplete.
 
 On volatility: some fields legitimately move between reads on one machine, and
 calling those failures would bury the real ones. Rather than maintaining a
@@ -170,16 +171,19 @@ def main() -> int:
     ref_ver = browser_version(ref)
     sub_ver = browser_version(sub)
     version_mismatch = ref_ver and sub_ver and ref_ver != sub_ver
+    build_comparable = bool(ref_ver and sub_ver and ref_ver == sub_ver)
     volatile_paths = {(pid, ".".join(rest) if isinstance(rest, tuple) else rest)
                       for pid, rest in VOLATILE_PATHS}
 
-    print(f"reference : {ref['context'].get('label')}  {ref['context']['ua'][:64]}")
-    print(f"subject   : {sub['context'].get('label')}  {sub['context']['ua'][:64]}")
+    print(f"reference : {ref['context'].get('label') or args.reference.stem}  {ref['context']['ua'][:64]}")
+    print(f"subject   : {sub['context'].get('label') or args.subject.stem}  {sub['context']['ua'][:64]}")
     if version_mismatch:
         print(f"\n  NOTE: browser builds differ — reference {ref_ver}, subject {sub_ver}.")
         print("  Version-bearing fields will differ and no patch should change that:")
         print("  the binary really is the version it reports. Match the reference build")
         print("  to the build under test for a clean comparison.")
+    if not ref_ver or not sub_ver:
+        print("  NOTE: full browser version is missing; this is a diagnostic comparison.")
     if sub["context"].get("automation_suspected"):
         print(f"  note: subject reports automation signals: {sub['context'].get('automation_signals')}")
     print()
@@ -273,9 +277,13 @@ def main() -> int:
         print()
 
     total = len(passed) + len(failed) + len(errored)
-    print(f"{len(passed)}/{total} probes conform    {len(failed)} failed    "
+    result_label = "probes conform" if build_comparable else "probes match (diagnostic)"
+    print(f"{len(passed)}/{total} {result_label}    {len(failed)} failed    "
           f"{len(errored)} errored    {len(skipped)} volatile")
 
+    if not build_comparable:
+        print("INCOMPLETE: matching full browser builds are required for V3.")
+        return 2
     return 0 if not failed and not errored else 1
 
 

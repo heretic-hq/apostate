@@ -7,7 +7,7 @@
   "additionalProperties": false,
   "required": ["capture_version", "context", "probes"],
   "properties": {
-    "capture_version": { "type": "integer", "const": 1 },
+    "capture_version": { "type": "integer", "enum": [1, 2] },
 
     "context": {
       "type": "object",
@@ -16,10 +16,11 @@
       "required": ["taken_at", "ua", "collector_sha256"],
       "properties": {
         "taken_at": { "type": "string", "format": "date-time" },
-        "label": { "type": "string", "description": "Human name for the device, e.g. 'apple-m4-max'" },
+        "label": { "type": ["string", "null"], "description": "Human name for the device, e.g. 'apple-m4-max'" },
         "ua": { "type": "string" },
         "collector_sha256": { "type": "string", "description": "Hash of collector.js that produced this. Captures from different collector versions are not comparable." },
         "device_pixel_ratio": { "type": "number" },
+        "secure_context": { "type": "boolean" },
         "headed": { "type": ["boolean", "null"], "description": "Whether a real window was on screen. Null when undeterminable." },
         "automation_suspected": {
           "type": "boolean",

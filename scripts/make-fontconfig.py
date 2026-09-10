@@ -80,7 +80,7 @@ ALIAS = """  <match target="pattern">
 def families_in(fontdir: pathlib.Path, conf: pathlib.Path) -> set:
     try:
         out = subprocess.run(["fc-list", ":", "family"], capture_output=True,
-                             text=True, env={"FONTCONFIG_FILE": str(conf),
+                             text=True, env={"FONTCONFIG_FILE": str(conf.resolve()),
                                              "PATH": "/usr/bin:/bin"})
     except FileNotFoundError:
         return set()

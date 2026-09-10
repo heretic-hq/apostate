@@ -14,6 +14,11 @@ SERIES="$REPO_ROOT/patches/series"
 [ -d "$SRC" ] || die "no checkout; run scripts/fetch-sources.sh"
 [ -f "$SERIES" ] || die "no patches/series"
 
+MTIME_SNAPSHOT="$(mktemp /tmp/apostate-patch-times.XXXXXX)"
+trap 'rm -f "$MTIME_SNAPSHOT"' EXIT
+python3 "$REPO_ROOT/scripts/preserve-patch-mtimes.py" snapshot --src "$SRC" \
+  --patches "$REPO_ROOT/patches" --state "$MTIME_SNAPSHOT"
+
 say "resetting checkout to pristine $CHROMIUM_VERSION"
 git -C "$SRC" rev-parse --verify "refs/tags/$CHROMIUM_VERSION^{commit}" >/dev/null
 git -C "$SRC" reset -q --hard
@@ -48,9 +53,14 @@ while IFS= read -r line; do
   # git apply requires exact context and has no fuzz mode at all, unlike
   # patch(1) — so strictness is the default rather than something to request.
   # An earlier version passed --no-fuzz, which git apply does not accept.
-  git -C "$SRC" apply --whitespace=error "$patch_file" \
+  # Some pinned vendor sources use CRLF. Treat its CR as a line ending while
+  # retaining errors for actual trailing spaces/tabs and blank EOF lines.
+  git -C "$SRC" -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol \
+    apply --whitespace=error "$patch_file" \
     || die "failed to apply $line — rebase the patch against $CHROMIUM_VERSION"
   count=$((count + 1))
 done < "$SERIES"
 
 say "applied $count patch(es)"
+python3 "$REPO_ROOT/scripts/preserve-patch-mtimes.py" restore --src "$SRC" \
+  --state "$MTIME_SNAPSHOT"

@@ -33,6 +33,7 @@ COLLECTOR_DIR = pathlib.Path(__file__).resolve().parent.parent / "collector"
 MAX_BODY = 64 * 1024 * 1024  # captures carry raw PNG and audio payloads
 DIAGNOSTIC_DIR = pathlib.Path(__file__).resolve().parent.parent / "diagnostics"
 FONT_FIXTURE = pathlib.Path(__file__).resolve().parents[2] / "scripts/fixtures/font-context-supplement.html"
+RECEIVER_SHA256 = hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest()
 FONT_ROUTE = "/diagnostics/font-context"
 MAX_DIAGNOSTIC_BODY = 512 * 1024
 CONSENT_VERSION = "font-context-v1"
@@ -383,7 +384,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     if len(tokens) >= 128:
                         del tokens[min(tokens, key=lambda key: tokens[key]["issued"])]
                     tokens[token] = {"issued": now, "source": {
-                        "receiver_sha256": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),
+                        "receiver_sha256": RECEIVER_SHA256,
                         "fixture_sha256": hashlib.sha256(FONT_FIXTURE.read_bytes()).hexdigest(),
                         "measurement_module_sha256": hashlib.sha256(module).hexdigest(),
                         "consent_page_sha256": hashlib.sha256(template).hexdigest(),
@@ -441,7 +442,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             try:
                 sources = grant["source"]
                 current = {
-                    "receiver_sha256": hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),
+                    "receiver_sha256": RECEIVER_SHA256,
                     "fixture_sha256": hashlib.sha256(FONT_FIXTURE.read_bytes()).hexdigest(),
                     "measurement_module_sha256": hashlib.sha256(font_context_module()).hexdigest(),
                     "consent_page_sha256": hashlib.sha256((DIAGNOSTIC_DIR / "font-context.html").read_bytes()).hexdigest(),

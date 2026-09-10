@@ -42,9 +42,11 @@ def write_jsonl(path, rows):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--apply", action="store_true", help="write the merge instead of reporting it")
+    ap.add_argument("--proposal", action="append", type=pathlib.Path,
+                    help="read only this reviewed proposal envelope; repeatable")
     args = ap.parse_args()
 
-    proposals = sorted(p for p in INBOX.glob("*.json"))
+    proposals = args.proposal or sorted(p for p in INBOX.glob("*.json"))
     if not proposals:
         print("no proposals in ledger/inbox/")
         return 0

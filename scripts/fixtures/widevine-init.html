@@ -7,23 +7,27 @@ not contact a license server, submit a license, or establish encrypted playback.
 <pre id="result">Running...</pre>
 <script>
 // Serve on localhost or HTTPS with a fresh, explicitly provisioned profile.
-// The common-system PSSH follows W3C cenc initialization data section 4.1:
-// https://www.w3.org/TR/eme-initdata-cenc/#common-system
-// One public test KID, no content key or protected media, no system payload.
+// Widevine v0 PSSH follows Google's public Shaka Packager generator at:
+// https://github.com/shaka-project/shaka-packager/blob/74ca0784a1b3f9a4e5e47869ad3833fbf0e31b62/packager/media/base/widevine_pssh_generator.cc
+// Its proto carries key_id field2 and protection_scheme field9. No content key,
+// provider credentials or protected media are included. The public test KID is
+// 00112233445566778899aabbccddeeff; scheme is the integer FourCC "cenc".
+// A valid Common-SystemID v1 box was rejected by the installed Widevine CDM;
+// that compatibility result remains in the earlier diagnostic receipt.
 const pssh = new Uint8Array([
-  0, 0, 0, 52, 0x70, 0x73, 0x73, 0x68,
-  1, 0, 0, 0,
-  0x10, 0x77, 0xef, 0xec, 0xc0, 0xb2, 0x4d, 0x02,
-  0xac, 0xe3, 0x3c, 0x1e, 0x52, 0xe2, 0xfb, 0x4b,
-  0, 0, 0, 1,
-  0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-  0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-  0, 0, 0, 0
+  0x00, 0x00, 0x00, 0x38, 0x70, 0x73, 0x73, 0x68,
+  0x00, 0x00, 0x00, 0x00, 0xed, 0xef, 0x8b, 0xa9,
+  0x79, 0xd6, 0x4a, 0xce, 0xa3, 0xc8, 0x27, 0xdc,
+  0xd5, 0x1d, 0x21, 0xed, 0x00, 0x00, 0x00, 0x18,
+  0x12, 0x10, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+  0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+  0xee, 0xff, 0x48, 0xe3, 0xdc, 0x95, 0x9b, 0x06
 ]);
 
 window.widevineResultPromise = (async () => {
   const result = {
     stage: "requestMediaKeySystemAccess", passed: false,
+    initDataFormat: "widevine-v0-cenc", initDataBytes: pssh.byteLength,
     encryptedPlaybackTested: false, licenseServerContacted: false
   };
   let session;

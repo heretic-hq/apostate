@@ -41,6 +41,7 @@ import json
 import pathlib
 import subprocess
 import sys
+from xml.sax.saxutils import escape
 
 TEMPLATE = """<?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
@@ -75,6 +76,29 @@ ALIAS = """  <match target="pattern">
     <test qual="any" name="family"><string>%s</string></test>
     <edit name="family" mode="prepend" binding="strong"><string>%s</string></edit>
   </match>"""
+
+
+FALLBACK = """  <alias binding="strong">
+    <family>%s</family>
+    <accept><family>%s</family></accept>
+  </alias>"""
+
+
+def parse_fallbacks(values):
+    """Keep each requested family before its explicitly supplied fallback."""
+    pairs = []
+    seen = set()
+    for value in values:
+        old, separator, new = value.partition("=")
+        old, new = old.strip(), new.strip()
+        if (not separator or not old or not new or old.casefold() == new.casefold()
+                or any(ord(char) < 32 for char in old + new)):
+            raise ValueError("--fallback needs distinct nonempty OLD=NEW names, got %r" % value)
+        if old.casefold() in seen:
+            raise ValueError("--fallback repeats source family %r" % old)
+        seen.add(old.casefold())
+        pairs.append((old, new))
+    return pairs
 
 
 def families_in(fontdir: pathlib.Path, conf: pathlib.Path) -> set:
@@ -122,7 +146,17 @@ def main() -> int:
                          "mapper, with no such file on disk, so a host that "
                          "only has the files under-reports against a real "
                          "machine unless the same mappings are declared.")
+    ap.add_argument("--fallback", action="append", default=[], metavar="OLD=NEW",
+                    help="keep OLD first and insert NEW before later generic "
+                         "fallbacks; a genuine OLD face still wins. Repeatable "
+                         "for distinct source families. This does not force an alias.")
     args = ap.parse_args()
+
+    try:
+        fallback_pairs = parse_fallbacks(args.fallback)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 2
 
     if not args.fonts.is_dir():
         print("no such font directory: %s" % args.fonts, file=sys.stderr)
@@ -146,6 +180,11 @@ def main() -> int:
         old_name, new_name = a.split("=", 1)
         pairs.append((old_name.strip(), new_name.strip()))
     aliases = "\n".join(ALIAS % (src, dst) for src, dst in pairs)
+    # Fontconfig inserts accept AFTER the matched family, unlike prefer/prepend.
+    # The requested family can still win whenever its real face exists.
+    if fallback_pairs:
+        aliases += "\n" + "\n".join(
+            FALLBACK % (escape(src), escape(dst)) for src, dst in fallback_pairs)
     # Reject families the directory supplies that the reference device does not
     # report. A font export taken off a machine contains everything on its disk,
     # and a disk holds fonts the system never activates — Book Antiqua, Bookman
@@ -207,7 +246,9 @@ def main() -> int:
         # Microsoft Sans Serif. A page that measures them sees the substitute,
         # which is exactly what --alias reproduces.
         aliased = {src.lower() for src, dst in pairs if dst.lower() in have_lower}
-        satisfied = have_lower | aliased
+        fallback_covered = {src.lower() for src, dst in fallback_pairs
+                            if src.lower() not in have_lower and dst.lower() in have_lower}
+        satisfied = have_lower | aliased | fallback_covered
         missing = sorted(f for f in want if f.lower() not in satisfied)
         print()
         print("  reference wants %d families, directory supplies %d"
@@ -217,6 +258,10 @@ def main() -> int:
             if covered:
                 print("  satisfied by substitution (%d): %s"
                       % (len(covered), ", ".join(covered)))
+        covered_fallbacks = sorted(f for f in want if f.lower() in fallback_covered)
+        if covered_fallbacks:
+            print("  satisfied by conditional fallback (%d): %s"
+                  % (len(covered_fallbacks), ", ".join(covered_fallbacks)))
         if missing:
             print("  MISSING (%d): %s" % (len(missing), ", ".join(missing)))
             print()

@@ -165,10 +165,10 @@ machine differed because they had used different ports. The main-thread echo had
 been normalised months of iterations earlier and the worker variant was added
 later without it.
 
-### Same-OS presentation has no structural ceiling
+### Same-host control and its limits
 
-The cross-platform ceiling is entirely a cross-platform phenomenon, and that was
-tested rather than assumed.
+A same-host control isolates the profile loader from differences in installed
+resources and rendering implementations.
 
 A Linux host was made to present a *different Linux device* — eight cores rather
 than thirty-two, 16GB rather than 32, 2560x1440 rather than 800x600, an NVIDIA
@@ -178,48 +178,49 @@ against the same host's own unprofiled capture.
 
 **Every field that differed was one the profile set.** Fonts, canvas, client
 rects, codecs, audio render, WebGPU, keyboard layout, media devices, speech
-voices and WebRTC capabilities all conform exactly. Those are precisely the
-surfaces that were unreachable across platforms.
+voices and WebRTC capabilities all conform exactly. This establishes a control
+for the measured inputs.
 
-So the ~192 structurally blocked fields in the cross-OS case are not a property
-of the approach; they are the cost of asking a host to produce resources it does
-not have. Presenting a device of the same platform family leaves nothing
-leaking.
+This test does not establish equivalence to the named NVIDIA device or to every
+device running the same OS. The reference still came from the same host. A
+different GPU, font collection, driver, or audio implementation requires its own
+functional measurements even when the OS agrees.
 
-### Measured: what a profile can and cannot reach across platforms
+### Historical cross-platform baseline and remaining work
 
 A Linux host was made to present a macOS M4 Max, and the result diffed against
 that machine. Against 319 differing fields with no profile, the profile closed
-77. The remainder is not a to-do list — most of it is not reachable by any
-patch.
+77. These are historical baseline counts, not the current conformance score or
+a proof that the remaining behavior cannot be implemented.
 
 | kind | fields | why |
 |---|---|---|
 | closed by the profile | 77 | values the browser chooses |
 | **fonts** | 85 | the host does not have the font files |
 | **WebGL parameter tables** | 78 | see below — the measurement is confounded by the test host having no GPU |
-| canvas renders | 8 | follows fonts and the raster backend; glyph rasterisation is FreeType against CoreText and is *not* provisionable |
+| canvas renders | 8 | follows font resources, shaping, metrics, and raster implementation |
 | codecs, WebGPU adapter, voices, keyboard, media devices | 17 | OS-provided resources the host lacks |
 | audio render | 4 | CPUID-selected FFT kernel and host libm |
 | still patchable | ~50 | headers, layout, remaining media queries |
 
-So roughly three fifths of the cross-platform gap is structural: the host does
-not possess the resource, and no value can be substituted for it. That bounds
-what cross-OS presentation can honestly claim.
+Cross-OS execution is a product requirement. A native reference machine is an
+oracle and a control; requiring that OS for execution does not close a
+cross-platform failure.
 
-Two consequences follow, and both are product decisions rather than engineering
-ones.
+Missing resources and differing implementations require different fixes. A
+font file may be provisioned. Font selection, outline extraction, rasterization,
+FFT arithmetic, and graphics operations may require portable implementations
+with the reference's behavior. An OS gate in stock Chromium establishes how
+that build behaves; it does not establish that another implementation is
+impossible.
 
-**Same-OS profiles are a different proposition from cross-OS ones.** A Linux
-host presenting a Linux device has no font gap, no backend gap and no ISA gap;
-the structural ceiling largely disappears and what remains is patchable. That is
-where a coherent browser is achievable today.
-
-**Cross-OS presentation requires provisioning the host, not patching the
-browser.** Installing the claimed platform's fonts is the single largest
-recovery available — 85 fields, more than the profile currently closes in total.
-The remaining backend and ISA terms cannot be provisioned at all, which is why
-profiles must be partitioned by ANGLE backend and CPU ISA class.
+These implementations must satisfy the same axioms and verification gates as
+every other patch. Advertising a graphics limit requires executing operations
+at that limit. Advertising a codec or speech voice requires a working provider.
+Matching one captured digest does not establish parity for other inputs: retain
+held-out inputs, exceptional values, repeated calls, and native-path controls.
+Unimplemented or unmeasured behavior remains a reported failure. Neither a
+same-OS run nor a change to the scoring rules can close it.
 
 That the font half is provisionable is now measured, not assumed. Chromium on
 Linux asks fontconfig, and fontconfig answers from whatever it is pointed at:

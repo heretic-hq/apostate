@@ -317,6 +317,52 @@
         }
       }
     },
+    "webgpu": {
+      "type": "object",
+      "description": "Measured WebGPU adapter identity: the feature set, vendor and architecture strings, subgroup sizes, and numeric limits. Served the way the GL components are: features intersect (the emitter drops backend features the claimed device lacks and never adds ones the backend cannot execute), limits take the minimum, and only the vendor and architecture strings are served verbatim. An absent section leaves the host adapter untouched.",
+      "additionalProperties": false,
+      "properties": {
+        "features": {
+          "type": "array",
+          "description": "Feature names as the JS API spells them. Used only to remove backend features the claimed device lacks.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "info": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "vendor": {
+              "type": "string",
+              "minLength": 1
+            },
+            "architecture": {
+              "type": "string",
+              "minLength": 1
+            },
+            "subgroup_min_size": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "subgroup_max_size": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "description": "Numeric limits keyed as the IDL spells them. Served as the minimum of claim and backend, like gl_limits.",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
     "gpu": {
       "type": "object",
       "additionalProperties": false,

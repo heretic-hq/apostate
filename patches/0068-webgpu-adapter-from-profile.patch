@@ -1,0 +1,144 @@
+Subject: [PATCH] webgpu: parse the claimed adapter identity from the profile
+
+The profile now carries the reference device's WebGPU adapter identity —
+feature names, vendor and architecture strings, subgroup sizes, and numeric
+limits — derived from the T0 capture by to_profile.derive_webgpu, which
+refuses to derive when the two power preferences disagree. This parses that
+section into the loader. Nothing serves it yet; the Dawn emitter is a
+separate patch, so landing this changes no runtime value.
+
+The serving doctrine is already written down twice. Patch 0026 serves the
+smaller of the profile claim and the driver for limits, because a limit is
+falsifiable by use; the extensions accessor next to it removes but never
+adds, because a claimed-but-unimplemented extension fails at first use.
+WebGPU adapter data follows both rules: features intersect (the backend aims
+its set at the profile's, dropping what the claimed device lacks and never
+adding what the backend cannot do), limits take the minimum, and only the
+vendor and architecture strings — pure labels no page can exercise — are
+served verbatim. Subgroup sizes go through the minimum like any executed
+quantity.
+
+Ledger: webgpu.adapter-info, webgpu.adapter-features, webgpu.adapter-limits.
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -378,11 +378,73 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+   if (const ListValue* exts = dict->FindList("gl_extensions")) {
+     for (const auto& v : *exts) {
+       if (const std::string* s = v.GetIfString()) {
+         profile->gl_extensions_.insert(*s);
+       }
+     }
+   }
+
++  if (const DictValue* wgpu = dict->FindDict("webgpu")) {
++    if (const ListValue* features = wgpu->FindList("features")) {
++      for (const auto& v : *features) {
++        if (const std::string* s = v.GetIfString()) {
++          if (!s->empty()) {
++            profile->webgpu_features_.insert(*s);
++          } else {
++            LOG(ERROR) << "apostate: webgpu.features names must be non-empty; "
++                          "ignoring";
++          }
++        }
++      }
++    }
++    if (const DictValue* info = wgpu->FindDict("info")) {
++      if (const std::string* vendor = info->FindString("vendor")) {
++        profile->webgpu_vendor_ = *vendor;
++      }
++      if (const std::string* architecture = info->FindString("architecture")) {
++        profile->webgpu_architecture_ = *architecture;
++      }
++      if (std::optional<int> v = info->FindInt("subgroup_min_size")) {
++        if (*v > 0) {
++          profile->webgpu_subgroup_min_ = static_cast<uint32_t>(*v);
++        } else {
++          LOG(ERROR) << "apostate: webgpu.info.subgroup_min_size must be "
++                        "positive; ignoring";
++        }
++      }
++      if (std::optional<int> v = info->FindInt("subgroup_max_size")) {
++        if (*v > 0) {
++          profile->webgpu_subgroup_max_ = static_cast<uint32_t>(*v);
++        } else {
++          LOG(ERROR) << "apostate: webgpu.info.subgroup_max_size must be "
++                        "positive; ignoring";
++        }
++      }
++    }
++    if (const DictValue* limits = wgpu->FindDict("limits")) {
++      for (const auto [name, value] : *limits) {
++        // A JSON number past int32 arrives as a double — same representation
++        // gap memory_total_bytes already documents — so accept both, and only
++        // integral non-negative values either way.
++        if (std::optional<int> iv = value.GetIfInt()) {
++          if (*iv >= 0) {
++            profile->webgpu_limits_[name] = static_cast<uint64_t>(*iv);
++          } else {
++            LOG(ERROR) << "apostate: webgpu.limits." << name
++                       << " must be non-negative; ignoring";
++          }
++        } else if (std::optional<double> dv = value.GetIfDouble()) {
++          if (std::isfinite(*dv) && *dv >= 0 &&
++              *dv < 9007199254740992.0 && std::trunc(*dv) == *dv) {
++            profile->webgpu_limits_[name] = static_cast<uint64_t>(*dv);
++          } else {
++            LOG(ERROR) << "apostate: webgpu.limits." << name
++                       << " must be an integral non-negative number; ignoring";
++          }
++        }
++      }
++    }
++  }
++
+   if (const DictValue* precs = dict->FindDict("gl_precisions")) {
+     for (const auto [name, value] : *precs) {
+       const DictValue* entry = value.GetIfDict();
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -237,7 +237,29 @@ class BASE_EXPORT Profile {
+   // has no such failure mode — the page is simply told no, exactly as it would
+   // be on the real device.
+   const std::set<std::string>& gl_extensions() const { return gl_extensions_; }
++
++  // WebGPU adapter identity the claimed device reports: feature names as the
++  // JS API spells them, vendor and architecture strings, subgroup sizes, and
++  // numeric limits keyed as the IDL spells them.
++  //
++  // Served the way the GL components above are. Features intersect: the
++  // emitter drops backend features the claimed device lacks and never adds
++  // ones the backend cannot execute, because a claimed-but-broken feature
++  // fails at first use. Limits take the minimum for the same reason a page
++  // can falsify a limit by allocating up to it. Only the vendor and
++  // architecture strings are served verbatim — pure labels no page can
++  // exercise. An absent section leaves the host's adapter untouched.
++  const std::set<std::string>& webgpu_features() const {
++    return webgpu_features_;
++  }
++  const std::string& webgpu_vendor() const { return webgpu_vendor_; }
++  const std::string& webgpu_architecture() const { return webgpu_architecture_; }
++  uint32_t webgpu_subgroup_min() const { return webgpu_subgroup_min_; }
++  uint32_t webgpu_subgroup_max() const { return webgpu_subgroup_max_; }
++  const std::map<std::string, uint64_t>& webgpu_limits() const {
++    return webgpu_limits_;
++  }
+
+   // One getShaderPrecisionFormat() answer: the exponent range and mantissa
+   // bits a shader type reports for a precision qualifier.
+   struct ShaderPrecision {
+@@ -418,6 +440,12 @@ class BASE_EXPORT Profile {
+   std::map<std::string, std::string> keyboard_layout_map_;
+   std::map<std::string, int> gl_limits_;
+   std::set<std::string> gl_extensions_;
++  std::set<std::string> webgpu_features_;
++  std::string webgpu_vendor_;
++  std::string webgpu_architecture_;
++  uint32_t webgpu_subgroup_min_ = 0;
++  uint32_t webgpu_subgroup_max_ = 0;
++  std::map<std::string, uint64_t> webgpu_limits_;
+   std::map<std::string, ShaderPrecision> gl_precisions_;
+   std::map<std::string, SystemFont> css_system_fonts_;
+   std::optional<bool> screen_is_extended_;

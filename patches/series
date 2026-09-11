@@ -64,3 +64,4 @@
 0067-windows-line-gap-policy.patch
 0060-mac-arm-fft-multiply.patch
 0063-validated-software-element-indices.patch
+0068-webgpu-adapter-from-profile.patch

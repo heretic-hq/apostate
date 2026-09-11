@@ -232,6 +232,54 @@ def derive_speech_voices(capture):
     return result
 
 
+def derive_webgpu(webgpu):
+    """Preserve the measured WebGPU adapter identity.
+
+    Both power preferences must report the same adapter: one webgpu map cannot
+    represent two different GPUs, and silently picking one would serve half the
+    page loads a different device than the profile claims.
+    """
+    adapters = (webgpu or {}).get("adapters") or {}
+    if not adapters:
+        return {}
+    first = None
+    for name, adapter in sorted(adapters.items()):
+        if first is None:
+            first = adapter
+        elif adapter != first:
+            raise ValueError(f"WebGPU adapters disagree ({name}); "
+                             "one webgpu map cannot represent both")
+    features = first.get("features") or []
+    if (not isinstance(features, list) or not features
+            or any(type(f) is not str or not f for f in features)):
+        raise ValueError("WebGPU features must be a non-empty list of names")
+    info = first.get("info") or {}
+    vendor = info.get("vendor")
+    architecture = info.get("architecture")
+    if type(vendor) is not str or not vendor:
+        raise ValueError("WebGPU adapter vendor must be a non-empty string")
+    if type(architecture) is not str or not architecture:
+        raise ValueError("WebGPU adapter architecture must be a non-empty string")
+    subgroups = {}
+    for key, name in (("subgroupMinSize", "subgroup_min_size"),
+                      ("subgroupMaxSize", "subgroup_max_size")):
+        value = info.get(key)
+        if (type(value) is bool or type(value) not in (int, float)
+                or not math.isfinite(value) or value < 0 or int(value) != value):
+            raise ValueError(f"WebGPU adapter {key} must be a non-negative integer")
+        subgroups[name] = int(value)
+    limits = first.get("limits") or {}
+    if (not isinstance(limits, dict) or not limits
+            or any(type(k) is not str or not k for k in limits)
+            or any(type(v) is bool or type(v) not in (int, float)
+                   or not math.isfinite(v) or v < 0 or int(v) != v
+                   for v in limits.values())):
+        raise ValueError("WebGPU limits must map names to non-negative integers")
+    return {"features": sorted(set(features)),
+            "info": {"vendor": vendor, "architecture": architecture, **subgroups},
+            "limits": {k: int(v) for k, v in sorted(limits.items())}}
+
+
 def build(capture):
     ctx = capture.get("context", {})
     nav = probe(capture, "navigator.scalars") or {}
@@ -390,6 +438,15 @@ def build(capture):
                                  "precision": v["precision"]}
     if precisions:
         profile["gl_precisions"] = dict(sorted(precisions.items()))
+
+    # WebGPU adapter identity: the feature set, the vendor and architecture
+    # strings, and the numeric limits. Served subtractively at the Dawn layer
+    # like the GL components above — features and limits are never reported
+    # above what the backend underneath actually does, so derivation preserves
+    # the measurement and the emitter decides what it can honestly serve.
+    webgpu = derive_webgpu(probe(capture, "webgpu"))
+    if webgpu:
+        profile["webgpu"] = webgpu
 
     # Multi-monitor. isExtended is free to read while getScreenDetails() needs
     # window-management, so this must come from the capture rather than from

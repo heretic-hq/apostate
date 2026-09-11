@@ -1,0 +1,72 @@
+Subject: [PATCH] audio: match Mac ARM vector wave-table range arithmetic
+
+diff --git a/third_party/blink/renderer/modules/webaudio/periodic_wave.cc b/third_party/blink/renderer/modules/webaudio/periodic_wave.cc
+--- a/third_party/blink/renderer/modules/webaudio/periodic_wave.cc
++++ b/third_party/blink/renderer/modules/webaudio/periodic_wave.cc
+@@ -33,6 +33,7 @@
+ #include <memory>
+ 
+ #include "base/bit_cast.h"
++#include "base/apostate/profile.h"
+ #include "base/compiler_specific.h"
+ #include "base/containers/span.h"
+ #include "build/build_config.h"
+@@ -181,6 +182,9 @@
+ 
+ PeriodicWaveImpl::PeriodicWaveImpl(float sample_rate)
+     : sample_rate_(sample_rate), cents_per_range_(kCentsPerRange) {
++  const auto* profile = base::apostate::Profile::Get();
++  use_mac_arm_vector_math_ = profile && profile->ua_platform() == "macOS" &&
++                            profile->ua_architecture() == "arm";
+   float nyquist = 0.5 * sample_rate_;
+   lowest_fundamental_frequency_ = nyquist / MaxNumberOfPartials();
+   rate_scale_ = PeriodicWaveSize() / sample_rate_;
+@@ -267,8 +271,16 @@
+   const __m128 pos = _mm_cmpgt_ps(frequency, _mm_set1_ps(0));
+ 
+   // Calculate the pitch range.
+-  __m128 v_ratio =
+-      _mm_div_ps(frequency, _mm_set1_ps(lowest_fundamental_frequency_));
++  // NEON's vector recipe multiplies by a rounded reciprocal. Preserve both
++  // rounding steps for the Mac ARM profile; scalar playback keeps its recipe.
++  __m128 v_ratio;
++  if (use_mac_arm_vector_math_) {
++    v_ratio = _mm_mul_ps(
++        frequency, _mm_set1_ps(1 / lowest_fundamental_frequency_));
++  } else {
++    v_ratio =
++        _mm_div_ps(frequency, _mm_set1_ps(lowest_fundamental_frequency_));
++  }
+ 
+   // Set v_ratio to 0 if freq <= 0; otherwise keep the ratio.
+   v_ratio = _mm_and_ps(v_ratio, pos);
+@@ -286,10 +298,12 @@
+     cents_above_lowest_frequency[k] = log2f(ratio[k]) * 1200;
+   }
+ 
+-  __m128 v_pitch_range =
+-      _mm_add_ps(_mm_set1_ps(1.0),
+-                 _mm_div_ps(_mm_load_ps(cents_above_lowest_frequency.data()),
+-                            _mm_set1_ps((cents_per_range_))));
++  const __m128 cents = _mm_load_ps(cents_above_lowest_frequency.data());
++  const __m128 scaled_cents =
++      use_mac_arm_vector_math_
++          ? _mm_mul_ps(cents, _mm_set1_ps(1 / cents_per_range_))
++          : _mm_div_ps(cents, _mm_set1_ps(cents_per_range_));
++  __m128 v_pitch_range = _mm_add_ps(_mm_set1_ps(1.0), scaled_cents);
+   v_pitch_range = _mm_max_ps(v_pitch_range, _mm_set1_ps(0.0));
+   v_pitch_range = _mm_min_ps(v_pitch_range, _mm_set1_ps(NumberOfRanges() - 1));
+ 
+diff --git a/third_party/blink/renderer/modules/webaudio/periodic_wave.h b/third_party/blink/renderer/modules/webaudio/periodic_wave.h
+--- a/third_party/blink/renderer/modules/webaudio/periodic_wave.h
++++ b/third_party/blink/renderer/modules/webaudio/periodic_wave.h
+@@ -142,6 +142,9 @@
+ 
+   float rate_scale_;
+ 
++  // Bound at construction from the existing immutable process profile.
++  bool use_mac_arm_vector_math_ = false;
++
+   // Maximum possible number of partials (before culling).
+   unsigned MaxNumberOfPartials() const;
+ 

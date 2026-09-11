@@ -1,0 +1,526 @@
+Subject: [PATCH] audio: select Mac ARM compressor scalar math from the profile
+
+diff --git a/third_party/blink/renderer/platform/audio/dynamics_compressor.cc b/third_party/blink/renderer/platform/audio/dynamics_compressor.cc
+--- a/third_party/blink/renderer/platform/audio/dynamics_compressor.cc
++++ b/third_party/blink/renderer/platform/audio/dynamics_compressor.cc
+@@ -31,13 +31,17 @@
+ #include <algorithm>
+ #include <cmath>
+ 
++#include "base/apostate/profile.h"
+ #include "base/compiler_specific.h"
+ #include "base/containers/span.h"
++#include "base/cpu.h"
+ #include "base/logging.h"
+ #include "base/notreached.h"
++#include "build/build_config.h"
+ #include "third_party/blink/renderer/platform/audio/audio_bus.h"
+ #include "third_party/blink/renderer/platform/audio/audio_utilities.h"
+ #include "third_party/blink/renderer/platform/audio/denormal_disabler.h"
++#include "third_party/blink/renderer/platform/audio/mac_arm_audio_math.h"
+ #include "third_party/blink/renderer/platform/wtf/math_extras.h"
+ #include "third_party/fdlibm/ieee754.h"
+ 
+@@ -109,6 +113,29 @@
+       static_cast<float>(audio_utilities::DiscreteTimeConstantForSampleRate(
+           kMeteringReleaseTimeConstant, sample_rate));
+   InitializeParameters();
++  const auto* profile = base::apostate::Profile::Get();
++  if (profile && profile->ua_platform() == "macOS" &&
++      profile->ua_architecture() == "arm") {
++    auto functions = mac_arm_audio_math::PortableFunctions();
++#if defined(ARCH_CPU_X86_64)
++    const auto& cpu = base::CPU::GetInstanceNoAllocation();
++    if (cpu.has_avx() && cpu.has_fma3()) {
++      functions = mac_arm_audio_math::FmaFunctions();
++    }
++#endif
++    mac_arm_log10_ = functions.log10;
++    mac_arm_exp10_ = functions.exp10;
++  }
++}
++
++float DynamicsCompressor::LinearToDecibels(float value) const {
++  return mac_arm_log10_ ? 20 * mac_arm_log10_(value)
++                       : audio_utilities::LinearToDecibels(value);
++}
++
++float DynamicsCompressor::DecibelsToLinear(float value) const {
++  return mac_arm_exp10_ ? mac_arm_exp10_(0.05f * value)
++                       : audio_utilities::DecibelsToLinear(value);
+ }
+ 
+ void DynamicsCompressor::Process(const AudioBus* source_bus,
+@@ -205,7 +232,7 @@
+     if (scaled_desired_gain == 0) {
+       db_compression_diff = is_releasing ? -1 : 1;
+     } else {
+-      db_compression_diff = audio_utilities::LinearToDecibels(
++      db_compression_diff = LinearToDecibels(
+           compressor_gain_ / scaled_desired_gain);
+     }
+ 
+@@ -234,7 +261,7 @@
+       constexpr float kDbSpacing = 5;
+       const float db_per_frame = kDbSpacing / calc_release_frames;
+ 
+-      envelope_rate = audio_utilities::DecibelsToLinear(db_per_frame);
++      envelope_rate = DecibelsToLinear(db_per_frame);
+     } else {
+       // Attack mode - db_compression_diff should be positive dB
+ 
+@@ -299,12 +326,12 @@
+           abs_input <= 0.0001f ? 1 : shaped_input / abs_input;
+ 
+       const float db_attenuation =
+-          std::max(2.0f, -audio_utilities::LinearToDecibels(attenuation));
++          std::max(2.0f, -LinearToDecibels(attenuation));
+ 
+       const float db_per_frame = db_attenuation / sat_release_frames;
+ 
+       const float sat_release_rate =
+-          audio_utilities::DecibelsToLinear(db_per_frame) - 1;
++          DecibelsToLinear(db_per_frame) - 1;
+ 
+       const bool is_release = (attenuation > detector_average);
+       const float rate = is_release ? sat_release_rate : 1;
+@@ -335,7 +362,7 @@
+ 
+       // Calculate metering.
+       const float db_real_gain =
+-          audio_utilities::LinearToDecibels(post_warp_compressor_gain);
++          LinearToDecibels(post_warp_compressor_gain);
+       if (db_real_gain < metering_gain_) {
+         metering_gain_ = db_real_gain;
+       } else {
+@@ -485,20 +512,20 @@
+     return KneeCurve(x, k);
+   }
+   // Constant ratio after knee.
+-  const float db_x = audio_utilities::LinearToDecibels(x);
++  const float db_x = LinearToDecibels(x);
+   const float db_y = db_yknee_threshold_ + slope_ * (db_x - db_knee_threshold_);
+-  return audio_utilities::DecibelsToLinear(db_y);
++  return DecibelsToLinear(db_y);
+ }
+ 
+ float DynamicsCompressor::KAtSlope(float desired_slope) const {
+   const float db_x = db_threshold_ + db_knee_;
+-  const float x = audio_utilities::DecibelsToLinear(db_x);
++  const float x = DecibelsToLinear(db_x);
+   float x2 = 1;
+   float db_x2 = 0;
+ 
+   if (!(x < linear_threshold_)) {
+     x2 = x * 1.001;
+-    db_x2 = audio_utilities::LinearToDecibels(x2);
++    db_x2 = LinearToDecibels(x2);
+   }
+ 
+   // Approximate k given initial values.
+@@ -515,8 +542,8 @@
+     // This slope is equal to the inverse of the compression "ratio".
+     // In other words, a compression ratio of 20 would be a slope of 1/20.
+     if (!(x < linear_threshold_)) {
+-      const float db_y = audio_utilities::LinearToDecibels(KneeCurve(x, k));
+-      const float db_y2 = audio_utilities::LinearToDecibels(KneeCurve(x2, k));
++      const float db_y = LinearToDecibels(KneeCurve(x, k));
++      const float db_y2 = LinearToDecibels(KneeCurve(x2, k));
+       slope = (db_y2 - db_y) / (db_x2 - db_x);
+     }
+ 
+@@ -541,7 +568,7 @@
+   if (db_threshold != db_threshold_ || db_knee != db_knee_ || ratio != ratio_) {
+     // Threshold and knee.
+     db_threshold_ = db_threshold;
+-    linear_threshold_ = audio_utilities::DecibelsToLinear(db_threshold);
++    linear_threshold_ = DecibelsToLinear(db_threshold);
+     db_knee_ = db_knee;
+ 
+     // Compute knee parameters.
+@@ -551,10 +578,10 @@
+     const float k = KAtSlope(1 / ratio_);
+ 
+     db_knee_threshold_ = db_threshold + db_knee;
+-    knee_threshold_ = audio_utilities::DecibelsToLinear(db_knee_threshold_);
++    knee_threshold_ = DecibelsToLinear(db_knee_threshold_);
+ 
+     db_yknee_threshold_ =
+-        audio_utilities::LinearToDecibels(KneeCurve(knee_threshold_, k));
++        LinearToDecibels(KneeCurve(knee_threshold_, k));
+ 
+     knee_ = k;
+   }
+diff --git a/third_party/blink/renderer/platform/audio/dynamics_compressor.h b/third_party/blink/renderer/platform/audio/dynamics_compressor.h
+--- a/third_party/blink/renderer/platform/audio/dynamics_compressor.h
++++ b/third_party/blink/renderer/platform/audio/dynamics_compressor.h
+@@ -83,6 +83,15 @@
+   bool RequiresTailProcessing() const;
+ 
+  protected:
++  float LinearToDecibels(float) const;
++  float DecibelsToLinear(float) const;
++
++  // Bound once at construction from the existing immutable profile loader.
++  // Null keeps the original native audio utilities for other profiles.
++  using MacArmMathFunction = float (*)(float);
++  MacArmMathFunction mac_arm_log10_ = nullptr;
++  MacArmMathFunction mac_arm_exp10_ = nullptr;
++
+   void InitializeParameters();
+ 
+   void SetPreDelayTime(float);
+diff --git a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
+--- a/third_party/blink/renderer/platform/BUILD.gn
++++ b/third_party/blink/renderer/platform/BUILD.gn
+@@ -424,6 +424,7 @@
+     "audio/down_sampler.h",
+     "audio/dynamics_compressor.cc",
+     "audio/dynamics_compressor.h",
++    "audio/mac_arm_audio_math.h",
+     "audio/equal_power_panner.cc",
+     "audio/equal_power_panner.h",
+     "audio/fft_convolver.cc",
+diff --git a/third_party/blink/renderer/platform/audio/mac_arm_audio_math.h b/third_party/blink/renderer/platform/audio/mac_arm_audio_math.h
+new file mode 100644
+--- /dev/null
++++ b/third_party/blink/renderer/platform/audio/mac_arm_audio_math.h
+@@ -0,0 +1,338 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_AUDIO_MAC_ARM_AUDIO_MATH_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_AUDIO_MAC_ARM_AUDIO_MATH_H_
++
++#include <array>
++#include <bit>
++#include <cfenv>
++#include <cmath>
++#include <cstdint>
++#include <limits>
++
++#include "base/compiler_specific.h"
++#include "build/build_config.h"
++
++#if defined(ARCH_CPU_X86_FAMILY)
++#include <xmmintrin.h>
++#endif
++
++namespace blink::mac_arm_audio_math {
++namespace internal {
++
++// Scalar range reduction for the Mac ARM audio math policy. The hexadecimal
++// constants and explicit double FMA order preserve the target rounding.
++// These tables reduce arbitrary inputs; they contain no audio output data.
++inline bool FlushInputs() {
++#if defined(ARCH_CPU_ARM64)
++  uint64_t control;
++  asm volatile("mrs %0, fpcr" : "=r"(control));
++  return control & (uint64_t{1} << 24);
++#elif defined(ARCH_CPU_ARM_FAMILY)
++  uint32_t control;
++  asm volatile("vmrs %0, fpscr" : "=r"(control));
++  return control & (uint32_t{1} << 24);
++#elif defined(ARCH_CPU_X86_FAMILY)
++  return _mm_getcsr() & 0x40;
++#else
++  return false;
++#endif
++}
++
++ALWAYS_INLINE float Log10(float value) {
++  uint32_t word = std::bit_cast<uint32_t>(value);
++  if (word - 0x00800000u >= 0x7f000000u) {
++    const uint32_t magnitude = word & 0x7fffffffu;
++    if (magnitude > 0x7f800000u) {
++      if (!(word & 0x00400000u)) {
++        std::feraiseexcept(FE_INVALID);
++      }
++      return value;
++    }
++    if (magnitude == 0 || (magnitude < 0x00800000u && FlushInputs())) {
++      std::feraiseexcept(FE_DIVBYZERO);
++      return -std::numeric_limits<float>::infinity();
++    }
++    if (word & 0x80000000u) {
++      std::feraiseexcept(FE_INVALID);
++      return std::bit_cast<float>(0x7fc00000u);
++    }
++    if (magnitude == 0x7f800000u) {
++      return value;
++    }
++    // Normalize the integer mantissa without losing subnormal input bits.
++    const float normalized = std::bit_cast<float>(word | 0x3f800000u) - 1.f;
++    word = std::bit_cast<uint32_t>(normalized) - 0x3f000000u;
++  }
++  struct Entry {
++    double reciprocal;
++    double logarithm;
++  };
++  static constexpr std::array<Entry, 65> kTable = {{
++      {0x1.0000000000000p+0, 0x0.0p+0},
++      {0x1.f81f81f81a3e5p-1, 0x1.b9476a50f6475p-8},
++      {0x1.f07c1f07c3108p-1, 0x1.b5e908eaf3398p-7},
++      {0x1.e9131abf09b55p-1, 0x1.45f4f5acd2447p-6},
++      {0x1.e1e1e1e1e0ae1p-1, 0x1.af5f92b020224p-6},
++      {0x1.dae6076b8f76bp-1, 0x1.0ba01a81b0d1dp-5},
++      {0x1.d41d41d410288p-1, 0x1.3ed1199ac1d02p-5},
++      {0x1.cd8568902fb3fp-1, 0x1.714834281fa6cp-5},
++      {0x1.c71c71c70f481p-1, 0x1.a30a9d6105e4bp-5},
++      {0x1.c0e0703826caap-1, 0x1.d41d5164a5b23p-5},
++      {0x1.bacf914c177b9p-1, 0x1.02428c1f18d98p-4},
++      {0x1.b4e81b4e7b01fp-1, 0x1.1a2344551cc7ep-4},
++      {0x1.af286bca2397cp-1, 0x1.31b3055c23663p-4},
++      {0x1.a98ef60696bd7p-1, 0x1.48f3ed1e3553ap-4},
++      {0x1.a41a41a40b6e9p-1, 0x1.5fe80488ee159p-4},
++      {0x1.9ec8e95113011p-1, 0x1.769140a20ed4fp-4},
++      {0x1.9999999992278p-1, 0x1.8cf1838884d6ep-4},
++      {0x1.948b0fcd69907p-1, 0x1.a30a9d60b536dp-4},
++      {0x1.8f9c18f9b4e11p-1, 0x1.b8de4d3aec4d9p-4},
++      {0x1.8acb90f6c68a1p-1, 0x1.ce6e41e442e9ep-4},
++      {0x1.861861862484bp-1, 0x1.e3bc1ab0aa46fp-4},
++      {0x1.8181818173ae4p-1, 0x1.f8c96834a7e48p-4},
++      {0x1.7d05f417c0774p-1, 0x1.06cbd67a915cdp-3},
++      {0x1.78a4c81784397p-1, 0x1.11142f081f8dbp-3},
++      {0x1.745d1745de7bap-1, 0x1.1b3e71ec75d90p-3},
++      {0x1.702e05c0c18e3p-1, 0x1.254b4d35d0f5fp-3},
++      {0x1.6c16c16c06c9bp-1, 0x1.2f3b691c81020p-3},
++      {0x1.681681681a1f6p-1, 0x1.390f684497c90p-3},
++      {0x1.642c8590aa5efp-1, 0x1.42c7e7fe5304ep-3},
++      {0x1.605816057fe92p-1, 0x1.4c65807e96e6bp-3},
++      {0x1.5c9882b922e81p-1, 0x1.55e8c518d5130p-3},
++      {0x1.58ed230825723p-1, 0x1.5f5244722cd0fp-3},
++      {0x1.555555555be48p-1, -0x1.ffbfc2bbe9af4p-4},
++      {0x1.51d07eae25fe5p-1, -0x1.ed50a4a23c997p-4},
++      {0x1.4e5e0a72ea8cap-1, -0x1.db11ed764c030p-4},
++      {0x1.4afd6a051e80fp-1, -0x1.c902a19e1cbfdp-4},
++      {0x1.47ae147ad26e5p-1, -0x1.b721cd16c4e1cp-4},
++      {0x1.446f8656250cap-1, -0x1.a56e8325c6c50p-4},
++      {0x1.4141414137fcep-1, -0x1.93e7de0f90978p-4},
++      {0x1.3e22cbce5a6b7p-1, -0x1.828cfed2f2cafp-4},
++      {0x1.3b13b13b04947p-1, -0x1.715d0ce3125d3p-4},
++      {0x1.3813813803a55p-1, -0x1.605735ee3df92p-4},
++      {0x1.3521cfb2b1096p-1, -0x1.4f7aad9b97441p-4},
++      {0x1.323e34a2baef3p-1, -0x1.3ec6ad5440f5ap-4},
++      {0x1.2f684bda0a126p-1, -0x1.2e3a740b43dffp-4},
++      {0x1.2c9fb4d8060d5p-1, -0x1.1dd5460c3fb8bp-4},
++      {0x1.29e4129e3187dp-1, -0x1.0d966cc5f2b50p-4},
++      {0x1.27350b881d871p-1, -0x1.fafa6d3a047d3p-5},
++      {0x1.249249249e9cfp-1, -0x1.db11ed7700a68p-5},
++      {0x1.21fb781227951p-1, -0x1.bb7209d242ce5p-5},
++      {0x1.1f7047dc1c36bp-1, -0x1.9c197abf7fb7ap-5},
++      {0x1.1cf06ada1ee29p-1, -0x1.7d070145824fep-5},
++      {0x1.1a7b961199740p-1, -0x1.5e3966b7356cbp-5},
++      {0x1.181181181a457p-1, -0x1.3faf7c669fbf0p-5},
++      {0x1.15b1e5f74ca8fp-1, -0x1.21681b5c42118p-5},
++      {0x1.135c81135efedp-1, -0x1.0362241e83be8p-5},
++      {0x1.1111111104099p-1, -0x1.cb38fccc387a4p-6},
++      {0x1.0ecf56be75b6ep-1, -0x1.902c31d763f47p-6},
++      {0x1.0c9714fbdd2a2p-1, -0x1.559bd2420786bp-6},
++      {0x1.0a6810a68f2a2p-1, -0x1.1b85d605c7d78p-6},
++      {0x1.084210841501dp-1, -0x1.c3d08374fd2e0p-7},
++      {0x1.0624dd2f253e0p-1, -0x1.51824c77c8587p-7},
++      {0x1.04104104183eep-1, -0x1.c03a80b1c8a49p-8},
++      {0x1.0204081017ac2p-1, -0x1.be76bd7050239p-9},
++      {0x1.0000000000000p-1, 0x0.0p+0},
++  }};
++  const int exponent = std::bit_cast<int32_t>(word + 0xc0c10000u) >> 23;
++  const uint32_t mantissa = word & 0x007fffffu;
++  const unsigned index = (mantissa + 0x00010000u) >> 17;
++  const double fraction = std::bit_cast<float>(mantissa | 0x3f800000u);
++  const double residual = std::fma(fraction, kTable[index].reciprocal, -1.0);
++  double polynomial = std::fma(residual, -0x1.bcbea4c258daap-4,
++                               0x1.287d3dcaf476dp-3);
++  polynomial = std::fma(residual, polynomial, -0x1.bcb7b14dcbd85p-3);
++  polynomial = std::fma(residual, polynomial, 0x1.bcb7b151bc6b3p-2);
++  const double base = std::fma(static_cast<double>(exponent),
++                               0x1.34413509f79ffp-2, kTable[index].logarithm);
++  return static_cast<float>(std::fma(residual, polynomial, base));
++}
++
++ALWAYS_INLINE float Exp10(float value) {
++  const uint32_t word = std::bit_cast<uint32_t>(value);
++  const uint32_t magnitude = word & 0x7fffffffu;
++  if (magnitude >= 0x42800000u) {
++    if ((word & 0x80000000u) && magnitude <= 0x7f800000u) {
++      if (magnitude != 0x7f800000u) {
++        std::feraiseexcept(FE_UNDERFLOW | FE_INEXACT);
++      }
++      return 0.f;
++    }
++    return value * std::numeric_limits<float>::max();
++  }
++  static constexpr std::array<double, 128> kTable = {{
++      0x1.0000000000000p+0,
++      0x1.0163da9fb3335p+0,
++      0x1.02c9a3e778061p+0,
++      0x1.04315e86e7f85p+0,
++      0x1.059b0d3158574p+0,
++      0x1.0706b29ddf6dep+0,
++      0x1.0874518759bc8p+0,
++      0x1.09e3ecac6f383p+0,
++      0x1.0b5586cf9890fp+0,
++      0x1.0cc922b7247f7p+0,
++      0x1.0e3ec32d3d1a2p+0,
++      0x1.0fb66affed31bp+0,
++      0x1.11301d0125b51p+0,
++      0x1.12abdc06c31ccp+0,
++      0x1.1429aaea92de0p+0,
++      0x1.15a98c8a58e51p+0,
++      0x1.172b83c7d517bp+0,
++      0x1.18af9388c8deap+0,
++      0x1.1a35beb6fcb75p+0,
++      0x1.1bbe084045cd4p+0,
++      0x1.1d4873168b9aap+0,
++      0x1.1ed5022fcd91dp+0,
++      0x1.2063b88628cd6p+0,
++      0x1.21f49917ddc96p+0,
++      0x1.2387a6e756238p+0,
++      0x1.251ce4fb2a63fp+0,
++      0x1.26b4565e27cddp+0,
++      0x1.284dfe1f56381p+0,
++      0x1.29e9df51fdee1p+0,
++      0x1.2b87fd0dad990p+0,
++      0x1.2d285a6e4030bp+0,
++      0x1.2ecafa93e2f56p+0,
++      0x1.306fe0a31b715p+0,
++      0x1.32170fc4cd831p+0,
++      0x1.33c08b26416ffp+0,
++      0x1.356c55f929ff1p+0,
++      0x1.371a7373aa9cbp+0,
++      0x1.38cae6d05d866p+0,
++      0x1.3a7db34e59ff7p+0,
++      0x1.3c32dc313a8e5p+0,
++      0x1.3dea64c123422p+0,
++      0x1.3fa4504ac801cp+0,
++      0x1.4160a21f72e2ap+0,
++      0x1.431f5d950a897p+0,
++      0x1.44e086061892dp+0,
++      0x1.46a41ed1d0057p+0,
++      0x1.486a2b5c13cd0p+0,
++      0x1.4a32af0d7d3dep+0,
++      0x1.4bfdad5362a27p+0,
++      0x1.4dcb299fddd0dp+0,
++      0x1.4f9b2769d2ca7p+0,
++      0x1.516daa2cf6642p+0,
++      0x1.5342b569d4f82p+0,
++      0x1.551a4ca5d920fp+0,
++      0x1.56f4736b527dap+0,
++      0x1.58d12d497c7fdp+0,
++      0x1.5ab07dd485429p+0,
++      0x1.5c9268a5946b7p+0,
++      0x1.5e76f15ad2148p+0,
++      0x1.605e1b976dc09p+0,
++      0x1.6247eb03a5585p+0,
++      0x1.6434634ccc320p+0,
++      0x1.6623882552225p+0,
++      0x1.68155d44ca973p+0,
++      0x1.6a09e667f3bcdp+0,
++      0x1.6c012750bdabfp+0,
++      0x1.6dfb23c651a2fp+0,
++      0x1.6ff7df9519484p+0,
++      0x1.71f75e8ec5f74p+0,
++      0x1.73f9a48a58174p+0,
++      0x1.75feb564267c9p+0,
++      0x1.780694fde5d3fp+0,
++      0x1.7a11473eb0187p+0,
++      0x1.7c1ed0130c132p+0,
++      0x1.7e2f336cf4e62p+0,
++      0x1.80427543e1a12p+0,
++      0x1.82589994cce13p+0,
++      0x1.8471a4623c7adp+0,
++      0x1.868d99b4492edp+0,
++      0x1.88ac7d98a6699p+0,
++      0x1.8ace5422aa0dbp+0,
++      0x1.8cf3216b5448cp+0,
++      0x1.8f1ae99157736p+0,
++      0x1.9145b0b91ffc6p+0,
++      0x1.93737b0cdc5e5p+0,
++      0x1.95a44cbc8520fp+0,
++      0x1.97d829fde4e50p+0,
++      0x1.9a0f170ca07bap+0,
++      0x1.9c49182a3f090p+0,
++      0x1.9e86319e32323p+0,
++      0x1.a0c667b5de565p+0,
++      0x1.a309bec4a2d33p+0,
++      0x1.a5503b23e255dp+0,
++      0x1.a799e1330b358p+0,
++      0x1.a9e6b5579fdbfp+0,
++      0x1.ac36bbfd3f37ap+0,
++      0x1.ae89f995ad3adp+0,
++      0x1.b0e07298db666p+0,
++      0x1.b33a2b84f15fbp+0,
++      0x1.b59728de5593ap+0,
++      0x1.b7f76f2fb5e47p+0,
++      0x1.ba5b030a1064ap+0,
++      0x1.bcc1e904bc1d2p+0,
++      0x1.bf2c25bd71e09p+0,
++      0x1.c199bdd85529cp+0,
++      0x1.c40ab5fffd07ap+0,
++      0x1.c67f12e57d14bp+0,
++      0x1.c8f6d9406e7b5p+0,
++      0x1.cb720dcef9069p+0,
++      0x1.cdf0b555dc3fap+0,
++      0x1.d072d4a07897cp+0,
++      0x1.d2f87080d89f2p+0,
++      0x1.d5818dcfba487p+0,
++      0x1.d80e316c98398p+0,
++      0x1.da9e603db3285p+0,
++      0x1.dd321f301b460p+0,
++      0x1.dfc97337b9b5fp+0,
++      0x1.e264614f5a129p+0,
++      0x1.e502ee78b3ff6p+0,
++      0x1.e7a51fbc74c83p+0,
++      0x1.ea4afa2a490dap+0,
++      0x1.ecf482d8e67f1p+0,
++      0x1.efa1bee615a27p+0,
++      0x1.f252b376bba97p+0,
++      0x1.f50765b6e4540p+0,
++      0x1.f7bfdad9cbe14p+0,
++      0x1.fa7c1819e90d8p+0,
++      0x1.fd3c22b8f71f1p+0,
++  }};
++  const double scaled = static_cast<double>(value) * 0x1.a934f0979a371p+8;
++  // Nearest with ties away, matching FRINTA independently of ambient mode.
++  const double rounded = std::round(scaled);
++  const int64_t n = static_cast<int64_t>(rounded);
++  const double residual = scaled - rounded;
++  const unsigned index = static_cast<uint64_t>(n) & 127u;
++  const int64_t exponent = n >> 7;
++  const uint64_t bits = std::bit_cast<uint64_t>(kTable[index]) +
++                        (static_cast<uint64_t>(exponent) << 52);
++  const double power = std::bit_cast<double>(bits);
++  const double polynomial = std::fma(0x1.ebfbdff30d656p-17, residual,
++                                      0x1.62e4453e10daep-8);
++  const double adjustment = polynomial * residual;
++  return static_cast<float>(std::fma(adjustment, power, power));
++}
++
++}  // namespace internal
++
++using UnaryFunction = float (*)(float);
++struct Functions {
++  UnaryFunction log10;
++  UnaryFunction exp10;
++};
++inline Functions PortableFunctions() {
++  return {internal::Log10, internal::Exp10};
++}
++#if defined(ARCH_CPU_X86_64)
++// The arithmetic bodies inline here before instruction selection. Callers
++// must check both CPU FMA support and OS-enabled AVX state.
++__attribute__((target("fma"))) inline float Log10Fma(float value) {
++  return internal::Log10(value);
++}
++__attribute__((target("fma"))) inline float Exp10Fma(float value) {
++  return internal::Exp10(value);
++}
++inline Functions FmaFunctions() {
++  return {Log10Fma, Exp10Fma};
++}
++#endif
++
++}  // namespace blink::mac_arm_audio_math
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_AUDIO_MAC_ARM_AUDIO_MATH_H_

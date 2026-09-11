@@ -1,0 +1,374 @@
+Subject: [PATCH] webgpu: serve the claimed adapter identity at the Dawn layer
+
+Blink maps Dawn's adapter straight onto the page — adapter.info strings,
+adapter.features, adapter.limits — so the override belongs in Dawn, in the
+same relationship ANGLE has to WebGL. Chromium drives it the way it drives
+SetUseTieredLimits: the decoder reads the profile (it already links the
+loader) and hands plain values across, so Dawn takes no base/ dependency it
+does not already have.
+
+The serving doctrine is patches 0026 and the extensions accessor restated
+for a new backend. The profile's feature set intersects the backend's: the
+five software-only capabilities SwiftShader reports but the Intel iGPU
+lacks (subgroups, subgroup-size-control, astc, astc-sliced-3d, etc2) are
+dropped when the claimed device lacks them and kept when it has them, which
+is why the same code is correct for the Apple profile whose reference
+device genuinely supports all five. Nothing is ever added — a
+claimed-but-unimplemented feature fails at first use. Limits take the
+minimum with saturation, so over-claiming is structurally impossible and a
+future driver that genuinely raises a limit flows straight through. Only
+the vendor and architecture strings are served verbatim, pure labels no
+page can exercise. Subgroup sizes go through the minimum with a
+power-of-two guard, because a non-power-of-two subgroup size trips Dawn's
+own validation and crashing on a profile value would be a new observable.
+
+Fifteen limits are listed explicitly rather than served wholesale, the way
+0026 lists seventeen: a limit nobody reasoned about does not get served.
+
+This closes the vendor and architecture fields and the software-only
+feature half on both profiles. The numeric limits stay red until the
+backend genuinely raises them — lifting the driver is the only honest way
+to let a claim through, per 0027 — as do subgroup sizes and the five
+reference-only features the backend cannot execute.
+
+Ledger: webgpu.adapter-info, webgpu.adapter-features, webgpu.adapter-limits.
+diff --git a/third_party/dawn/include/dawn/native/DawnNative.h b/third_party/dawn/include/dawn/native/DawnNative.h
+--- a/third_party/dawn/include/dawn/native/DawnNative.h
++++ b/third_party/dawn/include/dawn/native/DawnNative.h
+@@ -31,6 +31,9 @@
+ #include <webgpu/webgpu_cpp.h>
+ 
+ #include <string>
++#include <cstdint>
++#include <map>
++#include <set>
+ #include <string_view>
+ #include <vector>
+ 
+@@ -90,6 +93,23 @@
+ 
+     void SetUseTieredLimits(bool useTieredLimits);
+ 
++    // Claimed-device adapter identity, measured from the reference device.
++    // Features intersect: backend capabilities the claimed device lacks are
++    // dropped, and nothing the backend cannot execute is ever added. Limits
++    // take the minimum with saturation. Vendor and architecture are pure
++    // labels and are served verbatim; subgroup sizes go through the minimum
++    // with a power-of-two guard. An empty feature set means no profile
++    // section and leaves the adapter untouched.
++    struct ProfileAdapterCaps {
++        std::set<std::string> features;
++        std::string vendor;
++        std::string architecture;
++        uint32_t subgroup_min_size = 0;
++        uint32_t subgroup_max_size = 0;
++        std::map<std::string, uint64_t> limits;
++    };
++    void ApplyProfileAdapterCaps(const ProfileAdapterCaps& caps);
++
+     // Check that the Adapter is able to support importing external images. This is necessary
+     // to implement the swapchain and interop APIs in Chromium.
+     bool SupportsExternalImages() const;
+diff --git a/third_party/dawn/src/dawn/native/DawnNative.cpp b/third_party/dawn/src/dawn/native/DawnNative.cpp
+--- a/third_party/dawn/src/dawn/native/DawnNative.cpp
++++ b/third_party/dawn/src/dawn/native/DawnNative.cpp
+@@ -102,6 +102,10 @@
+     mImpl->SetUseTieredLimits(useTieredLimits);
+ }
+ 
++void Adapter::ApplyProfileAdapterCaps(const ProfileAdapterCaps& caps) {
++    mImpl->ApplyProfileAdapterCaps(caps);
++}
++
+ bool Adapter::SupportsExternalImages() const {
+     return mImpl->GetPhysicalDevice()->SupportsExternalImages();
+ }
+diff --git a/third_party/dawn/src/dawn/native/Adapter.h b/third_party/dawn/src/dawn/native/Adapter.h
+--- a/third_party/dawn/src/dawn/native/Adapter.h
++++ b/third_party/dawn/src/dawn/native/Adapter.h
+@@ -76,6 +76,11 @@
+     // Set if the adapter uses tiered limits, may result in a change in the adapter's limits.
+     void SetUseTieredLimits(bool useTieredLimits);
+ 
++    // Intersect features with, relabel from, and clamp limits to the claimed
++    // device. See Adapter::ApplyProfileAdapterCaps for the serving doctrine.
++    // A no-op when caps.features is empty.
++    void ApplyProfileAdapterCaps(const Adapter::ProfileAdapterCaps& caps);
++
+     // Return the underlying PhysicalDevice.
+     PhysicalDeviceBase* GetPhysicalDevice();
+     const PhysicalDeviceBase* GetPhysicalDevice() const;
+@@ -121,6 +126,13 @@
+     // The adapter becomes "consumed" once it has successfully been used to
+     // create a device.
+     bool mAdapterIsConsumed = false;
++
++    // Claimed-device labels served verbatim; empty means inherit the backend.
++    std::string mProfileVendor;
++    std::string mProfileArchitecture;
++    // Claimed subgroup sizes; 0 means inherit the backend.
++    uint32_t mProfileSubgroupMin = 0;
++    uint32_t mProfileSubgroupMax = 0;
+ };
+ 
+ std::vector<Ref<AdapterBase>> SortAdapters(std::vector<Ref<AdapterBase>> adapters,
+diff --git a/third_party/dawn/src/dawn/native/Adapter.cpp b/third_party/dawn/src/dawn/native/Adapter.cpp
+--- a/third_party/dawn/src/dawn/native/Adapter.cpp
++++ b/third_party/dawn/src/dawn/native/Adapter.cpp
+@@ -28,6 +28,7 @@
+ #include "src/dawn/native/Adapter.h"
+ 
+ #include <algorithm>
++#include <cstdint>
+ #include <memory>
+ #include <string>
+ #include <tuple>
+@@ -41,6 +42,7 @@
+ #include "src/dawn/native/ChainUtils.h"
+ #include "src/dawn/native/Device.h"
+ #include "src/dawn/native/Error.h"
++#include "src/dawn/native/Features.h"
+ #include "src/dawn/native/Instance.h"
+ #include "src/dawn/native/PhysicalDevice.h"
+ #include "src/utils/compiler.h"
+@@ -48,6 +50,26 @@
+ namespace dawn::native {
+ namespace {
+ static constexpr DeviceDescriptor kDefaultDeviceDesc = {};
++
++// Backend capabilities a claimed desktop device may lack. Listed explicitly:
++// a capability outside this list is never stripped, so a future backend
++// feature stays visible until someone reasons about it, while a claimed
++// device that genuinely has one of these (Apple silicon has all five) keeps
++// it through the profile-membership test below.
++struct ProfileFeatureEntry {
++    Feature feature;
++    const char* name;
++};
++constexpr ProfileFeatureEntry kProfileStrippableFeatures[] = {
++    {Feature::Subgroups, "subgroups"},
++    {Feature::SubgroupSizeControl, "subgroup-size-control"},
++    {Feature::TextureCompressionASTC, "texture-compression-astc"},
++    {Feature::TextureCompressionASTCSliced3D, "texture-compression-astc-sliced-3d"},
++    {Feature::TextureCompressionETC2, "texture-compression-etc2"},
++};
++
++// Numeric limits reasoned about one by one in ApplyProfileAdapterCaps below.
++// A limit outside that list is never served from the profile.
+ }  // anonymous namespace
+ 
+ AdapterBase::AdapterBase(InstanceBase* instance,
+@@ -70,6 +92,96 @@
+     UpdateLimits();
+ }
+ 
++void AdapterBase::ApplyProfileAdapterCaps(const Adapter::ProfileAdapterCaps& caps) {
++    if (caps.features.empty()) {
++        return;
++    }
++    FeaturesSet filtered;
++    bool changed = false;
++    for (size_t i = 0; i < kEnumCount<Feature>; ++i) {
++        Feature feature = static_cast<Feature>(i);
++        if (!mSupportedFeatures.IsEnabled(feature)) {
++            continue;
++        }
++        bool keep = true;
++        for (const ProfileFeatureEntry& entry : kProfileStrippableFeatures) {
++            if (entry.feature == feature &&
++                caps.features.count(std::string(entry.name)) == 0) {
++                keep = false;
++                break;
++            }
++        }
++        if (keep) {
++            filtered.EnableFeature(feature);
++        } else {
++            changed = true;
++        }
++    }
++    if (changed) {
++        mSupportedFeatures = filtered;
++    }
++    if (!caps.vendor.empty()) {
++        mProfileVendor = caps.vendor;
++    }
++    if (!caps.architecture.empty()) {
++        mProfileArchitecture = caps.architecture;
++    }
++    if (caps.subgroup_min_size > 0) {
++        mProfileSubgroupMin = caps.subgroup_min_size;
++    }
++    if (caps.subgroup_max_size > 0) {
++        mProfileSubgroupMax = caps.subgroup_max_size;
++    }
++    // One call per reasoned-about limit: the smaller of the claim and the
++    // backend wins, so over-claiming is structurally impossible. Saturation
++    // keeps a profile value past uint32 from wrapping on the way down.
++    auto clampU32 = [&](uint32_t& member, const char* name) {
++        auto it = caps.limits.find(std::string(name));
++        if (it != caps.limits.end()) {
++            member = std::min(member, static_cast<uint32_t>(
++                                          std::min<uint64_t>(it->second, UINT32_MAX)));
++        }
++    };
++    auto clampU64 = [&](uint64_t& member, const char* name) {
++        auto it = caps.limits.find(std::string(name));
++        if (it != caps.limits.end()) {
++            member = std::min(member, it->second);
++        }
++    };
++    auto clampCompatU32 = [&](uint32_t& member, const char* name) {
++        auto it = caps.limits.find(std::string(name));
++        if (it != caps.limits.end()) {
++            member = std::min(member, static_cast<uint32_t>(
++                                          std::min<uint64_t>(it->second, UINT32_MAX)));
++        }
++    };
++    clampU64(mLimits.v1.maxBufferSize, "maxBufferSize");
++    clampU32(mLimits.v1.maxComputeInvocationsPerWorkgroup,
++             "maxComputeInvocationsPerWorkgroup");
++    clampU32(mLimits.v1.maxComputeWorkgroupSizeX, "maxComputeWorkgroupSizeX");
++    clampU32(mLimits.v1.maxComputeWorkgroupSizeY, "maxComputeWorkgroupSizeY");
++    clampU32(mLimits.v1.maxDynamicStorageBuffersPerPipelineLayout,
++             "maxDynamicStorageBuffersPerPipelineLayout");
++    clampU32(mLimits.v1.maxDynamicUniformBuffersPerPipelineLayout,
++             "maxDynamicUniformBuffersPerPipelineLayout");
++    clampU32(mLimits.v1.maxSampledTexturesPerShaderStage,
++             "maxSampledTexturesPerShaderStage");
++    clampU64(mLimits.v1.maxStorageBufferBindingSize, "maxStorageBufferBindingSize");
++    clampCompatU32(mLimits.compat.maxStorageBuffersInFragmentStage,
++                   "maxStorageBuffersInFragmentStage");
++    clampCompatU32(mLimits.compat.maxStorageBuffersInVertexStage,
++                   "maxStorageBuffersInVertexStage");
++    clampU32(mLimits.v1.maxStorageBuffersPerShaderStage,
++             "maxStorageBuffersPerShaderStage");
++    clampCompatU32(mLimits.compat.maxStorageTexturesInFragmentStage,
++                   "maxStorageTexturesInFragmentStage");
++    clampCompatU32(mLimits.compat.maxStorageTexturesInVertexStage,
++                   "maxStorageTexturesInVertexStage");
++    clampU32(mLimits.v1.maxStorageTexturesPerShaderStage,
++             "maxStorageTexturesPerShaderStage");
++    clampU32(mLimits.v1.maxVertexAttributes, "maxVertexAttributes");
++}
++
+ AdapterBase::~AdapterBase() = default;
+ 
+ void AdapterBase::SetUseTieredLimits(bool useTieredLimits) {
+@@ -110,6 +222,11 @@
+     if (!GetInstance()->HasFeature(wgpu::WGSLLanguageFeatureName::ImmediateAddressSpace)) {
+         mLimits.v1.maxImmediateSize = 0;
+     }
++
++    // Limits claimed by the profile were intersected at selection time, but
++    // this rebuilds from the backend and would erase them. There is nothing
++    // to re-read here without a base/ dependency Dawn does not have, so
++    // selection applies the profile after this instead.
+ }
+ 
+ const CombinedLimits& AdapterBase::GetLimits() const {
+@@ -168,8 +285,15 @@
+     mPhysicalDevice->PopulateBackendProperties(unpacked, mTogglesState);
+ 
+     // Allocate space for all strings.
+-    size_t allocSize = mPhysicalDevice->GetVendorName().length() +
+-                       mPhysicalDevice->GetArchitectureName().length() +
++    std::string vendor = mPhysicalDevice->GetVendorName();
++    std::string architecture = mPhysicalDevice->GetArchitectureName();
++    if (!mProfileVendor.empty()) {
++        vendor = mProfileVendor;
++    }
++    if (!mProfileArchitecture.empty()) {
++        architecture = mProfileArchitecture;
++    }
++    size_t allocSize = vendor.length() + architecture.length() +
+                        mPhysicalDevice->GetName().length() +
+                        mPhysicalDevice->GetDriverDescription().length();
+     absl::Span<char> outBuffer{new char[allocSize], allocSize};
+@@ -181,8 +305,8 @@
+         outBuffer = outBuffer.subspan(in.length());
+     };
+ 
+-    AddString(mPhysicalDevice->GetVendorName(), &info->vendor);
+-    AddString(mPhysicalDevice->GetArchitectureName(), &info->architecture);
++    AddString(vendor, &info->vendor);
++    AddString(architecture, &info->architecture);
+     AddString(mPhysicalDevice->GetName(), &info->device);
+     AddString(mPhysicalDevice->GetDriverDescription(), &info->description);
+     DAWN_CHECK(outBuffer.empty());
+@@ -193,6 +317,18 @@
+     info->deviceID = mPhysicalDevice->GetDeviceId();
+     info->subgroupMinSize = mPhysicalDevice->GetSubgroupMinSize();
+     info->subgroupMaxSize = mPhysicalDevice->GetSubgroupMaxSize();
++    if (mProfileSubgroupMin > 0) {
++        uint32_t claimed = std::min(info->subgroupMinSize, mProfileSubgroupMin);
++        if (claimed == 0 || IsPowerOfTwo(claimed)) {
++            info->subgroupMinSize = claimed;
++        }
++    }
++    if (mProfileSubgroupMax > 0) {
++        uint32_t claimed = std::min(info->subgroupMaxSize, mProfileSubgroupMax);
++        if (claimed == 0 || IsPowerOfTwo(claimed)) {
++            info->subgroupMaxSize = claimed;
++        }
++    }
+ 
+     if (mPhysicalDevice->GetBackendType() == wgpu::BackendType::D3D12 &&
+         mTogglesState.IsEnabled(Toggle::D3D12RelaxMinSubgroupSizeTo8)) {
+diff --git a/gpu/command_buffer/service/webgpu_decoder_impl.cc b/gpu/command_buffer/service/webgpu_decoder_impl.cc
+--- a/gpu/command_buffer/service/webgpu_decoder_impl.cc
++++ b/gpu/command_buffer/service/webgpu_decoder_impl.cc
+@@ -5,8 +5,10 @@
+ #include "gpu/command_buffer/service/webgpu_decoder_impl.h"
+ 
+ #include <algorithm>
++#include <map>
+ #include <memory>
+ #include <optional>
++#include <set>
+ #include <string_view>
+ #include <vector>
+ 
+@@ -1648,6 +1650,24 @@
+       safety_level_ == webgpu::SafetyLevel::kUnsafe ||
+       std::ranges::contains(require_disabled_toggles_, "adapter_blocklist"));
+ }
++// Intersect the enumerated adapter with the claimed device before the page
++// can read it. An empty feature set means the profile carries no webgpu
++// section and the adapter is left exactly as the backend built it.
++void ApplyProfileWebGPUAdapterCaps(dawn::native::Adapter& adapter) {
++  const auto* profile = base::apostate::Profile::Get();
++  if (!profile || profile->webgpu_features().empty()) {
++    return;
++  }
++  dawn::native::Adapter::ProfileAdapterCaps caps;
++  caps.features = profile->webgpu_features();
++  caps.vendor = profile->webgpu_vendor();
++  caps.architecture = profile->webgpu_architecture();
++  caps.subgroup_min_size = profile->webgpu_subgroup_min();
++  caps.subgroup_max_size = profile->webgpu_subgroup_max();
++  caps.limits = profile->webgpu_limits();
++  adapter.ApplyProfileAdapterCaps(caps);
++}
++
+ 
+ wgpu::Adapter WebGPUDecoderImpl::CreatePreferredAdapter(
+     wgpu::PowerPreference power_preference,
+@@ -1871,6 +1891,8 @@
+         continue;
+       }
+ 
++
++      ApplyProfileWebGPUAdapterCaps(native_adapter);
+       return wgpu::Adapter(native_adapter.Get());
+     }
+   }
+@@ -1886,6 +1908,8 @@
+       continue;
+     }
+ 
++
++    ApplyProfileWebGPUAdapterCaps(native_adapter);
+     return wgpu::Adapter(native_adapter.Get());
+   }
+ 

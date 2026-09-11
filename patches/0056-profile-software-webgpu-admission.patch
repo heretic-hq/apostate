@@ -1,0 +1,434 @@
+Subject: [PATCH] webgpu: admit an exclusive software provider for selected profiles
+
+Candidate conditional on safe Core and browser shared-image validation.
+For Windows/macOS profiles on an actual Linux ANGLE SwiftShader GL context,
+select only the bundled SwiftShader ICD through an exclusive native Dawn
+instance. Missing software cannot load a system ICD. Restrict library lookup
+to the caller's module directory; use existing pinned packaging provenance.
+
+Ignore only the CPUAdapter deployment reason for this verified factory and
+CPU identity. Keep other block reasons, actual identity, native limits,
+validation, robustness, cache isolation and shared-image error paths intact.
+No unsafe-WebGPU switch, new profile field, Mojo interface or accessor rewrite.
+Unprofiled and other runtime contexts retain their existing behavior.
+
+diff --git a/third_party/dawn/include/dawn/native/DawnNative.h b/third_party/dawn/include/dawn/native/DawnNative.h
+--- a/third_party/dawn/include/dawn/native/DawnNative.h
++++ b/third_party/dawn/include/dawn/native/DawnNative.h
+@@ -121,6 +121,10 @@
+ 
+     BackendValidationLevel backendValidationLevel = BackendValidationLevel::Disabled;
+     bool beginCaptureOnStartup = false;
++    // Native-only provider restriction. Requires one absolute POSIX directory
++    // in additionalRuntimeSearchPaths; no module/system fallback is appended.
++    // This does not enable unsafe APIs or change adapter features/limits.
++    bool onlyUseSwiftShader = false;
+ 
+     WGPULoggingCallbackInfo loggingCallbackInfo = WGPU_LOGGING_CALLBACK_INFO_INIT;
+ 
+diff --git a/third_party/dawn/src/dawn/native/DawnNative.cpp b/third_party/dawn/src/dawn/native/DawnNative.cpp
+--- a/third_party/dawn/src/dawn/native/DawnNative.cpp
++++ b/third_party/dawn/src/dawn/native/DawnNative.cpp
+@@ -132,9 +132,10 @@
+ bool DawnInstanceDescriptor::operator==(const DawnInstanceDescriptor& rhs) const {
+     return (nextInChain == rhs.nextInChain) &&
+            std::tie(additionalRuntimeSearchPathsCount, additionalRuntimeSearchPaths, platform,
+-                    backendValidationLevel, beginCaptureOnStartup) ==
++                    backendValidationLevel, beginCaptureOnStartup, onlyUseSwiftShader) ==
+                std::tie(rhs.additionalRuntimeSearchPathsCount, rhs.additionalRuntimeSearchPaths,
+-                        rhs.platform, rhs.backendValidationLevel, rhs.beginCaptureOnStartup);
++                        rhs.platform, rhs.backendValidationLevel, rhs.beginCaptureOnStartup,
++                        rhs.onlyUseSwiftShader);
+ }
+ 
+ // Instance
+diff --git a/third_party/dawn/src/dawn/native/Instance.h b/third_party/dawn/src/dawn/native/Instance.h
+--- a/third_party/dawn/src/dawn/native/Instance.h
++++ b/third_party/dawn/src/dawn/native/Instance.h
+@@ -136,6 +136,7 @@
+     bool HasFeature(wgpu::WGSLLanguageFeatureName feature) const;
+ 
+     const std::vector<std::string>& GetRuntimeSearchPaths() const;
++    bool IsSwiftShaderOnly() const { return mOnlyUseSwiftShader; }
+ 
+     const Ref<CallbackTaskManager>& GetCallbackTaskManager() const;
+     EventManager* GetEventManager();
+@@ -192,6 +193,7 @@
+     absl::flat_hash_set<std::string> mWarningMessages;
+ 
+     std::vector<std::string> mRuntimeSearchPaths;
++    bool mOnlyUseSwiftShader = false;
+ 
+     bool mBeginCaptureOnStartup = false;
+     BackendValidationLevel mBackendValidationLevel = BackendValidationLevel::Disabled;
+diff --git a/third_party/dawn/src/dawn/native/Instance.cpp b/third_party/dawn/src/dawn/native/Instance.cpp
+--- a/third_party/dawn/src/dawn/native/Instance.cpp
++++ b/third_party/dawn/src/dawn/native/Instance.cpp
+@@ -307,6 +307,7 @@
+ 
+         mBackendValidationLevel = dawnDesc->backendValidationLevel;
+         mBeginCaptureOnStartup = dawnDesc->beginCaptureOnStartup;
++        mOnlyUseSwiftShader = dawnDesc->onlyUseSwiftShader;
+ 
+         mLoggingCallbackInfo = dawnDesc->loggingCallbackInfo;
+     }
+@@ -314,15 +315,17 @@
+         mLoggingCallbackInfo = kDefaultLoggingCallbackInfo;
+     }
+ 
+-    // Default paths to search are next to the shared library, next to the executable, and
+-    // no path (just libvulkan.so).
+-    if (auto p = GetModuleDirectory()) {
+-        mRuntimeSearchPaths.push_back(std::move(*p));
+-    }
+-    if (auto p = GetExecutableDirectory()) {
+-        mRuntimeSearchPaths.push_back(std::move(*p));
+-    }
+-    mRuntimeSearchPaths.push_back("");
++    // The restricted provider uses only the caller's trusted directory.
++    // Ordinary instances retain the complete upstream search policy.
++    if (!mOnlyUseSwiftShader) {
++        if (auto p = GetModuleDirectory()) {
++            mRuntimeSearchPaths.push_back(std::move(*p));
++        }
++        if (auto p = GetExecutableDirectory()) {
++            mRuntimeSearchPaths.push_back(std::move(*p));
++        }
++        mRuntimeSearchPaths.push_back("");
++    }
+ 
+     mInstanceFeatures = {descriptor->requiredFeatures.begin(), descriptor->requiredFeatures.end()};
+ 
+@@ -524,7 +527,23 @@
+     DAWN_CHECK(options);
+ 
+     BackendsBitset backendsToFind;
+-    if (options.Has<RequestAdapterWebGPUBackendOptions>()) {
++    if (mOnlyUseSwiftShader) {
++        // Fail before loading any backend when provenance is incomplete. Keep
++        // the instance valid so callers receive normal adapter unavailability.
++        if (mRuntimeSearchPaths.size() != 1 || mRuntimeSearchPaths.front().empty() ||
++            mRuntimeSearchPaths.front().front() != '/' ||
++            mRuntimeSearchPaths.front().back() != '/') {
++            ConsumedErrorAndWarnOnce(DAWN_VALIDATION_ERROR(
++                "SwiftShader-only discovery requires one absolute directory."));
++            return {};
++        }
++        if (options.Has<RequestAdapterWebGPUBackendOptions>() ||
++            (options->backendType != wgpu::BackendType::Undefined &&
++             options->backendType != wgpu::BackendType::Vulkan)) {
++            return {};
++        }
++        backendsToFind.set(wgpu::BackendType::Vulkan);
++    } else if (options.Has<RequestAdapterWebGPUBackendOptions>()) {
+         // User is selecting WebGPU-on-WebGPU. Ignore the backendType, it will
+         // be passed through to the inner WebGPU implementation.
+         backendsToFind.set(wgpu::BackendType::WebGPU);
+diff --git a/third_party/dawn/src/dawn/native/vulkan/BackendVk.cpp b/third_party/dawn/src/dawn/native/vulkan/BackendVk.cpp
+--- a/third_party/dawn/src/dawn/native/vulkan/BackendVk.cpp
++++ b/third_party/dawn/src/dawn/native/vulkan/BackendVk.cpp
+@@ -580,6 +580,11 @@
+     };
+ 
+     for (ICD icd : kICDs) {
++        // Unlike forceFallbackAdapter alone, this cannot open a system ICD
++        // after software initialization fails or Core is unavailable.
++        if (instance->IsSwiftShaderOnly() && icd != ICD::SwiftShader) {
++            continue;
++        }
+ #if DAWN_PLATFORM_IS(MACOS)
+         // On Mac, we don't expect non-Swiftshader Vulkan to be available.
+         if (icd == ICD::None) {
+diff --git a/gpu/command_buffer/service/webgpu_decoder_impl.cc b/gpu/command_buffer/service/webgpu_decoder_impl.cc
+--- a/gpu/command_buffer/service/webgpu_decoder_impl.cc
++++ b/gpu/command_buffer/service/webgpu_decoder_impl.cc
+@@ -10,6 +10,7 @@
+ #include <string_view>
+ #include <vector>
+ 
++#include "base/apostate/profile.h"
+ #include "base/auto_reset.h"
+ #include "base/bits.h"
+ #include "base/compiler_specific.h"
+@@ -41,6 +42,7 @@
+ #include "gpu/command_buffer/service/decoder_client.h"
+ #include "gpu/command_buffer/service/graphite_utils.h"
+ #include "gpu/command_buffer/service/isolation_key_provider.h"
++#include "gpu/command_buffer/service/profile_software_webgpu_policy.h"
+ #include "gpu/command_buffer/service/shared_context_state.h"
+ #include "gpu/command_buffer/service/shared_image/shared_image_factory.h"
+ #include "gpu/command_buffer/service/shared_image/shared_image_format_service_utils.h"
+@@ -66,6 +68,7 @@
+ #include "third_party/skia/include/gpu/ganesh/SkSurfaceGanesh.h"
+ #include "third_party/skia/include/gpu/graphite/Context.h"
+ #include "ui/gl/gl_context_egl.h"
++#include "ui/gl/gl_implementation.h"
+ #include "ui/gl/gl_surface_egl.h"
+ 
+ #if BUILDFLAG(IS_WIN)
+@@ -426,6 +429,7 @@
+       WebGPUPowerPreference::kNone;
+   bool force_fallback_adapter_ = false;
+   bool webgpu_on_vk_gl_interop_ = false;
++  bool profile_software_webgpu_ = false;
+   bool force_webgpu_compat_ = false;
+   std::vector<std::string> require_enabled_toggles_;
+   std::vector<std::string> require_disabled_toggles_;
+@@ -1117,9 +1121,6 @@
+   if (gpu_preferences.enable_unsafe_webgpu) {
+     safety_level_ = webgpu::SafetyLevel::kUnsafe;
+   }
+-  dawn_instance_ = DawnInstance::Create(dawn_platform_.get(), gpu_preferences,
+-                                        safety_level_);
+-
+   use_webgpu_adapter_ = gpu_preferences.use_webgpu_adapter;
+   use_webgpu_power_preference_ = gpu_preferences.use_webgpu_power_preference;
+   webgpu_on_vk_gl_interop_ = gpu_preferences.enable_webgpu_on_vk_via_gl_interop;
+@@ -1146,6 +1147,30 @@
+   // adapter_limit_tiers toggle is explicitly disabled.
+   tiered_adapter_limits_ = !std::ranges::contains(require_disabled_toggles_,
+                                                   "tiered_adapter_limits");
++
++  dawn::native::DawnInstanceDescriptor provider_descriptor;
++#if BUILDFLAG(IS_LINUX)
++  if (const auto* profile = base::apostate::Profile::Get(); profile && profile->ua_platform()) {
++    profile_software_webgpu_ = CanUseProfileSoftwareWebGPU({
++        .platform = *profile->ua_platform(),
++        .angle_is_swiftshader = gl::GetANGLEImplementation() == gl::ANGLEImplementation::kSwiftShader,
++        .shared_context_is_gl = shared_context_state_ && shared_context_state_->GrContextIsGL(),
++        .safe = safety_level_ == SafetyLevel::kSafe,
++        .has_dawn_overrides = !require_enabled_toggles_.empty() ||
++                              !require_disabled_toggles_.empty() || !runtime_unsafe_features_.empty(),
++        .force_compat = force_webgpu_compat_,
++        .requested_adapter = use_webgpu_adapter_,
++    });
++  }
++#endif
++  provider_descriptor.onlyUseSwiftShader = profile_software_webgpu_;
++  if (profile_software_webgpu_) {
++    // Real CPU devices use the existing checked shared-image staging path.
++    // This changes selection/admission only, never identity or limits.
++    use_webgpu_adapter_ = WebGPUAdapterName::kSwiftShader;
++  }
++  dawn_instance_ = DawnInstance::Create(dawn_platform_.get(), gpu_preferences,
++                                      safety_level_, &provider_descriptor);
+ 
+   DawnProcTable wire_procs = dawn::native::GetProcs();
+   wire_procs.createInstance =
+@@ -1772,7 +1797,9 @@
+     wgpu::AdapterInfo adapter_info = {};
+     adapter.GetInfo(&adapter_info);
+ 
+-    if (use_blocklist() && IsWebGPUAdapterBlocklisted(adapter).blocked) {
++    const auto blocklist_options =
++        ProfileSoftwareWebGPUBlocklistOptions(profile_software_webgpu_, adapter_info);
++    if (use_blocklist() && IsWebGPUAdapterBlocklisted(adapter, blocklist_options).blocked) {
+       return false;
+     }
+ 
+diff --git a/gpu/command_buffer/service/BUILD.gn b/gpu/command_buffer/service/BUILD.gn
+--- a/gpu/command_buffer/service/BUILD.gn
++++ b/gpu/command_buffer/service/BUILD.gn
+@@ -350,6 +350,7 @@
+       "shared_image/dawn_image_backing.h",
+       "shared_image/dawn_image_backing_factory.cc",
+       "shared_image/dawn_image_backing_factory.h",
++      "profile_software_webgpu_policy.h",
+       "webgpu_decoder_impl.cc",
+       "webgpu_decoder_impl.h",
+     ]
+diff --git a/gpu/config/webgpu_blocklist_unittest.cc b/gpu/config/webgpu_blocklist_unittest.cc
+--- a/gpu/config/webgpu_blocklist_unittest.cc
++++ b/gpu/config/webgpu_blocklist_unittest.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "build/build_config.h"
+ #include "gpu/config/webgpu_blocklist_impl.h"
++#include "gpu/command_buffer/service/profile_software_webgpu_policy.h"
++#include "third_party/dawn/include/dawn/native/DawnNative.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ #include "third_party/dawn/include/dawn/webgpu.h"
+ #include "ui/gl/buildflags.h"
+@@ -204,4 +206,123 @@
+ }
+ #endif  // BUILDFLAG(IS_ANDROID) else
+ 
++#if BUILDFLAG(IS_LINUX)
++TEST(ProfileSoftwareWebGPUPolicyTest, RequiresProfileAndActualSoftwareContext) {
++  webgpu::ProfileSoftwareWebGPUContext context;
++  context.platform = "Windows";
++  context.angle_is_swiftshader = true;
++  context.shared_context_is_gl = true;
++  context.safe = true;
++  EXPECT_TRUE(webgpu::CanUseProfileSoftwareWebGPU(context));
++  context.platform = "macOS";
++  EXPECT_TRUE(webgpu::CanUseProfileSoftwareWebGPU(context));
++  for (const char* platform : {"", "Linux", "Android"}) {
++    context.platform = platform;
++    EXPECT_FALSE(webgpu::CanUseProfileSoftwareWebGPU(context));
++  }
++  context.platform = "Windows";
++  context.angle_is_swiftshader = false;
++  EXPECT_FALSE(webgpu::CanUseProfileSoftwareWebGPU(context));
++  context.angle_is_swiftshader = true;
++  context.shared_context_is_gl = false;
++  EXPECT_FALSE(webgpu::CanUseProfileSoftwareWebGPU(context));
++}
++
++TEST(ProfileSoftwareWebGPUPolicyTest, RetainsSafetyAndExplicitAdapterChoices) {
++  webgpu::ProfileSoftwareWebGPUContext context;
++  context.platform = "Windows";
++  context.angle_is_swiftshader = context.shared_context_is_gl = context.safe = true;
++  context.safe = false;
++  EXPECT_FALSE(webgpu::CanUseProfileSoftwareWebGPU(context));
++  context.safe = true;
++  context.has_dawn_overrides = true;
++  EXPECT_FALSE(webgpu::CanUseProfileSoftwareWebGPU(context));
++  context.has_dawn_overrides = false;
++  context.force_compat = true;
++  EXPECT_FALSE(webgpu::CanUseProfileSoftwareWebGPU(context));
++  context.force_compat = false;
++  for (auto adapter : {WebGPUAdapterName::kD3D11, WebGPUAdapterName::kOpenGLES}) {
++    context.requested_adapter = adapter;
++    EXPECT_FALSE(webgpu::CanUseProfileSoftwareWebGPU(context));
++  }
++  context.requested_adapter = WebGPUAdapterName::kSwiftShader;
++  EXPECT_TRUE(webgpu::CanUseProfileSoftwareWebGPU(context));
++}
++
++TEST(ProfileSoftwareWebGPUPolicyTest, OnlyApprovedCPUReasonIsIgnored) {
++  auto make_info = [](WGPUAdapterType type, uint32_t vendor) {
++    WGPUAdapterInfo raw = {};
++    raw.backendType = WGPUBackendType_Vulkan;
++    raw.adapterType = type;
++    raw.vendorID = vendor;
++    raw.deviceID = 0xc0de;
++    raw.description = {"", 0};
++    raw.architecture = {"", 0};
++    return raw;
++  };
++  // Match this file's existing C-ABI fixture pattern. Fully initialize each
++  // independent POD value before creating a read-only, layout-compatible view.
++  // No immutable C++ output object is mutated or made to own these strings.
++  auto view = [](const WGPUAdapterInfo& raw) -> const wgpu::AdapterInfo& {
++    return *reinterpret_cast<const wgpu::AdapterInfo*>(&raw);
++  };
++  const WGPUAdapterInfo approved = make_info(WGPUAdapterType_CPU, 0x1ae0);
++  const auto& info = view(approved);
++  auto denied = webgpu::ProfileSoftwareWebGPUBlocklistOptions(false, info);
++  EXPECT_EQ(denied.ignores, WebGPUBlocklistReason::None);
++  EXPECT_TRUE(gpu::IsWebGPUAdapterBlocklisted(info, denied).blocked);
++  auto admitted = webgpu::ProfileSoftwareWebGPUBlocklistOptions(true, info);
++  EXPECT_EQ(admitted.ignores, WebGPUBlocklistReason::CPUAdapter);
++  EXPECT_FALSE(gpu::IsWebGPUAdapterBlocklisted(info, admitted).blocked);
++  admitted.blocklist_string = "1ae0:c0de";
++  EXPECT_TRUE(gpu::IsWebGPUAdapterBlocklisted(info, admitted).blocked);
++  const WGPUAdapterInfo other_cpu = make_info(WGPUAdapterType_CPU, 0x1002);
++  EXPECT_EQ(webgpu::ProfileSoftwareWebGPUBlocklistOptions(true, view(other_cpu)).ignores,
++            WebGPUBlocklistReason::None);
++  const WGPUAdapterInfo physical = make_info(WGPUAdapterType_DiscreteGPU, 0x1ae0);
++  EXPECT_EQ(webgpu::ProfileSoftwareWebGPUBlocklistOptions(true, view(physical)).ignores,
++            WebGPUBlocklistReason::None);
++}
++
++TEST(ProfileSoftwareWebGPUPolicyTest, ExclusiveDescriptorParticipatesInIdentity) {
++  dawn::native::DawnInstanceDescriptor normal;
++  dawn::native::DawnInstanceDescriptor exclusive;
++  EXPECT_TRUE(normal == exclusive);
++  exclusive.onlyUseSwiftShader = true;
++  EXPECT_FALSE(normal == exclusive);
++}
++
++TEST(ProfileSoftwareWebGPUPolicyTest, InvalidExclusivePathsNeverDiscoverAdapters) {
++  const char* relative[] = {"relative/"};
++  const char* multiple[] = {"/first/", "/second/"};
++  for (unsigned variant : {0u, 1u, 2u}) {
++    dawn::native::DawnInstanceDescriptor native_desc;
++    native_desc.onlyUseSwiftShader = true;
++    native_desc.additionalRuntimeSearchPathsCount = variant;
++    native_desc.additionalRuntimeSearchPaths = variant == 1 ? relative : multiple;
++    wgpu::InstanceDescriptor desc;
++    desc.nextInChain = &native_desc;
++    dawn::native::Instance instance(&desc);
++    wgpu::RequestAdapterOptions options;
++    options.backendType = wgpu::BackendType::Vulkan;
++    options.forceFallbackAdapter = true;
++    EXPECT_TRUE(instance.EnumerateAdapters(&options).empty());
++  }
++}
++
++TEST(ProfileSoftwareWebGPUPolicyTest, ExclusiveInstanceCannotProbeOtherBackends) {
++  const char* paths[] = {"/not-probed/"};
++  dawn::native::DawnInstanceDescriptor native_desc;
++  native_desc.onlyUseSwiftShader = true;
++  native_desc.additionalRuntimeSearchPathsCount = 1;
++  native_desc.additionalRuntimeSearchPaths = paths;
++  wgpu::InstanceDescriptor desc;
++  desc.nextInChain = &native_desc;
++  dawn::native::Instance instance(&desc);
++  wgpu::RequestAdapterOptions options;
++  options.backendType = wgpu::BackendType::OpenGLES;
++  EXPECT_TRUE(instance.EnumerateAdapters(&options).empty());
++}
++#endif  // BUILDFLAG(IS_LINUX)
++
+ }  // namespace gpu
+diff --git a/gpu/apostate_dawn_software_check.cc b/gpu/apostate_dawn_software_check.cc
+--- a/gpu/apostate_dawn_software_check.cc
++++ b/gpu/apostate_dawn_software_check.cc
+@@ -384,6 +384,7 @@
+   native_desc.nextInChain = &toggles;
+   native_desc.additionalRuntimeSearchPathsCount = 1;
+   native_desc.additionalRuntimeSearchPaths = paths;
++  native_desc.onlyUseSwiftShader = true;
+   native_desc.backendValidationLevel = dawn::native::BackendValidationLevel::Full;
+   native_desc.SetLoggingCallback([](wgpu::LoggingType, wgpu::StringView message, State* state) {
+     std::lock_guard<std::mutex> lock(state->mutex);
+diff --git a/gpu/command_buffer/service/profile_software_webgpu_policy.h b/gpu/command_buffer/service/profile_software_webgpu_policy.h
+new file mode 100644
+--- /dev/null
++++ b/gpu/command_buffer/service/profile_software_webgpu_policy.h
+@@ -0,0 +1,43 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a BSD-style license.
++#ifndef GPU_COMMAND_BUFFER_SERVICE_PROFILE_SOFTWARE_WEBGPU_POLICY_H_
++#define GPU_COMMAND_BUFFER_SERVICE_PROFILE_SOFTWARE_WEBGPU_POLICY_H_
++
++#include <string_view>
++#include "gpu/config/gpu_preferences.h"
++#include "gpu/config/webgpu_blocklist_impl.h"
++#include "third_party/dawn/include/dawn/webgpu_cpp.h"
++
++namespace gpu::webgpu {
++struct ProfileSoftwareWebGPUContext {
++  std::string_view platform;
++  bool angle_is_swiftshader = false;
++  bool shared_context_is_gl = false;
++  bool safe = false;
++  bool has_dawn_overrides = false;
++  bool force_compat = false;
++  WebGPUAdapterName requested_adapter = WebGPUAdapterName::kDefault;
++};
++
++inline bool CanUseProfileSoftwareWebGPU(const ProfileSoftwareWebGPUContext& context) {
++  return (context.platform == "Windows" || context.platform == "macOS") &&
++         context.angle_is_swiftshader && context.shared_context_is_gl && context.safe &&
++         !context.has_dawn_overrides && !context.force_compat &&
++         (context.requested_adapter == WebGPUAdapterName::kDefault ||
++          context.requested_adapter == WebGPUAdapterName::kSwiftShader);
++}
++
++// The exclusive instance flag establishes factory/module-path provenance.
++// Numeric adapter identity is an additional check, never the sole authority.
++inline WebGPUBlocklistOptions ProfileSoftwareWebGPUBlocklistOptions(
++    bool exclusive_swiftshader_instance, const wgpu::AdapterInfo& info) {
++  WebGPUBlocklistOptions options;
++  if (exclusive_swiftshader_instance && info.backendType == wgpu::BackendType::Vulkan &&
++      info.adapterType == wgpu::AdapterType::CPU && info.vendorID == 0x1ae0 &&
++      info.deviceID == 0xc0de) {
++    options.ignores = WebGPUBlocklistReason::CPUAdapter;
++  }
++  return options;
++}
++}  // namespace gpu::webgpu
++#endif  // GPU_COMMAND_BUFFER_SERVICE_PROFILE_SOFTWARE_WEBGPU_POLICY_H_

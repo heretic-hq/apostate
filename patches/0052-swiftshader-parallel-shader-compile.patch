@@ -1,0 +1,97 @@
+Subject: [PATCH] angle: enable native parallel compile on Linux SwiftShader
+
+Vulkan leaves enableParallelCompileAndLink disabled by default, so its native
+KHR_parallel_shader_compile extension is absent even though compile/link jobs
+and nonblocking readiness queries are implemented. Enable the existing feature
+for desktop Linux SwiftShader only. Respect explicit feature overrides and
+retain all hardware, Windows, Android and ChromeOS defaults/workarounds.
+
+The Vulkan backend marks compile/link jobs thread-safe. ANGLE already runs
+parallel compilation and blob-cache configurations on SwiftShader. Retain
+normal job lifetime, failed-compile, cache and post-link warmup behavior; no
+extension string, completion result, WebGL accessor or profile field is added.
+
+Add a non-skipping Linux SwiftShader capability/functionality test for both
+synchronous and threaded hints, and failed-shader completion. Add an ES3
+SwiftShader instance alongside existing ES2 coverage. Existing recompile,
+context-destruction and drawing tests execute on this native path as well.
+
+Primary source at ANGLE7df613367a1d4ca9aea9ece344d4580d32d132a9:
+- include/platform/Feature.h:143 (default disabled)
+- src/libANGLE/renderer/vulkan/vk_caps_utils.cpp:1353 (native extension gate)
+- src/libANGLE/renderer/vulkan/vk_renderer.cpp:7242 (thread-safe jobs)
+- src/tests/test_utils/angle_test_instantiate.h:128-157 (SwiftShader coverage)
+- src/tests/gl_tests/BlobCacheTest.cpp:610 (parallel SwiftShader cache coverage)
+- src/tests/angle_end2end_tests_expectations.txt:1532 (Windows ASAN exclusion)
+
+Chromium79460ebecaa5625e57a5fb679a735659e73dc687:
+gpu/command_buffer/service/feature_info.cc:1526 requires passthrough decoding.
+References: unlabelled-20260910T140818Z and m4-max-chrome-20260908T163229Z,
+whose WebGL extension lists include KHR_parallel_shader_compile.
+V1, native tests and actual WebGL1/2 functional controls remain required.
+
+diff --git a/third_party/angle/src/libANGLE/renderer/vulkan/vk_renderer.cpp b/third_party/angle/src/libANGLE/renderer/vulkan/vk_renderer.cpp
+--- a/third_party/angle/src/libANGLE/renderer/vulkan/vk_renderer.cpp
++++ b/third_party/angle/src/libANGLE/renderer/vulkan/vk_renderer.cpp
+@@ -6498,6 +6498,11 @@
+     // which can be huge. zlib take long time to compress it.
+     ANGLE_FEATURE_CONDITION(&mFeatures, skipPipelineCacheSerialization, isSwiftShader || isNvidia);
+ 
++    // Use the existing thread-safe compile/link jobs on desktop Linux SwiftShader.
++    // Other platforms and drivers retain their existing feature policy.
++    ANGLE_FEATURE_CONDITION(&mFeatures, enableParallelCompileAndLink,
++                            IsLinux() && !IsAndroid() && !IsChromeOS() && isSwiftShader);
++
+     // Practically all drivers still prefer to do cross-stage linking.
+     // graphicsPipelineLibraryFastLinking allows them to quickly produce working pipelines, but it
+     // is typically not as efficient as complete pipelines.
+diff --git a/third_party/angle/src/tests/gl_tests/ParallelShaderCompileTest.cpp b/third_party/angle/src/tests/gl_tests/ParallelShaderCompileTest.cpp
+--- a/third_party/angle/src/tests/gl_tests/ParallelShaderCompileTest.cpp
++++ b/third_party/angle/src/tests/gl_tests/ParallelShaderCompileTest.cpp
+@@ -384,6 +384,35 @@
+     EXPECT_EQ(8, count);
+ }
+ 
++// Default software support must not turn into a silently skipped capability test.
++TEST_P(ParallelShaderCompileTest, DefaultSupportOnLinuxSwiftShader)
++{
++    ANGLE_SKIP_TEST_IF(!IsLinux() || IsAndroid() || IsChromeOS() || !isSwiftshader());
++    ASSERT_TRUE(EnsureGLExtensionEnabled("GL_KHR_parallel_shader_compile"));
++
++    // Both the synchronous hint and the threaded path must produce real programs.
++    for (GLuint count : {0u, 2u})
++    {
++        glMaxShaderCompilerThreadsKHR(count);
++        ASSERT_GL_NO_ERROR();
++        TaskRunner<ClearColorWithDraw> runner;
++        runner.run(this, kPollInterval);
++    }
++
++    // Completion is distinct from compilation success, including invalid input.
++    GLuint shader = glCreateShader(GL_FRAGMENT_SHADER);
++    const char *invalidSource = "this is not a valid shader";
++    glShaderSource(shader, 1, &invalidSource, nullptr);
++    glCompileShader(shader);
++    GLint status = GL_TRUE;
++    glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
++    EXPECT_EQ(GL_FALSE, status);
++    glGetShaderiv(shader, GL_COMPLETION_STATUS_KHR, &status);
++    EXPECT_EQ(GL_TRUE, status);
++    glDeleteShader(shader);
++    EXPECT_GL_NO_ERROR();
++}
++
+ // Test to compile and link many programs in parallel.
+ TEST_P(ParallelShaderCompileTest, LinkAndDrawManyPrograms)
+ {
+@@ -497,7 +526,9 @@
+     runner.run(this, kPollInterval);
+ }
+ 
+-ANGLE_INSTANTIATE_TEST_ES2(ParallelShaderCompileTest);
++ANGLE_INSTANTIATE_TEST(ParallelShaderCompileTest,
++                       ANGLE_ALL_TEST_PLATFORMS_ES2,
++                       ES3_VULKAN_SWIFTSHADER());
+ 
+ GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(ParallelShaderCompileTestES31);
+ ANGLE_INSTANTIATE_TEST_ES31(ParallelShaderCompileTestES31);

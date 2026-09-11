@@ -1,0 +1,59 @@
+Subject: [PATCH] content: Web Share follows the claimed platform, not the build
+
+navigator.share/canShare are compiled in on every platform, but chrome/
+only enables the WebShare runtime feature on Android, ChromeOS, Windows
+and macOS (chrome/renderer/chrome_content_renderer_client.cc,
+SetRuntimeFeaturesDefaultsBeforeBlinkInitialization: "to avoid it being
+made available in WebView or Linux"). A Linux build with a profile
+claiming Windows or macOS is therefore missing an interface the claimed
+device has, which the V3 prototype.shape probe reports.
+
+Same shape as patch 0025 for WebBluetooth: no json5 flip is needed
+because WebShare ships as status "test" and is reachable through
+EnableFeatureFromString. This decides it from the profile's claimed
+platform in SetCustomizedRuntimeFeaturesFromCombinedArgs. With no profile
+loaded nothing is touched and the build behaves as upstream says.
+
+Only API presence follows the profile. canShare() evaluates its
+arguments locally in Blink; share() still goes through the platform
+ShareService, which has no Linux implementation, so invoking it on Linux
+rejects exactly as a stock Linux build with the feature forced on would.
+Nothing is spoofed: the capability the reference exposes is the API the
+reference ships.
+
+Ledger: api.webshare-presence.
+diff --git a/content/child/runtime_features.cc b/content/child/runtime_features.cc
+--- a/content/child/runtime_features.cc
++++ b/content/child/runtime_features.cc
+@@ -496,6 +496,31 @@ void SetCustomizedRuntimeFeaturesFromCombinedArgs(
+     }
+   }
+ 
++  // Web Share follows the platform the profile claims, not the platform we
++  // built for. Same shape as the WebBluetooth block above (patch 0025).
++  //
++  // navigator.share/canShare are compiled in everywhere, but chrome/ enables
++  // the WebShare runtime feature only on Android, ChromeOS, Windows and macOS
++  // (chrome/renderer/chrome_content_renderer_client.cc: "to avoid it being
++  // made available in WebView or Linux"). A profile claiming Windows or macOS
++  // would otherwise be missing an interface the claimed device has.
++  //
++  // No json5 flip is needed: WebShare ships as status "test", reachable via
++  // EnableFeatureFromString, and this decides it from the claimed platform.
++  // With no profile loaded nothing is touched.
++  {
++    bool share = false;
++    if (const base::apostate::Profile* profile =
++            base::apostate::Profile::Get()) {
++      if (const std::optional<std::string>& claimed = profile->ua_platform()) {
++        share = (*claimed == "Windows" || *claimed == "macOS");
++      }
++    }
++    if (share) {
++      blink::WebRuntimeFeatures::EnableFeatureFromString("WebShare", true);
++    }
++  }
++
+ #if BUILDFLAG(IS_ANDROID)
+   if (base::android::android_info::sdk_int() <
+       base::android::android_info::SDK_VERSION_P) {

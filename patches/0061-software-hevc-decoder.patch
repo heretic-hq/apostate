@@ -1,0 +1,418 @@
+diff --git a/media/base/supported_types.cc b/media/base/supported_types.cc
+--- a/media/base/supported_types.cc
++++ b/media/base/supported_types.cc
+@@ -17,6 +17,12 @@
+ #include "media/media_buildflags.h"
+ #include "media/mojo/buildflags.h"
+ #include "ui/gfx/hdr_metadata.h"
++
++#if BUILDFLAG(ENABLE_FFMPEG_VIDEO_DECODERS) && BUILDFLAG(USE_PROPRIETARY_CODECS)
++extern "C" {
++#include "third_party/ffmpeg/libavcodec/avcodec.h"
++}
++#endif
+ 
+ #if BUILDFLAG(ENABLE_LIBVPX)
+ // TODO(dalecurtis): This technically should not be allowed in media/base. See
+@@ -234,6 +240,11 @@
+   }
+ 
+ #if BUILDFLAG(ENABLE_PLATFORM_HEVC)
++  if ((type.profile == HEVCPROFILE_MAIN ||
++       type.profile == HEVCPROFILE_MAIN10) &&
++      IsDecoderBuiltInVideoCodec(VideoCodec::kHEVC)) {
++    return true;
++  }
+ #if BUILDFLAG(PLATFORM_HAS_OPTIONAL_HEVC_DECODE_SUPPORT)
+ #if BUILDFLAG(IS_CHROMEOS)
+   if (!base::FeatureList::IsEnabled(kPlatformHEVCDecoderSupport)) {
+@@ -591,6 +602,13 @@
+   if (codec == VideoCodec::kH264) {
+     return true;
+   }
++#if BUILDFLAG(ENABLE_PLATFORM_HEVC)
++  if (codec == VideoCodec::kHEVC) {
++    // Query the registered implementation: other FFmpeg target
++    // configurations may still omit this software decoder.
++    return avcodec_find_decoder(AV_CODEC_ID_HEVC) != nullptr;
++  }
++#endif
+ #endif  // BUILDFLAG(ENABLE_FFMPEG_VIDEO_DECODERS) &&
+         // BUILDFLAG(USE_PROPRIETARY_CODECS)
+ #if BUILDFLAG(ENABLE_LIBVPX)
+diff --git a/media/ffmpeg/ffmpeg_common.cc b/media/ffmpeg/ffmpeg_common.cc
+--- a/media/ffmpeg/ffmpeg_common.cc
++++ b/media/ffmpeg/ffmpeg_common.cc
+@@ -69,6 +69,11 @@
+ const char* GetAllowedVideoDecoders() {
+   // This should match the configured lists in //third_party/ffmpeg.
+ #if BUILDFLAG(USE_PROPRIETARY_CODECS) && BUILDFLAG(ENABLE_FFMPEG_VIDEO_DECODERS)
++#if BUILDFLAG(ENABLE_PLATFORM_HEVC)
++  if (avcodec_find_decoder(AV_CODEC_ID_HEVC)) {
++    return "h264,hevc";
++  }
++#endif
+   return "h264";
+ #else
+   return "";
+diff --git a/media/ffmpeg/scripts/build_ffmpeg.py b/media/ffmpeg/scripts/build_ffmpeg.py
+--- a/media/ffmpeg/scripts/build_ffmpeg.py
++++ b/media/ffmpeg/scripts/build_ffmpeg.py
+@@ -995,6 +995,11 @@
+         '--enable-parser=aac,h264',
+     ])
+ 
++    if target_os == 'linux' and target_arch == 'x64':
++        configure_flags['Chrome'].extend([
++            '--enable-decoder=hevc', '--enable-parser=hevc',
++        ])
++
+     configure_flags['ChromeAndroid'].extend([
+         '--enable-demuxer=aac',
+         '--enable-parser=aac',
+diff --git a/media/filters/ffmpeg_video_decoder.cc b/media/filters/ffmpeg_video_decoder.cc
+--- a/media/filters/ffmpeg_video_decoder.cc
++++ b/media/filters/ffmpeg_video_decoder.cc
+@@ -73,7 +73,6 @@
+     case VideoCodec::kUnknown:
+     case VideoCodec::kVC1:
+     case VideoCodec::kMPEG2:
+-    case VideoCodec::kHEVC:
+     case VideoCodec::kVP9:
+     case VideoCodec::kAV1:
+     case VideoCodec::kDolbyVision:
+@@ -84,6 +83,7 @@
+       NOTREACHED();
+ 
+     case VideoCodec::kH264:
++    case VideoCodec::kHEVC:
+       // Normalize to three threads for 1080p content, then scale linearly
+       // with number of pixels.
+       // Examples:
+@@ -117,8 +117,8 @@
+ 
+ // static
+ bool FFmpegVideoDecoder::IsCodecSupported(VideoCodec codec) {
+-  // We only build support for H.264.
+-  return codec == VideoCodec::kH264 && IsDecoderBuiltInVideoCodec(codec);
++  return (codec == VideoCodec::kH264 || codec == VideoCodec::kHEVC) &&
++         IsDecoderBuiltInVideoCodec(codec);
+ }
+ 
+ FFmpegVideoDecoder::FFmpegVideoDecoder(std::unique_ptr<MediaLog> media_log)
+@@ -262,7 +262,11 @@
+     return;
+   }
+ 
+-  if (!IsCodecSupported(config.codec()) ||
++  const bool unsupported_hevc_profile =
++      config.codec() == VideoCodec::kHEVC &&
++      config.profile() != HEVCPROFILE_MAIN &&
++      config.profile() != HEVCPROFILE_MAIN10;
++  if (!IsCodecSupported(config.codec()) || unsupported_hevc_profile ||
+       !ConfigureDecoder(config, low_delay)) {
+     std::move(bound_init_cb).Run(DecoderStatus::Codes::kUnsupportedConfig);
+     return;
+diff --git a/media/filters/ffmpeg_video_decoder_unittest.cc b/media/filters/ffmpeg_video_decoder_unittest.cc
+--- a/media/filters/ffmpeg_video_decoder_unittest.cc
++++ b/media/filters/ffmpeg_video_decoder_unittest.cc
+@@ -25,6 +25,7 @@
+ #include "media/base/media_util.h"
+ #include "media/base/mock_filters.h"
+ #include "media/base/mock_media_log.h"
++#include "media/base/supported_types.h"
+ #include "media/base/test_data_util.h"
+ #include "media/base/test_helpers.h"
+ #include "media/base/video_decoder.h"
+@@ -81,19 +82,22 @@
+     InitializeWithConfig(TestVideoConfig::Normal(VideoCodec::kH264));
+   }
+ 
+-  void InitializeWithConfigWithResult(const VideoDecoderConfig& config,
++  bool InitializeWithConfigWithResult(const VideoDecoderConfig& config,
+                                       bool success) {
++    bool initialized = false;
+     decoder_->Initialize(
+         config, false, nullptr,
+         base::BindOnce(
+-            [](bool success, DecoderStatus status) {
+-              EXPECT_EQ(status.is_ok(), success);
++            [](bool success, bool* initialized, DecoderStatus status) {
++              *initialized = status.is_ok();
++              EXPECT_EQ(*initialized, success);
+             },
+-            success),
++            success, &initialized),
+         base::BindRepeating(&FFmpegVideoDecoderTest::FrameReady,
+                             base::Unretained(this)),
+         base::NullCallback());
+     base::RunLoop().RunUntilIdle();
++    return initialized;
+   }
+ 
+   void InitializeWithConfig(const VideoDecoderConfig& config) {
+@@ -195,6 +199,65 @@
+   OutputFrames output_frames_;
+ };
+ 
++
++TEST_F(FFmpegVideoDecoderTest, HevcSupportRequiresRegisteredDecoder) {
++  const bool registered = avcodec_find_decoder(AV_CODEC_ID_HEVC) != nullptr;
++  EXPECT_EQ(IsDecoderBuiltInVideoCodec(VideoCodec::kHEVC), registered);
++  EXPECT_EQ(FFmpegVideoDecoder::IsCodecSupported(VideoCodec::kHEVC), registered);
++  for (auto profile : {HEVCPROFILE_MAIN, HEVCPROFILE_MAIN10}) {
++    VideoDecoderConfig config(VideoCodec::kHEVC, profile,
++                              VideoDecoderConfig::AlphaMode::kIsOpaque,
++                              VideoColorSpace(), kNoTransformation, kCodedSize,
++                              kVisibleRect, kNaturalSize, EmptyExtraData(),
++                              EncryptionScheme::kUnencrypted);
++    InitializeWithConfigWithResult(config, registered);
++  }
++}
++
++TEST_F(FFmpegVideoDecoderTest, HevcUnsupportedProfileRemainsRejected) {
++  VideoDecoderConfig config(VideoCodec::kHEVC, HEVCPROFILE_REXT,
++                            VideoDecoderConfig::AlphaMode::kIsOpaque,
++                            VideoColorSpace(), kNoTransformation, kCodedSize,
++                            kVisibleRect, kNaturalSize, EmptyExtraData(),
++                            EncryptionScheme::kUnencrypted);
++  InitializeWithConfigWithResult(config, false);
++}
++
++TEST_F(FFmpegVideoDecoderTest, HevcEncryptedInputRemainsRejected) {
++  VideoDecoderConfig config(VideoCodec::kHEVC, HEVCPROFILE_MAIN,
++                            VideoDecoderConfig::AlphaMode::kIsOpaque,
++                            VideoColorSpace(), kNoTransformation, kCodedSize,
++                            kVisibleRect, kNaturalSize, EmptyExtraData(),
++                            EncryptionScheme::kCenc);
++  InitializeWithConfigWithResult(config, false);
++}
++
++TEST_F(FFmpegVideoDecoderTest, HevcMain10DecodeAndReset) {
++  VideoDecoderConfig config(VideoCodec::kHEVC, HEVCPROFILE_MAIN10,
++                            VideoDecoderConfig::AlphaMode::kIsOpaque,
++                            VideoColorSpace(), kNoTransformation, kCodedSize,
++                            kVisibleRect, kNaturalSize, EmptyExtraData(),
++                            EncryptionScheme::kUnencrypted);
++  const bool registered = avcodec_find_decoder(AV_CODEC_ID_HEVC) != nullptr;
++  RecordProperty("hevc_decoder_registered", registered);
++  const bool initialized = InitializeWithConfigWithResult(config, registered);
++  ASSERT_EQ(initialized, registered);
++  if (!registered) {
++    // This target configuration has no HEVC implementation to exercise.
++    EXPECT_FALSE(FFmpegVideoDecoder::IsCodecSupported(VideoCodec::kHEVC));
++    return;
++  }
++  auto frame = ReadTestDataFile("bear-320x180-10bit-frame-0.hevc");
++  for (int pass = 0; pass < 2; ++pass) {
++    ASSERT_TRUE(DecodeSingleFrame(frame).is_ok());
++    ASSERT_EQ(output_frames_.size(), 1u);
++    EXPECT_EQ(output_frames_.front()->format(), PIXEL_FORMAT_YUV420P10);
++    EXPECT_EQ(output_frames_.front()->visible_rect(), kVisibleRect);
++    output_frames_.clear();
++    Reset();
++  }
++}
++
+ TEST_F(FFmpegVideoDecoderTest, Initialize_Normal) {
+   Initialize();
+ }
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config.asm b/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config.asm
+--- a/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config.asm
++++ b/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config.asm
+@@ -720,7 +720,7 @@
+ %define CONFIG_AUDIO_FRAME_QUEUE 0
+ %define CONFIG_AUDIODSP 0
+ %define CONFIG_BLOCKDSP 0
+-%define CONFIG_BSWAPDSP 0
++%define CONFIG_BSWAPDSP 1
+ %define CONFIG_CABAC 1
+ %define CONFIG_CBS 0
+ %define CONFIG_CBS_APV 0
+@@ -763,8 +763,8 @@
+ %define CONFIG_H264PRED 1
+ %define CONFIG_H264QPEL 1
+ %define CONFIG_H264_SEI 1
+-%define CONFIG_HEVCPARSE 0
+-%define CONFIG_HEVC_SEI 0
++%define CONFIG_HEVCPARSE 1
++%define CONFIG_HEVC_SEI 1
+ %define CONFIG_HPELDSP 0
+ %define CONFIG_HUFFMAN 0
+ %define CONFIG_HUFFYUVDSP 0
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config.h b/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config.h
+--- a/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config.h
++++ b/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config.h
+@@ -1,7 +1,7 @@
+ /* Automatically generated by configure - do not modify! */
+ #ifndef FFMPEG_CONFIG_H
+ #define FFMPEG_CONFIG_H
+-/* #define FFMPEG_CONFIGURATION "--disable-everything --disable-all --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages --disable-static --enable-avcodec --enable-avformat --enable-avutil --enable-static --enable-libopus --disable-debug --disable-bzlib --disable-error-resilience --disable-iconv --disable-network --disable-schannel --disable-sdl2 --disable-symver --disable-xlib --disable-zlib --disable-securetransport --disable-faan --disable-alsa --disable-iamf --disable-checkasm --disable-autodetect --enable-decoder='vorbis,libopus,flac' --enable-decoder='pcm_u8,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,mp3' --enable-decoder='pcm_s16be,pcm_s24be,pcm_mulaw,pcm_alaw' --enable-demuxer='ogg,matroska,wav,flac,mp3,mov' --enable-parser='opus,vorbis,flac,mpegaudio,vp9' --extra-cflags=-I/usr/local/google/home/ezemtsov/projects/chrome/src/third_party/opus/src/include --disable-linux-perf --x86asmexe=nasm --optflags='\"-O2\"' --enable-lto --arch=x86_64 --target-os=linux --enable-pic --cc=clang --cxx=clang++ --ld=clang --extra-ldflags='-fuse-ld=lld' --enable-decoder='aac,h264' --enable-demuxer=aac --enable-parser='aac,h264'" -- elide long configuration string from binary */
++/* #define FFMPEG_CONFIGURATION "--disable-everything --disable-all --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages --disable-static --enable-avcodec --enable-avformat --enable-avutil --enable-static --enable-libopus --disable-debug --disable-bzlib --disable-error-resilience --disable-iconv --disable-network --disable-schannel --disable-sdl2 --disable-symver --disable-xlib --disable-zlib --disable-securetransport --disable-faan --disable-alsa --disable-iamf --disable-checkasm --disable-autodetect --enable-decoder='vorbis,libopus,flac' --enable-decoder='pcm_u8,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,mp3' --enable-decoder='pcm_s16be,pcm_s24be,pcm_mulaw,pcm_alaw' --enable-demuxer='ogg,matroska,wav,flac,mp3,mov' --enable-parser='opus,vorbis,flac,mpegaudio,vp9' --extra-cflags=-I/usr/local/google/home/ezemtsov/projects/chrome/src/third_party/opus/src/include --disable-linux-perf --x86asmexe=nasm --optflags='\"-O2\"' --enable-lto --arch=x86_64 --target-os=linux --enable-pic --cc=clang --cxx=clang++ --ld=clang --extra-ldflags='-fuse-ld=lld' --enable-decoder='aac,h264' --enable-demuxer=aac --enable-parser='aac,h264' --enable-decoder=hevc --enable-parser=hevc" -- elide long configuration string from binary */
+ #define FFMPEG_LICENSE "LGPL version 2.1 or later"
+ #define CONFIG_THIS_YEAR 2026
+ #define FFMPEG_DATADIR "/usr/local/share/ffmpeg"
+@@ -734,7 +734,7 @@
+ #define CONFIG_AUDIO_FRAME_QUEUE 0
+ #define CONFIG_AUDIODSP 0
+ #define CONFIG_BLOCKDSP 0
+-#define CONFIG_BSWAPDSP 0
++#define CONFIG_BSWAPDSP 1
+ #define CONFIG_CABAC 1
+ #define CONFIG_CBS 0
+ #define CONFIG_CBS_APV 0
+@@ -777,8 +777,8 @@
+ #define CONFIG_H264PRED 1
+ #define CONFIG_H264QPEL 1
+ #define CONFIG_H264_SEI 1
+-#define CONFIG_HEVCPARSE 0
+-#define CONFIG_HEVC_SEI 0
++#define CONFIG_HEVCPARSE 1
++#define CONFIG_HEVC_SEI 1
+ #define CONFIG_HPELDSP 0
+ #define CONFIG_HUFFMAN 0
+ #define CONFIG_HUFFYUVDSP 0
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config_components.asm b/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config_components.asm
+--- a/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config_components.asm
++++ b/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config_components.asm
+@@ -142,7 +142,7 @@
+ %define CONFIG_H264_QSV_DECODER 0
+ %define CONFIG_H264_RKMPP_DECODER 0
+ %define CONFIG_HAP_DECODER 0
+-%define CONFIG_HEVC_DECODER 0
++%define CONFIG_HEVC_DECODER 1
+ %define CONFIG_HEVC_QSV_DECODER 0
+ %define CONFIG_HEVC_RKMPP_DECODER 0
+ %define CONFIG_HEVC_V4L2M2M_DECODER 0
+@@ -1048,7 +1048,7 @@
+ %define CONFIG_H261_PARSER 0
+ %define CONFIG_H263_PARSER 0
+ %define CONFIG_H264_PARSER 1
+-%define CONFIG_HEVC_PARSER 0
++%define CONFIG_HEVC_PARSER 1
+ %define CONFIG_HDR_PARSER 0
+ %define CONFIG_IPU_PARSER 0
+ %define CONFIG_JPEG2000_PARSER 0
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config_components.h b/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config_components.h
+--- a/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config_components.h
++++ b/third_party/ffmpeg/chromium/config/Chrome/linux/x64/config_components.h
+@@ -144,7 +144,7 @@
+ #define CONFIG_H264_QSV_DECODER 0
+ #define CONFIG_H264_RKMPP_DECODER 0
+ #define CONFIG_HAP_DECODER 0
+-#define CONFIG_HEVC_DECODER 0
++#define CONFIG_HEVC_DECODER 1
+ #define CONFIG_HEVC_QSV_DECODER 0
+ #define CONFIG_HEVC_RKMPP_DECODER 0
+ #define CONFIG_HEVC_V4L2M2M_DECODER 0
+@@ -1050,7 +1050,7 @@
+ #define CONFIG_H261_PARSER 0
+ #define CONFIG_H263_PARSER 0
+ #define CONFIG_H264_PARSER 1
+-#define CONFIG_HEVC_PARSER 0
++#define CONFIG_HEVC_PARSER 1
+ #define CONFIG_HDR_PARSER 0
+ #define CONFIG_IPU_PARSER 0
+ #define CONFIG_JPEG2000_PARSER 0
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/linux/x64/libavcodec/codec_list.c b/third_party/ffmpeg/chromium/config/Chrome/linux/x64/libavcodec/codec_list.c
+--- a/third_party/ffmpeg/chromium/config/Chrome/linux/x64/libavcodec/codec_list.c
++++ b/third_party/ffmpeg/chromium/config/Chrome/linux/x64/libavcodec/codec_list.c
+@@ -1,5 +1,6 @@
+ static const FFCodec * const codec_list[] = {
+     &ff_h264_decoder,
++    &ff_hevc_decoder,
+     &ff_aac_decoder,
+     &ff_flac_decoder,
+     &ff_mp3_decoder,
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/linux/x64/libavcodec/parser_list.c b/third_party/ffmpeg/chromium/config/Chrome/linux/x64/libavcodec/parser_list.c
+--- a/third_party/ffmpeg/chromium/config/Chrome/linux/x64/libavcodec/parser_list.c
++++ b/third_party/ffmpeg/chromium/config/Chrome/linux/x64/libavcodec/parser_list.c
+@@ -2,6 +2,7 @@
+     &ff_aac_parser,
+     &ff_flac_parser,
+     &ff_h264_parser,
++    &ff_hevc_parser,
+     &ff_mpegaudio_parser,
+     &ff_opus_parser,
+     &ff_vorbis_parser,
+diff --git a/third_party/ffmpeg/ffmpeg_generated.gni b/third_party/ffmpeg/ffmpeg_generated.gni
+--- a/third_party/ffmpeg/ffmpeg_generated.gni
++++ b/third_party/ffmpeg/ffmpeg_generated.gni
+@@ -596,3 +596,49 @@
+     (is_android && current_cpu == "x86")) {
+   ffmpeg_c_sources += [ "compat/strtod.c" ]
+ }
++
++# Generated from real baseline/HEVC builds; other target sets are retained.
++if (ffmpeg_branding == "Chrome" && current_cpu == "x64" && os_config == "linux") {
++  ffmpeg_c_sources += [
++    "libavcodec/bswapdsp.c",
++    "libavcodec/hevc/autorename_libavcodec_hevc_cabac.c",
++    "libavcodec/hevc/autorename_libavcodec_hevc_parse.c",
++    "libavcodec/hevc/autorename_libavcodec_hevc_parser.c",
++    "libavcodec/hevc/data.c",
++    "libavcodec/hevc/dsp.c",
++    "libavcodec/hevc/filter.c",
++    "libavcodec/hevc/hevcdec.c",
++    "libavcodec/hevc/mvs.c",
++    "libavcodec/hevc/pred.c",
++    "libavcodec/hevc/ps.c",
++    "libavcodec/hevc/refs.c",
++    "libavcodec/hevc/sei.c",
++    "libavcodec/x86/bswapdsp_init.c",
++    "libavcodec/x86/h26x/h2656dsp.c",
++    "libavcodec/x86/hevc/dsp_init.c",
++  ]
++  ffmpeg_asm_sources += [
++    "libavcodec/x86/autorename_libavcodec_x86_bswapdsp.asm",
++    "libavcodec/x86/h26x/h2656_inter.asm",
++    "libavcodec/x86/hevc/add_res.asm",
++    "libavcodec/x86/hevc/deblock.asm",
++    "libavcodec/x86/hevc/dequant.asm",
++    "libavcodec/x86/hevc/idct.asm",
++    "libavcodec/x86/hevc/mc.asm",
++    "libavcodec/x86/hevc/sao.asm",
++    "libavcodec/x86/hevc/sao_10bit.asm",
++  ]
++  ffmpeg_c_deps += [
++    "libavcodec/hevc/cabac.c",
++    "libavcodec/hevc/parse.c",
++    "libavcodec/hevc/parser.c",
++  ]
++  ffmpeg_asm_deps += [
++    "libavcodec/x86/bswapdsp.asm",
++  ]
++  ffmpeg_asm_include_dirs += [
++    "//third_party/ffmpeg/libavcodec/x86",
++    "//third_party/ffmpeg/libavcodec/x86/h26x",
++    "//third_party/ffmpeg/libavcodec/x86/hevc",
++  ]
++}
+diff --git a/third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_cabac.c b/third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_cabac.c
+new file mode 100644
+--- /dev/null
++++ b/third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_cabac.c
+@@ -0,0 +1,2 @@
++// Generated by export-hevc-ffmpeg-delta.py from pinned FFmpeg objects.
++#include "../../third_party/ffmpeg/libavcodec/hevc/cabac.c"
+diff --git a/third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_parse.c b/third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_parse.c
+new file mode 100644
+--- /dev/null
++++ b/third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_parse.c
+@@ -0,0 +1,2 @@
++// Generated by export-hevc-ffmpeg-delta.py from pinned FFmpeg objects.
++#include "../../third_party/ffmpeg/libavcodec/hevc/parse.c"
+diff --git a/third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_parser.c b/third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_parser.c
+new file mode 100644
+--- /dev/null
++++ b/third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_parser.c
+@@ -0,0 +1,2 @@
++// Generated by export-hevc-ffmpeg-delta.py from pinned FFmpeg objects.
++#include "../../third_party/ffmpeg/libavcodec/hevc/parser.c"
+diff --git a/third_party/ffmpeg/libavcodec/x86/autorename_libavcodec_x86_bswapdsp.asm b/third_party/ffmpeg/libavcodec/x86/autorename_libavcodec_x86_bswapdsp.asm
+new file mode 100644
+--- /dev/null
++++ b/third_party/ffmpeg/libavcodec/x86/autorename_libavcodec_x86_bswapdsp.asm
+@@ -0,0 +1,2 @@
++; Generated by export-hevc-ffmpeg-delta.py from pinned FFmpeg objects.
++%include "../../third_party/ffmpeg/libavcodec/x86/bswapdsp.asm"

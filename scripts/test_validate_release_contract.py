@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Focused tests for the shared launch and release contract validator."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+VALID_SIGNATURE = "A" * 86 + "=="
+
+
+def run_validator(kind: str, value: dict[str, object]) -> subprocess.CompletedProcess[str]:
+    with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8") as stream:
+        json.dump(value, stream)
+        stream.flush()
+        return subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "validate-release-contract.py"), "--kind", kind, stream.name],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+
+class ContractValidatorTests(unittest.TestCase):
+    def test_schema_documents_validate_without_being_treated_as_data(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "validate-release-contract.py"), "--check-schemas"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_launch_accepts_integer_and_string_seed(self) -> None:
+        for fingerprint in (17, "stable-seed"):
+            result = run_validator(
+                "launch",
+                {
+                    "fingerprint": fingerprint,
+                    "fingerprint_platform": "macos",
+                    "profile": None,
+                    "locale": None,
+                    "timezone": None,
+                    "geoip": False,
+                    "proxy": None,
+                    "headless": True,
+                    "user_data_dir": None,
+                    "args": [],
+                },
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_launch_rejects_unknown_fields(self) -> None:
+        value = {
+            "fingerprint": "stable-seed",
+            "fingerprint_platform": "macos",
+            "profile": None,
+            "locale": None,
+            "timezone": None,
+            "geoip": False,
+            "proxy": None,
+            "headless": True,
+            "user_data_dir": None,
+            "args": [],
+            "unexpected": True,
+        }
+        self.assertNotEqual(run_validator("launch", value).returncode, 0)
+
+    def test_manifest_requires_padded_ed25519_signature(self) -> None:
+        value = {
+            "package_version": "0.1.0",
+            "chromium_version": "152.0.7977.83",
+            "catalogue_version": 1,
+            "platform": "linux-x64",
+            "artifact": "apostate-152.0.7977.83-linux-x64.tar.zst",
+            "sha256": "a" * 64,
+            "signature": VALID_SIGNATURE,
+            "source_revision": "b" * 40,
+            "patch_series_sha256": "c" * 64,
+            "build_manifest_sha256": "d" * 64,
+        }
+        self.assertEqual(run_validator("manifest", value).returncode, 0)
+        value["signature"] = "ed25519:" + ("a" * 86)
+        self.assertNotEqual(run_validator("manifest", value).returncode, 0)
+
+
+    def test_profile_contains_requires_exactly_one_primary_display(self) -> None:
+        display = {
+            "left": 0, "top": 0, "width": 1920, "height": 1080,
+            "avail_width": 1920, "avail_height": 1040, "device_pixel_ratio": 1,
+            "color_depth": 24, "is_primary": True, "is_internal": True, "label": "Built-in",
+        }
+        base = {"screen": {"displays": [display]}}
+        self.assertEqual(run_validator("profile", base).returncode, 0)
+        no_primary = dict(base)
+        no_primary["screen"] = {"displays": [{**display, "is_primary": False}]}
+        self.assertNotEqual(run_validator("profile", no_primary).returncode, 0)
+        two_primary = dict(base)
+        two_primary["screen"] = {"displays": [display, {**display, "left": 1920, "is_primary": True}]}
+        self.assertNotEqual(run_validator("profile", two_primary).returncode, 0)
+
+    def test_profile_property_names_and_exclusive_minimum_are_enforced(self) -> None:
+        invalid_name = {"gl_precisions": {"not-a-gl-key": {"rangeMin": 1, "rangeMax": 1, "precision": 1}}}
+        self.assertNotEqual(run_validator("profile", invalid_name).returncode, 0)
+        invalid_size = {"theme": {"system_fonts": {"caption": {"family": "Arial", "size_px": 0}}}}
+        self.assertNotEqual(run_validator("profile", invalid_size).returncode, 0)
+if __name__ == "__main__":
+    unittest.main()

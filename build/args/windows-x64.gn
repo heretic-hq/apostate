@@ -1,0 +1,17 @@
+target_os = "win"
+target_cpu = "x64"
+
+# Use Chromium's bundled Clang and LLD. The Windows runner must provide the
+# pinned Visual Studio and Windows SDK installations below.
+is_clang = true
+use_lld = true
+visual_studio_path = "C:/Program Files/Microsoft Visual Studio/2022/BuildTools"
+windows_sdk_path = "C:/Program Files (x86)/Windows Kits/10"
+win_sdk_version = "10.0.26100.0"
+
+# Keep packaging and reproducibility independent of runner-local build state.
+is_component_build = false
+use_remoteexec = false
+use_siso = false
+
+use_goma = false

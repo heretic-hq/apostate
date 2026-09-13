@@ -8,14 +8,16 @@ other document defers to this one.
 "Stealth" is not a property that can be measured, so it is not a unit of work
 here. It is replaced by a claim that can be falsified:
 
-> A browser is correct when every observable it emits equals the value that a
-> **named reference device** emits.
+> A browser is correct for a declared target when every observable it emits
+> matches that target's measured contract.
 
-The reference device is a row in the fingerprint corpus. Correctness is a diff
-against that row, not a judgement about whether something "looks like a bot".
-This is the whole reason the project is tractable: a 500-row surface map with
-opinions attached does not converge, and a 500-row surface map with a ground
-truth attached converges mechanically.
+The declared target is either a named physical reference device or a named
+compatibility target. Physical and compatibility targets use separate evidence
+classes and acceptance tracks; neither is silently promoted into the other.
+Correctness is still a diff against the declared target, not a judgement about
+whether something "looks like a bot". This is the whole reason the project is
+tractable: a 500-row surface map with opinions attached does not converge, and
+a 500-row surface map with a target contract attached converges mechanically.
 
 ## 2. Axioms
 
@@ -30,10 +32,12 @@ and cross-realm checks irrelevant *by construction* rather than by
 counter-measure — there is nothing for them to find, because nothing was
 wrapped.
 
-**A2 — Coherence, not concealment.** Correct means "equal to reference device
-D", never "less detectable". A patch that makes a value harder to read, noisier,
-or absent has not made it correct. Every patch cites the corpus row it
-reproduces.
+**A2 — Coherence, not concealment.** Correct means "equal to the declared
+target", never "less detectable". The target may be a named physical reference
+device or a named compatibility target, but that class must remain explicit. A
+patch that makes a value harder to read, noisier, or absent has not made it
+correct. Every patch cites the physical corpus row or compatibility acceptance
+record it reproduces.
 
 **A3 — Determinism.** Real hardware is deterministic. Two identical canvas
 renders on real silicon are bit-identical; two reads of `deviceMemory` agree;
@@ -44,7 +48,10 @@ profile boundary — a different profile is a different device — never inside 
 session. Randomised noise is itself a tell: it is unstable within a session,
 it breaks returning-visitor consistency across sessions, and it is a behaviour
 no physical device exhibits. Where a value cannot be derived, it is **replayed**
-from the corpus capture, not synthesised.
+from an eligible reviewed capture, not synthesised. A compatibility-backed value
+may be replayed for an offered compatibility profile under §4; that does not
+make it physical-device evidence. Compatibility-backed and composed catalogue
+values are never invented without an identified source and target contract.
 
 ## 3. Evidence tiers
 
@@ -54,60 +61,81 @@ silently is how a stealth project accumulates confident errors.
 
 | Tier | Meaning | Examples |
 |------|---------|----------|
-| **T0** | Measured | A corpus row; a value observed on real hardware here |
+| **T0** | Measured | A per-file verified capture; a value observed on real hardware here |
 | **T1** | Primary | Chromium source; W3C/WHATWG/IETF spec text; peer-reviewed paper |
-| **T2** | Secondary | Competitor repo, vendor blog, forum claim, another tool's patch set |
+| **T2** | Secondary | Unreviewed external source or another tool's patch set |
 | **T3** | Inference | Reasoning from T0/T1 without direct observation |
 
 **The closing rule: a ledger row may be marked `resolved` only on T0 or T1
 evidence.** T2 may open a row; it may never close one. T3 may never close one.
 
-This rule is what quarantines contaminated inputs automatically, with no
-manual triage. Anything imported from a source whose method we cannot audit
-enters at T2 and stays open until re-derived from Chromium source or measured
-against a real device.
+This rule quarantines uncertain inputs automatically. Anything imported from a
+source whose method or provenance cannot be audited enters at T2 and stays open
+until re-derived from Chromium source or measured against a real device.
 
-## 4. Ground truth: what we actually hold
+## 4. Ground truth and catalogue policy
 
-Stated honestly, because building on an assumed corpus is the expensive
-mistake.
+Ground truth means evidence whose provenance can be checked at the file level.
+A checked-in raw capture is not automatically T0: its collector version,
+browser build, capture conditions, automation signals, failed probes and
+consent record must be reviewed for that specific file. Only a per-file
+verified capture may close T0. Inputs with uncertain or ambiguous provenance
+are excluded from reference use or quarantined until reviewed; they are not
+silently upgraded by a README, a filename or a matching value.
 
-Ground truth here means **captures we took ourselves**, with the pipeline in
-`capture/`, on devices whose owner consented. That is the only class of
-evidence admitted at T0.
+The checked-in inventory therefore has mixed status. Some files are reviewed
+captures, while others are retained for analysis or history with an explicit
+non-T0 status. The inventory and the public catalogue are different things:
+raw captures need not ship in order for a profile to be selectable.
 
-| Class | Own captures | Notes |
-|-------|--------------|-------|
-| macOS desktop | 0 | Hardware on hand; blocked on the capture pipeline |
-| Windows desktop | 0 | Hardware pending |
-| Android mobile | 0 | |
-| iOS | 0 | |
+Public profiles may be:
 
-The three files in `resources/fingerprints/` are **schema templates, not
-captures** — see `resources/fingerprints/PROVENANCE.md`. They must never be
-cited as T0.
+1. **Physical-ground-truth** — a per-file verified, consented capture from a
+   physical device.
+2. **Compatibility-backed** — values measured from an external compatibility
+   runtime, then normalized, schema-checked and exercised against real targets.
+   This is compatibility evidence, not proof of a direct physical-device
+   capture.
+3. **Composed catalogue profiles** — coherent combinations of reviewed blocks
+   and catalogue values accepted under Chromium and platform constraints.
 
-So the corpus is empty, and building it is the project's first task rather than
-an assumed input. Two sources, in order:
+Compatibility-backed and composed entries are labelled by their evidence class.
+They do not close a T0 ledger row, do not imply that the host owns the claimed
+GPU, display, fonts, audio stack or codecs, and do not permit values beyond
+native capability. Unsupported capabilities remain inherited, unavailable or
+blocked rather than invented.
 
-1. **Devices we control.** Captured directly, full provenance, highest
-   confidence.
-2. **Consented community contributions.** A public capture page where a person
-   chooses to submit their own device profile. This scales with adoption, it is
-   the honest way to build breadth, and it is the same tool as (1) so the data
-   is directly comparable.
+The three files in `resources/fingerprints/` that are schema templates are not
+captures and must never be cited as T0. A raw file with an uncertain source is
+treated the same way: excluded or quarantined until its own evidence closes.
 
-### On third-party corpora
+Unreviewed external fingerprint datasets are not redistributed or admitted as
+ground truth. A digest or normalized value may be an open lead, but it cannot
+reconstruct a render or close a ledger row without auditable source evidence.
 
-Fingerprint datasets belonging to commercial vendors are **not redistributed by
-this project and are not admitted as T0**, regardless of how they were
-obtained. This is partly a licensing question and partly a quality one: such
-sets typically store digests rather than renders, so they can verify a value but
-never reconstruct one, and reconstruction is exactly what replay requires.
+### Compatibility acceptance
 
-Where such a set is consulted privately it may inform *priors* — which GPU
-renderer strings occur in the wild, how a field is distributed — and those
-priors are recorded as T2. They never close a ledger row and they never ship.
+The initial product offers the compatibility-backed families derived from the
+project's authorized compatibility captures. They are not withheld merely
+because equivalent physical captures are not yet available. A later verified
+physical capture may replace or refine a family, but that replacement creates a
+new catalogue identity and does not rewrite the earlier compatibility evidence.
+
+An offered compatibility profile is selectable product input. It becomes a
+validated compatibility target only when the applicable Apostate build has
+been exercised against the normalized target contract and the result is
+repeatable. The external runtime's detector result is useful admission evidence
+for the offered profile, but it does not substitute for the native run and
+neither result closes a physical T0 row.
+
+For WebGL, compatibility acceptance is a cluster, not a renderer string. The
+native run must cover vendor and renderer identity, extensions, numeric limits,
+shader precision, and falsification probes that use the reported limits, such
+as allocation and compilation boundaries. WebGPU features and limits receive
+the same native-capability and behavior check. If the native path caps,
+intersects or inherits a value, that surface is reported as limited rather than
+called an exact compatibility match. Publication must not describe a
+provisional surface as validated.
 
 ## 5. The registries
 
@@ -121,7 +149,8 @@ Four artifacts. All work attaches to one of them.
 3. **Profile Schema** (`config/profile.schema.json`) — the contract between
    them. **Derived, never invented**: every `spoof` verdict in the ledger
    demands exactly one profile field, and the schema is generated from that
-   set. It stays empty until the ledger is closed.
+   set. Catalogue and composed profiles may use only fields admitted by this
+   contract.
 4. **Coherence Graph** (`ledger/coherence.jsonl`) — edges between ledger rows
    that must agree with each other. User-agent ↔ client hints ↔ platform ↔ GPU
    renderer ↔ font set ↔ screen geometry ↔ timezone. Nearly every real failure
@@ -134,30 +163,35 @@ Apostate does not spoof its own browser version: the binary really is the
 Chromium it reports, and claiming another would require behaving like that
 version — every feature-detection difference would contradict the claim.
 
-It follows that a capture is bound to a build. Our first V3 run compared a
+### Historical build-binding evidence
+
+It follows that a capture is bound to a build. A historical V3 run compared a
 reference taken on Chrome 152.0.7977.76 against a binary built from
 152.0.7977.82, and the version-bearing fields differed in ways no patch should
-ever fix. The conformance runner reports that separately rather than counting it
-as failure.
+ever fix. The conformance runner reports that separately rather than counting
+it as failure.
 
-So a capture must record the exact browser build, and a reference is only a
-valid V3 target for a binary of the same version. Rebasing onto a new Chromium
-means re-capturing the references, not just re-applying the patches.
+The current release-candidate build is Chromium 152.0.7977.83. A capture must
+record the exact browser build, and a reference is only a valid V3 target for a
+binary of the same version. Rebasing onto a new Chromium means re-capturing
+the references, not just re-applying the patches.
 
-### The loader is faithful: 30/30 on a self-consistency test
+### Historical loader control: 30/30 on a self-consistency test
 
 Before reading anything into a cross-platform score, the loader itself has to be
 shown correct. The control for that holds every platform variable constant:
 capture the browser with no profile, derive a profile from that capture, run the
 same binary again with it, and diff the two.
 
-**30 of 30 probes conform.** Same host, same build, no platform difference in
-play — so the profile round-trips through capture, derivation and replay without
-loss.
+The historical control conformed on all 30 probes. Same host, same build, no
+platform difference in play — so that run showed the profile round-tripped
+through capture, derivation and replay without loss. It is scoped evidence for
+the loader path, not a current cross-platform conformance or release result.
 
-That makes the cross-platform number interpretable. A gap there is a property of
-the host, not a defect in the loader, and the two can be reported separately
+That makes the cross-platform number interpretable. A gap there is a property
+of the host, not a defect in the loader, and the two can be reported separately
 instead of being confounded.
+
 
 The test found one defect, and it was in the harness: the worker header echo was
 not being normalised for environment-dependent values, so two captures of one
@@ -300,12 +334,27 @@ A change is not done until it passes the tier its ledger row names.
 | **V0** | Schema and lint: ledger rows well-formed, patch applies, series ordered | free |
 | **V1** | Single translation unit compiles against the pinned build dir | seconds |
 | **V2** | Full build succeeds, binary launches, smoke suite passes | hours |
-| **V3** | **Corpus conformance**: launch with profile P, collect, diff against P's corpus row | minutes |
-| **V4** | Live detectors and heretic | minutes |
+| **V3** | **Physical corpus conformance**: launch with profile P, collect, diff against P's eligible physical reference | minutes |
+| **V3-C** | **Compatibility conformance**: launch with offered profile P, collect, and diff against its normalized compatibility target plus coherence probes | minutes |
+| **V4** | Live detector suite against a physical-reference track | minutes |
+| **V4-C** | Live detector suite against an offered compatibility profile | minutes |
 
-**V3 is the scoreboard.** The corpus is already expressed in the same schema a
-collector produces, so per-surface pass/fail is a mechanical field diff rather
-than an opinion. The collector is built before the first patch, not after.
+**V3 and V3-C are separate scoreboards.** Both are expressed in the same
+schema a collector produces, so per-surface pass/fail is a mechanical field
+diff rather than an opinion. V3 answers whether a profile matches a verified
+physical reference. V3-C answers whether an offered profile matches its
+normalized compatibility target and remains coherent when exercised through
+the native emitters. V4 and V4-C apply the corresponding live detector tracks.
+V3-C/V4-C are valid product acceptance evidence when physical references are
+unavailable; they never turn compatibility evidence into T0.
+
+The current release-candidate handoff does not claim V2, V3, V3-C, V4 or V4-C
+success. Full-build/native launch and package gates remain blocked where their
+platform or toolchain prerequisites are absent; V3 is blocked where there is
+no eligible same-build physical reference; V3-C is blocked until the native
+compatibility run is recorded; and V4/V4-C are blocked until their respective
+live-detector evidence exists. These are release gates, not claims that the
+source mapping or offered catalogue is incomplete.
 
 Builds are checkpoints, never a debugging loop: work is gated at V0/V1 and
 batched, so that entering V2 is an expectation of success rather than an

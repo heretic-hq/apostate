@@ -13,11 +13,9 @@ profiles and no-profile behavior retain their existing paths. Unavailable or
 non-covering candidates fall through. No font metric, numeric glyph bound,
 fontconfig file, profile/schema field or JavaScript API is replaced.
 
-Reference: resources/fingerprints/raw/unlabelled-20260910T140818Z.json,
-fonts.metrics: 76 right edges differ by 2 px in the 41-patch subject. A
-separate Windows-profile control measured the right bound of 字 at 40 px:
-38 for Malgun and 40 for YaHei, both with 40 px advances. This is a selector candidate, not a claim
-that remaining raster/DirectWrite metric differences are resolved.
+Windows capture evidence for the mixed fonts.metrics sample and 40px Han ink bounds
+is unavailable; the selector control and remaining raster/DirectWrite metric
+differences remain pending.
 
 Primary source at Chromium79460ebecaa5625e57a5fb679a735659e73dc687:
 - platform/fonts/win/font_fallback_win.cc:210-211,539-557 (candidate/script policy)

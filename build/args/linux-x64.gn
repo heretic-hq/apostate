@@ -8,3 +8,9 @@ use_sysroot = true
 # Chromium's bundled toolchain only. Never the system compiler.
 is_clang = true
 use_lld = true
+
+# Keep the target self-contained: no host compiler, linker, or libraries are
+# allowed to influence the release binary.
+is_component_build = false
+use_remoteexec = false
+use_siso = false

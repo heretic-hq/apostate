@@ -8,14 +8,28 @@
 source "$(dirname "$0")/lib.sh"
 
 MODE="${1:-apply}"
-case "$MODE" in apply|--reset-only) ;; *) die "usage: apply-patches.sh [--reset-only]" ;; esac
+case "$MODE" in apply|--check|--reset-only) ;; *) die "usage: apply-patches.sh [--check|--reset-only]" ;; esac
+CHECK_ONLY=0
+[ "$MODE" = "--check" ] && CHECK_ONLY=1
 
 SERIES="$REPO_ROOT/patches/series"
-[ -d "$SRC" ] || die "no checkout; run scripts/fetch-sources.sh"
-[ -f "$SERIES" ] || die "no patches/series"
-
+python3 "$REPO_ROOT/scripts/validate-release-baseline.py" --root "$REPO_ROOT" --series-only
+[ -d "$SRC" ] || die "blocked: no pinned Chromium checkout at $SRC; run scripts/fetch-sources.sh"
 MTIME_SNAPSHOT="$(mktemp /tmp/apostate-patch-times.XXXXXX)"
-trap 'rm -f "$MTIME_SNAPSHOT"' EXIT
+cleanup_check() {
+  [ "$CHECK_ONLY" -eq 1 ] || return 0
+  git -C "$SRC" reset -q --hard || true
+  git -C "$SRC" checkout -q --detach "refs/tags/$CHROMIUM_VERSION" || true
+  git -C "$SRC" clean -qfd || true
+  git -C "$SRC" reset -q --hard || true
+  while read -r sub; do
+    [ -d "$SRC/$sub/.git" ] || continue
+    git -C "$SRC/$sub" reset -q --hard || true
+    git -C "$SRC/$sub" clean -qfd || true
+  done < <(grep -h "^+++ b/" "$REPO_ROOT"/patches/*.patch 2>/dev/null \
+         | sed "s|^+++ b/||" | cut -d/ -f1-2 | sort -u)
+}
+trap 'cleanup_check; rm -f "$MTIME_SNAPSHOT"' EXIT
 python3 "$REPO_ROOT/scripts/preserve-patch-mtimes.py" snapshot --src "$SRC" \
   --patches "$REPO_ROOT/patches" --state "$MTIME_SNAPSHOT"
 

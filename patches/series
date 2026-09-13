@@ -56,14 +56,14 @@
 0057-angle-static-parallel-shader-tests.patch
 0058-fontations-static-design-precision.patch
 0059-mac-arm-oscillator-vector-math.patch
+0060-mac-arm-fft-multiply.patch
 0061-software-hevc-decoder.patch
 0062-fontations-emoji-diagnostics.patch
+0063-validated-software-element-indices.patch
 0064-profile-webgpu-shared-image-staging.patch
 0065-webshare-from-profile.patch
 0066-windows-win-metrics-policy.patch
 0067-windows-line-gap-policy.patch
-0060-mac-arm-fft-multiply.patch
-0063-validated-software-element-indices.patch
 0068-webgpu-adapter-from-profile.patch
 0069-webgpu-emitter-override.patch
 0070-gl-limits-int64-parse.patch

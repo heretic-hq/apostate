@@ -20,11 +20,10 @@ unmarked displays keep their previous behavior. Existing gamut/HDR policy is
 retained separately; per-monitor HDR was not measured by these captures.
 
 References:
-resources/fingerprints/raw/unlabelled-20260910T140818Z.json: screen.details and
-screen.geometry, two1920x1080 monitors, current VZ229 at1920,0. VA270A workarea
-origin is unmeasured and remains inherited, not recorded as a capture value.
 resources/fingerprints/raw/m4-max-chrome-20260908T163229Z.json: one1728x1117 DIP
 internal display, DPR2, depth30, top33 and bottom86 DIP workarea insets.
+Windows multi-monitor control evidence is unavailable; two-monitor geometry and the
+VA270A workarea origin remain pending.
 
 Primary source at Chromium79460ebecaa5625e57a5fb679a735659e73dc687:
 ui/ozone/platform/headless/headless_screen.cc:GetScreenInfo/CreateDisplayList

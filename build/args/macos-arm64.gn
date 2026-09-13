@@ -6,3 +6,9 @@ target_cpu = "arm64"
 # installed.
 mac_sdk_min = "15.0"
 use_lld = true
+
+# Keep all release targets static and independent of remote build services.
+is_component_build = false
+use_remoteexec = false
+use_goma = false
+use_siso = false

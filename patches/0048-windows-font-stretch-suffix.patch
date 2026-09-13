@@ -20,11 +20,8 @@ Paths above are under third_party/blink/renderer/.
 Skia0873ec164a06966b90ae0d43ef783cfb180084ae:
 - src/ports/SkFontConfigInterface_direct.cpp:552-586,623-672
 
-Reference: resources/fingerprints/raw/unlabelled-20260910T140818Z.json.
-Arial Narrow matches Arial in the captured detection/metric samples; the
-41-patch subject instead measures its successive CSS fallback families.
-This evidence supports the missing-family branch, not an unconditional alias
-or a claim about the reference's physical font collection.
+Windows capture evidence for Arial Narrow and the successive CSS fallback metric samples
+is unavailable; the missing-family branch remains pending for that control.
 
 V1 compilation and V3 checks remain required, including a real narrow family,
 style/stretch requests and src:local() exclusion. No font files, fontconfig,

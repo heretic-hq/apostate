@@ -15,7 +15,7 @@ Everything that can change the output binary lives in `build/`:
 
 | File | Pins |
 |---|---|
-| `build/CHROMIUM_VERSION` | Exact Chromium tag, e.g. `152.0.7935.61` |
+| `build/CHROMIUM_VERSION` | Exact Chromium tag, `152.0.7977.83` |
 | `build/DEPOT_TOOLS_REVISION` | depot_tools commit SHA |
 | `build/args/<platform>.gn` | Complete GN args, one file per target |
 | `build/linux/Dockerfile` | Base image pinned **by digest**, never by tag |
@@ -48,8 +48,8 @@ These are the ones that actually bite; each is enforced by
 5. **Containerised Linux builds.** The base image is pinned by digest. Host
    libraries never participate.
 6. **macOS cannot be containerised.** The Xcode and SDK versions are pinned in
-   `build/args/macos.gn` and asserted by `scripts/bootstrap.sh`, which fails
-   loudly rather than building against whatever is installed.
+   `build/args/macos-arm64.gn` and asserted by `scripts/bootstrap.sh`, which
+   fails loudly rather than building against whatever is installed.
 
 ## Steps
 

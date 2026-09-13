@@ -22,7 +22,7 @@ def reference(name):
 
 class ScreenDisplayTests(unittest.TestCase):
     def setUp(self):
-        self.i3 = reference("unlabelled-20260910T140818Z.json")
+        self.i3 = reference("windows-chrome-20260910T140813Z.json")
         self.mac = reference("m4-max-chrome-20260908T163229Z.json")
 
     def derive(self, capture):

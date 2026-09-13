@@ -4,7 +4,7 @@ Whether a session keeps its cookies and storage, and why that choice is a
 fingerprinting decision rather than a convenience one.
 
 Entry points marked **verified** were confirmed against the pinned checkout of
-152.0.7977.82, not codesearch, which indexes `main`.
+152.0.7977.83, not codesearch, which indexes `main`.
 
 ## The finding that makes this a subsystem
 
@@ -76,9 +76,10 @@ incognito session reported exactly 10 GiB, which looks unremarkable. It was
 wrong not as a number but as a *machine*: it described a host with at least
 50 GiB of RAM while the profile claimed 32.
 
-## Measured, after the patch
+## Historical measurement, after the patch
 
-Same binary, same host, `--incognito` throughout:
+The following same-binary, same-host `--incognito` measurement is retained as
+evidence for the quota path, not as a release-wide conformance result:
 
 ```
 no profile        quota 10737418240    host pool hits the cap
@@ -91,10 +92,10 @@ Sessions A and B differ because the ratio is redrawn per session, and both sit
 inside the range a real 32 GiB machine produces. That variation is kept
 deliberately — see below.
 
-A full collector capture in incognito against one in regular mode conforms
-**30/30** on non-volatile probes. `storage.estimate` is in `ALWAYS_VOLATILE`, so
-that result excludes the quota and is not evidence about it; the quota numbers
-above are the evidence.
+A collector result is evidence only when the specific capture has reviewed
+provenance and matches the current Chromium build. Ambiguous captures are
+excluded or quarantined; this subsystem's measurement does not establish V2,
+V3 or V4 release success.
 
 ## Why the randomness stays
 
@@ -131,5 +132,6 @@ coherent.
 - Storage does not survive an off-the-record session, by construction. That is
   the behaviour, not a defect, and it is the reason to prefer persistent.
 - We have not enumerated every off-the-record difference beyond what the 36
-  collector probes reach. The 30/30 above bounds what those probes can see and
-  claims nothing outside it.
+  collector probes reach. The historical 30/30 non-volatile result bounds only
+  those probes and claims nothing outside it; it is not current V3 or release
+  evidence.

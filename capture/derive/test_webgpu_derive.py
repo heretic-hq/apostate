@@ -11,7 +11,7 @@ import to_profile
 def webgpu_capture():
     root = Path(__file__).resolve().parents[2]
     out = {}
-    for filename in ("unlabelled-20260910T140818Z.json",
+    for filename in ("windows-chrome-20260910T140813Z.json",
                      "m4-max-chrome-20260908T163229Z.json"):
         capture = json.loads((root / "resources/fingerprints/raw" / filename).read_text())
         out[filename] = to_profile.probe(capture, "webgpu")
@@ -21,7 +21,7 @@ def webgpu_capture():
 class WebGPUDeriveTests(unittest.TestCase):
     def test_intel_adapter_preserves_features_info_and_limits(self):
         caps = webgpu_capture()
-        derived = to_profile.derive_webgpu(caps["unlabelled-20260910T140818Z.json"])
+        derived = to_profile.derive_webgpu(caps["windows-chrome-20260910T140813Z.json"])
         self.assertEqual(len(derived["features"]), 18)
         self.assertIn("shader-f16", derived["features"])
         self.assertNotIn("subgroups", derived["features"])

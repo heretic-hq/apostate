@@ -92,14 +92,14 @@ while the capture count grows by one.
 
 ## Evidence tiers
 
-A block is `measured` when every field came from a capture.
+A block is measured when every profile field it contributes came from a
+capture. Hardware memory is composable only when an owner-reported `.memory`
+sidecar supplies the installed-memory value.
 
-`measured-floor` marks a block whose memory figure is `deviceMemory`'s bucket
-rather than installed RAM. `deviceMemory` rounds to a power of two and
-saturates, so every machine above the top bucket reports the same number. This
-was harmless while the only consumer re-bucketed it, and stopped being harmless
-when the incognito storage quota started deriving from the same field. Such a
-block is usable, and its memory value is a lower bound, not a measurement.
+`navigator.deviceMemory` is a Chromium bucket, not installed RAM. Captures
+without the sidecar keep that limitation in block metadata and omit memory
+from the composed profile; their measured CPU and audio fields remain usable.
+The unsupported `measured-floor` classification is not used by the composer.
 
 `catalogue` is reserved for a hardware block built from a manufacturer's
 shipping configuration for a chassis we have captured — a real machine we did

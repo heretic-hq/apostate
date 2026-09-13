@@ -25,6 +25,10 @@
 __pycache__/
 *.pyc
 venv/
+/python/build/
+/python/dist/
+/python/*.egg-info/
+/npm/dist/
 .venv/
 
 # Third-party fingerprint corpora are never redistributed from this repository.

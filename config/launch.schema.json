@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/apostate/apostate/config/launch.schema.json",
+  "title": "Apostate canonical launch configuration",
+  "description": "The normalized launch contract shared by the CLI, Python package, and Node package. Profile selection precedence is explicit profile file > explicit profile ID > fingerprint seed plus platform persona > platform default > host inheritance. Network localization precedence is explicit locale/timezone > GeoIP-derived locale/timezone > profile-selected locale/timezone > host values. A launch resolves this configuration once before the browser process starts; adapters must not add per-call randomness and must not log proxy credentials.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "fingerprint",
+    "fingerprint_platform",
+    "profile",
+    "locale",
+    "timezone",
+    "geoip",
+    "proxy",
+    "headless",
+    "user_data_dir",
+    "args"
+  ],
+  "x-precedence": {
+    "profile_selection": [
+      "explicit profile file",
+      "explicit profile ID",
+      "fingerprint seed plus platform persona",
+      "platform default",
+      "host inheritance"
+    ],
+    "network_localization": [
+      "explicit locale/timezone",
+      "geoip-derived locale/timezone",
+      "profile-selected locale/timezone",
+      "host values"
+    ]
+  },
+  "properties": {
+    "fingerprint": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "A deterministic profile selector. It may be a non-negative integer or a non-empty stable seed string. Null leaves selection to the next available precedence source. Integer seeds are bounded to remain exact in JavaScript and JSON number implementations; string seeds are normalized as opaque identifiers and must not contain credentials or whitespace."
+    },
+    "fingerprint_platform": {
+      "enum": [
+        "windows",
+        "macos",
+        "linux",
+        null
+      ],
+      "description": "The platform persona used with fingerprint. Null permits platform default or host inheritance. This is a persona name, not the release artifact target; release targets are recorded in release/manifest.schema.json."
+    },
+    "profile": {
+      "description": "An explicit profile file path, profile ID, or inline device-profile object. A non-null value takes precedence over fingerprint selection. Inline objects must validate against the public device-profile schema.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000\\r\\n]+$"
+        },
+        {
+          "$ref": "../config/profile.schema.json"
+        }
+      ]
+    },
+    "locale": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$",
+      "description": "An explicit BCP 47 locale tag. When non-null it wins over GeoIP and profile locale selection; null allows the network/profile/host precedence chain."
+    },
+    "timezone": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^(?:UTC|GMT|[A-Za-z][A-Za-z0-9+._-]*(?:/[A-Za-z0-9+._-]+)+)$",
+      "description": "An explicit IANA-style timezone name (or UTC/GMT). When non-null it wins over GeoIP and profile timezone selection; null allows the network/profile/host precedence chain."
+    },
+    "geoip": {
+      "type": "boolean",
+      "description": "Resolve the observed network exit before launch and use its location for locale/timezone only when those values were not explicitly supplied. A failed lookup must be reported rather than silently inventing values."
+    },
+    "proxy": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?:https?|socks4|socks5)://[^\\s]+$",
+      "description": "An opaque HTTP(S), SOCKS4, or SOCKS5 proxy URI. Userinfo is accepted for authenticated proxies and must be kept in memory only: adapters and diagnostics must redact it and must never emit it in logs or manifests."
+    },
+    "headless": {
+      "type": "boolean",
+      "description": "Whether to start Chromium in headless mode."
+    },
+    "user_data_dir": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000\\r\\n]+$",
+      "description": "Persistent user-data directory path. Null requests an adapter-managed temporary profile."
+    },
+    "args": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 256,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "description": "Additional Chromium command-line arguments. Arguments are opaque to this contract; adapters must avoid logging values that can contain proxy credentials or other secrets."
+    }
+  }
+}

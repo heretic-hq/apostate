@@ -53,10 +53,11 @@ enable_dsyms = false
 # config forces 1,716 features across 1,375 studies into their *testing* state,
 # which is not the state real Chrome ships.
 #
-# Measured consequence at 152.0.7977.82: the testing config enables
-# ReduceAcceptLanguage, so FrameFetchContext::AddReducedAcceptLanguageIfNecessary
-# sets Accept-Language in the renderer. Stock Chrome leaves it unset there and
-# URLRequestHttpJob::AddExtraHeaders appends it last. Header order therefore
+# Historical measurement from the 152.0.7977.82 baseline: this configuration
+# enabled ReduceAcceptLanguage, so FrameFetchContext::AddReducedAcceptLanguageIfNecessary
+# set Accept-Language in the renderer. The behavior is retained for pinned .83
+# until re-measured on .83; stock Chrome leaves it unset there and appends it in
+# URLRequestHttpJob::AddExtraHeaders.
 # differed from Chrome in an unpatched build of our own pins — Accept-Language
 # at index 15 instead of 24 — a difference no amount of JS-surface work can
 # reach. Fixing it at the GN level rather than with --disable-field-trial-config

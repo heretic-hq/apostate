@@ -2,7 +2,7 @@
 
 Design for authenticated proxy support and QUIC through SOCKS5.
 
-Entry points marked **verified** were confirmed against Chromium 152.0.7977.82.
+Entry points marked **verified** were confirmed against Chromium 152.0.7977.83.
 
 ## Why this is P0 rather than a feature
 

@@ -1,0 +1,177 @@
+name: checks
+
+on:
+  pull_request:
+    paths:
+      - "config/**"
+      - "ledger/**"
+      - "release/**"
+      - "resources/profiles/**"
+      - "scripts/**"
+      - "python/**"
+      - "npm/**"
+      - "patches/**"
+      - ".github/release/**"
+      - ".github/workflows/check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ledger:
+    name: ledger validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Validate ledger
+        if: ${{ hashFiles('scripts/validate-ledger.py') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/validate-ledger.py
+          test -d ledger/schema
+          test -f ledger/surfaces.jsonl
+          test -f ledger/emitters.jsonl
+          python3 scripts/validate-ledger.py
+
+  baseline:
+    name: release baseline validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Validate pinned baseline
+        if: ${{ hashFiles('scripts/validate-release-baseline.py') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/validate-release-baseline.py
+          test -f build/CHROMIUM_VERSION
+          test -f build/MANIFEST.lock
+          test -f patches/series
+          python3 scripts/validate-release-baseline.py --root . --series-only
+          python3 scripts/validate-release-baseline.py --root .
+
+  schema:
+    name: schema validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Parse and validate schema documents
+        if: ${{ hashFiles('scripts/validate-release-contract.py') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/validate-release-contract.py
+          for schema in \
+            config/launch.schema.json \
+            config/profile.schema.json \
+            python/apostate/assets/profile.schema.json \
+            release/manifest.schema.json; do
+            test -f "$schema"
+          done
+          python3 scripts/validate-release-contract.py --check-schemas
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          paths = [
+              Path("config/launch.schema.json"),
+              Path("config/profile.schema.json"),
+              Path("python/apostate/assets/profile.schema.json"),
+              Path("release/manifest.schema.json"),
+          ]
+          paths.extend(sorted(Path("ledger/schema").glob("*.json")))
+          for path in paths:
+              json.loads(path.read_text(encoding="utf-8"))
+              print(f"valid JSON: {path}")
+          PY
+
+  catalogue:
+    name: catalogue and resolver validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Validate compatibility acceptance
+        if: ${{ hashFiles('scripts/validate-compatibility-acceptance.py') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/validate-compatibility-acceptance.py
+          test -f resources/profiles/compatibility-acceptance.json
+          test -f ledger/schema/compatibility-acceptance.schema.json
+          python3 scripts/validate-compatibility-acceptance.py
+      - name: Validate catalogue index
+        if: ${{ hashFiles('scripts/profile_resolver.py') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/profile_resolver.py
+          test -f resources/profiles/catalogue.json
+          test -d resources/profiles/families
+          python3 scripts/profile_resolver.py --catalogue
+      - name: Run deterministic resolver checks
+        if: ${{ hashFiles('scripts/test_profile_resolver.py') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/test_profile_resolver.py
+          test -f resources/profiles/catalogue.json
+          test -d resources/profiles/families
+          python3 scripts/test_profile_resolver.py
+
+  geoip:
+    name: GeoIP validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Run network-free GeoIP checks
+        if: ${{ hashFiles('scripts/test_geoip.py') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/geoip.py
+          test -f scripts/test_geoip.py
+          python3 scripts/test_geoip.py
+
+  python:
+    name: Python package tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Run Python package tests
+        if: ${{ hashFiles('python/tests/**/*.py') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d python/apostate
+          test -d python/tests
+          python3 -m unittest discover python/tests
+
+  node:
+    name: Node package tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Run Node package tests
+        if: ${{ hashFiles('npm/package.json') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f npm/package.json
+          test -d npm/test
+          npm --prefix npm test

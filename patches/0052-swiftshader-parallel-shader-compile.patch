@@ -26,9 +26,9 @@ Primary source at ANGLE7df613367a1d4ca9aea9ece344d4580d32d132a9:
 
 Chromium79460ebecaa5625e57a5fb679a735659e73dc687:
 gpu/command_buffer/service/feature_info.cc:1526 requires passthrough decoding.
-References: unlabelled-20260910T140818Z and m4-max-chrome-20260908T163229Z,
-whose WebGL extension lists include KHR_parallel_shader_compile.
-V1, native tests and actual WebGL1/2 functional controls remain required.
+References: resources/fingerprints/raw/m4-max-chrome-20260908T163229Z.json,
+whose WebGL extension list includes KHR_parallel_shader_compile. Windows comparison
+evidence is unavailable; V1, native tests and actual WebGL1/2 functional controls remain required.
 
 diff --git a/third_party/angle/src/libANGLE/renderer/vulkan/vk_renderer.cpp b/third_party/angle/src/libANGLE/renderer/vulkan/vk_renderer.cpp
 --- a/third_party/angle/src/libANGLE/renderer/vulkan/vk_renderer.cpp

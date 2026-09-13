@@ -28,6 +28,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import itertools
 import re
 import json
@@ -36,6 +37,104 @@ import sys
 
 BLOCKS = pathlib.Path("corpus/blocks")
 KINDS = ("platform", "gpu", "display", "hardware", "locale", "theme")
+
+# A block is admissible only when the decomposer recorded this explicit
+# evidence vocabulary. Labels and filenames are selection hints, never proof.
+EVIDENCE_CLASSES = {
+    "physical-ground-truth", "compatibility-capture", "catalogue-value",
+    "native-derived", "proxy-derived", "host-inherited",
+}
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _source_capture_path(block):
+    """Return a locally available raw capture path, when one is discoverable."""
+    source = block.get("source_capture")
+    if not isinstance(source, str) or not source.strip():
+        return None
+    candidates = []
+    path = pathlib.Path(source)
+    if path.is_absolute():
+        candidates.append(path)
+    else:
+        block_path = block.get("_path")
+        if block_path:
+            candidates.append(pathlib.Path(block_path).resolve().parent / path)
+        candidates.append(pathlib.Path(__file__).resolve().parent.parent /
+                          "resources/fingerprints/raw" / path.name)
+    return next((p for p in candidates if p.is_file()), None)
+
+
+def _validate_source_capture_hash(block):
+    value = block.get("source_capture_sha256")
+    if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
+        raise ValueError("source_capture_sha256 must be a 64-character SHA-256")
+    path = _source_capture_path(block)
+    if path is not None:
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual.lower() != value.lower():
+            raise ValueError("source_capture_sha256 does not match %s" % path)
+    return value.lower()
+
+
+def _validate_source_context(block):
+    context = block.get("source_context")
+    if not isinstance(context, dict) or not context:
+        raise ValueError("source_context must be a non-empty object")
+    required = ("taken_at", "ua", "collector_sha256", "secure_context",
+                "automation_suspected", "automation_signals")
+    missing = [key for key in required if key not in context]
+    if missing:
+        raise ValueError("source_context missing required field(s): %s" %
+                         ", ".join(missing))
+    if not isinstance(context["taken_at"], str) or not context["taken_at"].strip():
+        raise ValueError("source_context.taken_at must be a non-empty string")
+    if not isinstance(context["ua"], str) or not context["ua"].strip():
+        raise ValueError("source_context.ua must be a non-empty string")
+    collector = context["collector_sha256"]
+    if not isinstance(collector, str) or not SHA256_RE.fullmatch(collector):
+        raise ValueError("source_context.collector_sha256 is invalid")
+    if context["secure_context"] is not True:
+        raise ValueError("source_context.secure_context must be true")
+    if context["automation_suspected"] is not False:
+        raise ValueError("source_context.automation_suspected must be false")
+    if context["automation_signals"] != []:
+        raise ValueError("source_context.automation_signals must be an empty array")
+    if "label" in context and context["label"] is not None and (
+            not isinstance(context["label"], str) or not context["label"].strip()):
+        raise ValueError("source_context.label must be a non-empty string or null")
+    if (block.get("label") is not None and context.get("label") is not None and
+            block["label"] != context["label"]):
+        raise ValueError("label disagrees with source_context.label")
+    if (block.get("source_taken_at") is not None and
+            context["taken_at"] != block["source_taken_at"]):
+        raise ValueError("source_taken_at disagrees with source_context.taken_at")
+    return context
+
+
+def _validate_provenance(block, require_platform=False):
+    evidence = block.get("evidence")
+    if not isinstance(evidence, str) or evidence not in EVIDENCE_CLASSES:
+        raise ValueError("unsupported or missing evidence class %r" % evidence)
+    source = block.get("source_capture")
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("source_capture is required")
+    source_hash = _validate_source_capture_hash(block)
+    context = _validate_source_context(block)
+    provenance = block.get("provenance")
+    if not isinstance(provenance, (dict, str)) or not provenance:
+        raise ValueError("provenance must be a non-empty object or string")
+    platform = block.get("captured_platform")
+    if require_platform and (not isinstance(platform, str) or not platform.strip()):
+        raise ValueError("captured_platform is required")
+    return {
+        "evidence": evidence,
+        "source_capture": source,
+        "source_capture_sha256": source_hash,
+        "source_context": context,
+        "captured_platform": platform,
+        "provenance": provenance,
+    }
 
 
 def load_all():
@@ -51,31 +150,54 @@ def load_all():
 
 
 def platform_of(block):
-    """The OS a block was captured on, from whatever probe it happens to carry."""
+    """The OS a block was captured on, from its measured platform probe."""
     c = block.get("content", {})
-    ua = c.get("navigator.userAgentData")
-    if ua:
-        return (ua.get("high") or {}).get("platform")
-    return block.get("captured_platform")
+    ua = c.get("navigator.userAgentData") or {}
+    return (ua.get("high") or {}).get("platform") or block.get("captured_platform")
+
+
+def evidence_of(block):
+    """Return an explicit evidence class after validating block provenance."""
+    return _validate_provenance(block)["evidence"]
+
+
+def provenance_token(chosen):
+    """Encode complete block provenance in schema-allowed source_capture text."""
+    records = {}
+    for kind in KINDS:
+        block = chosen[kind]
+        provenance = _validate_provenance(block)
+        records[kind] = {
+            "content_sha256": block.get("content_sha256"),
+            **provenance,
+        }
+    return "composed:" + json.dumps(records, sort_keys=True,
+                                     separators=(",", ":"))
 
 
 def compatible(chosen):
-    """Return (ok, reason). Blocks must agree on the platform they came from."""
-    plat = platform_of(chosen["platform"])
+    """Return (ok, reason). Blocks must agree on captured platform."""
+    for kind in KINDS:
+        try:
+            _validate_provenance(chosen[kind], require_platform=True)
+        except (KeyError, ValueError) as exc:
+            return False, "%s block has invalid provenance: %s" % (kind, exc)
+
+    plat = chosen["platform"].get("captured_platform")
     if not plat:
         return False, "platform block does not declare an OS"
+    measured_plat = platform_of(chosen["platform"])
+    if measured_plat and measured_plat != plat:
+        return False, ("platform block metadata says %s but probe says %s"
+                       % (plat, measured_plat))
     # Derived from KINDS rather than listed, because listing it is how the
-    # theme block escaped the check when it was added as the sixth kind: the
-    # rule was written for five and silently kept passing four.
+    # theme block escaped the check when it was added as the sixth kind.
     for kind in (k for k in KINDS if k != "platform"):
-        b = chosen[kind]
-        bp = b.get("captured_platform") or platform_of(b)
-        if bp and bp != plat:
+        bp = chosen[kind]["captured_platform"]
+        if bp != plat:
             return False, ("%s block was captured on %s, platform block is %s"
                            % (kind, bp, plat))
     return True, ""
-
-
 def get(block, pid, *path, default=None):
     v = block.get("content", {}).get(pid)
     for k in path:
@@ -142,7 +264,11 @@ def compose(chosen):
 
     profile = {
         "id": "composed",
-        "source_blocks": {k: chosen[k]["content_sha256"][:12] for k in KINDS},
+        # source_blocks is deliberately not a profile property: the native
+        # schema rejects arbitrary top-level metadata. Keep complete structured
+        # resolver provenance in the allowed source_capture string; launch
+        # emitters strip this resolver-only field before native payload emission.
+        "source_capture": provenance_token(chosen),
         "platform": {
             "name": ua_high.get("platform"),
             "version": ua_high.get("platformVersion"),
@@ -175,8 +301,10 @@ def compose(chosen):
         },
         "keyboard": {"layout_map": loc.get("content", {}).get("keyboard.layout", {})},
         "cpu": {"logical_cores": hw.get("logical_cores")},
-        "memory": {"total_bytes": hw.get("memory_total_bytes")},
-        "audio": {"hardware_buffer_frames": hw.get("audio_buffer_frames")},
+        "memory": ({"total_bytes": hw["memory_total_bytes"]}
+                   if hw.get("memory_total_bytes") is not None else {}),
+        "audio": ({"hardware_buffer_frames": hw["audio_buffer_frames"]}
+                  if hw.get("audio_buffer_frames") is not None else {}),
     }
 
     # pointer/hover come from the display block's media queries
@@ -260,10 +388,12 @@ def main() -> int:
         for kind in KINDS:
             print("%s (%d):" % (kind, len(all_blocks[kind])))
             for b in all_blocks[kind]:
-                tier = b.get("evidence", "measured")
+                try:
+                    tier = evidence_of(b)
+                except ValueError:
+                    tier = "invalid"
                 print("    %-64s %s" % (describe(b, kind), tier))
         return 0
-
     if args.enumerate:
         total = ok = 0
         for combo in itertools.product(*(all_blocks[k] for k in KINDS)):
@@ -318,10 +448,13 @@ def main() -> int:
             return 2
 
     profile = compose(chosen)
-    tiers = {chosen[k].get("evidence", "measured") for k in KINDS}
-    if "catalogue" in tiers:
-        print("NOTE: profile includes catalogue-tier blocks (a real shipping "
-              "configuration, not a machine we measured)", file=sys.stderr)
+    tiers = {evidence_of(chosen[k]) for k in KINDS}
+    if "catalogue-value" in tiers:
+        print("NOTE: profile includes catalogue-value blocks (normalized "
+              "compatibility research, not a direct device capture)", file=sys.stderr)
+    elif "compatibility-capture" in tiers:
+        print("NOTE: profile includes compatibility-capture blocks (exercised "
+              "against targets, not direct physical-device ground truth)", file=sys.stderr)
 
     text = json.dumps(profile, indent=2) + "\n"
     if args.out:

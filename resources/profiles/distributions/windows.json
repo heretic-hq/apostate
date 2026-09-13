@@ -1,0 +1,8 @@
+{
+  "id": "apostate-windows",
+  "platform": "windows",
+  "evidence_class": "catalogue-value",
+  "family_ids": ["intel-d3d11-gen9", "intel-d3d11-gen11", "intel-d3d11-gen12lp", "nvidia-d3d11-maxwell", "nvidia-d3d11-turing", "nvidia-d3d11-ampere", "nvidia-d3d11-blackwell", "amd-d3d11-gcn5", "amd-d3d11-rdna4"],
+  "policy_ids": {"display": ["windows-hd", "windows-qhd", "windows-uhd"], "hardware": ["windows-performance", "windows-standard", "windows-workstation"], "locale": ["en-au", "en-gb", "en-sg", "en-us"], "theme": ["contrast", "dark", "light"]},
+  "notes": "Apostate-owned normalized distribution; values are compatibility/catalogue policy choices, not physical-device claims."
+}

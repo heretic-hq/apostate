@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "catalogue_id": "apostate",
+  "catalogue_version": 1,
+  "version": 1,
+  "profile_schema_version": 2,
+  "browser_build": "152.0.7977.83",
+  "supported_browser_builds": ["152.0.7977.83"],
+  "family_count": 14,
+  "capture_count": 16,
+  "compatibility_acceptance": {"file": "compatibility-acceptance.json", "schema": "ledger/schema/compatibility-acceptance.schema.json", "track": "V3-C/V4-C", "initial_status": "offered"},
+  "families": [
+    {"id": "apple-metal-m2", "file": "families/apple-metal-m2.json", "platform": "macos", "gpu_family": "apple-metal", "evidence_class": "compatibility-capture", "acceptance": {"status": "offered", "validation_status": "unvalidated", "record_id": "apple-metal-m2"}},
+    {"id": "apple-metal-m2-pro", "file": "families/apple-metal-m2-pro.json", "platform": "macos", "gpu_family": "apple-metal", "evidence_class": "compatibility-capture", "acceptance": {"status": "offered", "validation_status": "unvalidated", "record_id": "apple-metal-m2-pro"}},
+    {"id": "apple-metal-m3-pro", "file": "families/apple-metal-m3-pro.json", "platform": "macos", "gpu_family": "apple-metal", "evidence_class": "compatibility-capture", "acceptance": {"status": "offered", "validation_status": "unvalidated", "record_id": "apple-metal-m3-pro"}},
+    {"id": "apple-metal-m4", "file": "families/apple-metal-m4.json", "platform": "macos", "gpu_family": "apple-metal", "evidence_class": "compatibility-capture", "acceptance": {"status": "offered", "validation_status": "unvalidated", "record_id": "apple-metal-m4"}},
+    {"id": "apple-metal-m5", "file": "families/apple-metal-m5.json", "platform": "macos", "gpu_family": "apple-metal", "evidence_class": "compatibility-capture", "acceptance": {"status": "offered", "validation_status": "unvalidated", "record_id": "apple-metal-m5"}},
+    {"id": "intel-d3d11-gen9", "file": "families/intel-d3d11-gen9.json", "platform": "windows", "gpu_family": "intel-d3d11", "evidence_class": "compatibility-capture", "acceptance": {"status": "offered", "validation_status": "unvalidated", "record_id": "intel-d3d11-gen9"}},
+    {"id": "intel-d3d11-gen11", "file": "families/intel-d3d11-gen11.json", "platform": "windows", "gpu_family": "intel-d3d11", "evidence_class": "compatibility-capture", "acceptance": {"status": "offered", "validation_status": "unvalidated", "record_id": "intel-d3d11-gen11"}},
+    {"id": "intel-d3d11-gen12lp", "file": "families/intel-d3d11-gen12lp.json", "platform": "windows", "gpu_family": "intel-d3d11", "evidence_class": "compatibility-capture", "acceptance": {"status": "offered", "validation_status": "unvalidated", "record_id": "intel-d3d11-gen12lp"}},
+    {"id": "nvidia-d3d11-maxwell", "file": "families/nvidia-d3d11-maxwell.json", "platform": "windows", "gpu_family": "nvidia-d3d11", "evidence_class": "compatibility-capture", "acceptance": {"status": "offered", "validation_status": "unvalidated", "record_id": "nvidia-d3d11-maxwell"}},
+    {"id": "nvidia-d3d11-turing", "file": "families/nvidia-d3d11-turing.json", "platform": "windows", "gpu_family": "nvidia-d3d11", "evidence_class": "compatibility-capture", "acceptance": {"status": "offered", "validation_status": "unvalidated", "record_id": "nvidia-d3d11-turing"}},
+    {"id": "nvidia-d3d11-ampere", "file": "families/nvidia-d3d11-ampere.json", "platform": "windows", "gpu_family": "nvidia-d3d11", "evidence_class": "compatibility-capture", "acceptance": {"status": "offered", "validation_status": "unvalidated", "record_id": "nvidia-d3d11-ampere"}},
+    {"id": "nvidia-d3d11-blackwell", "file": "families/nvidia-d3d11-blackwell.json", "platform": "windows", "gpu_family": "nvidia-d3d11", "evidence_class": "compatibility-capture", "acceptance": {"status": "offered", "validation_status": "unvalidated", "record_id": "nvidia-d3d11-blackwell"}},
+    {"id": "amd-d3d11-gcn5", "file": "families/amd-d3d11-gcn5.json", "platform": "windows", "gpu_family": "amd-d3d11", "evidence_class": "compatibility-capture", "acceptance": {"status": "offered", "validation_status": "unvalidated", "record_id": "amd-d3d11-gcn5"}},
+    {"id": "amd-d3d11-rdna4", "file": "families/amd-d3d11-rdna4.json", "platform": "windows", "gpu_family": "amd-d3d11", "evidence_class": "compatibility-capture", "acceptance": {"status": "offered", "validation_status": "unvalidated", "record_id": "amd-d3d11-rdna4"}}
+  ],
+  "policies": {
+    "display": [
+      {"id": "mac-compact", "platform": "macos", "evidence_class": "catalogue-value", "value": {"screen": {"width": 1440, "height": 900, "avail_left": 0, "avail_top": 25, "avail_width": 1440, "avail_height": 875, "device_pixel_ratio": 2, "color_depth": 30, "color_gamut": "p3", "hdr": true}}},
+      {"id": "mac-standard", "platform": "macos", "evidence_class": "catalogue-value", "value": {"screen": {"width": 1728, "height": 1117, "avail_left": 0, "avail_top": 33, "avail_width": 1728, "avail_height": 1084, "device_pixel_ratio": 2, "color_depth": 30, "color_gamut": "p3", "hdr": true}}},
+      {"id": "mac-external", "platform": "macos", "evidence_class": "catalogue-value", "value": {"screen": {"width": 1920, "height": 1080, "avail_left": 0, "avail_top": 0, "avail_width": 1920, "avail_height": 1080, "device_pixel_ratio": 1, "color_depth": 24, "color_gamut": "srgb", "hdr": false}}},
+      {"id": "windows-hd", "platform": "windows", "evidence_class": "catalogue-value", "value": {"screen": {"width": 1920, "height": 1080, "avail_left": 0, "avail_top": 0, "avail_width": 1920, "avail_height": 1040, "device_pixel_ratio": 1, "color_depth": 24, "color_gamut": "srgb", "hdr": false}}},
+      {"id": "windows-qhd", "platform": "windows", "evidence_class": "catalogue-value", "value": {"screen": {"width": 2560, "height": 1440, "avail_left": 0, "avail_top": 0, "avail_width": 2560, "avail_height": 1400, "device_pixel_ratio": 1, "color_depth": 24, "color_gamut": "srgb", "hdr": false}}},
+      {"id": "windows-uhd", "platform": "windows", "evidence_class": "catalogue-value", "value": {"screen": {"width": 3840, "height": 2160, "avail_left": 0, "avail_top": 0, "avail_width": 3840, "avail_height": 2120, "device_pixel_ratio": 1.25, "color_depth": 24, "color_gamut": "srgb", "hdr": false}}}
+    ],
+    "hardware": [
+      {"id": "mac-compact", "platform": "macos", "evidence_class": "catalogue-value", "value": {"cpu": {"logical_cores": 8}, "memory": {"total_bytes": 17179869184}, "audio": {"hardware_buffer_frames": 256}}},
+      {"id": "mac-pro", "platform": "macos", "evidence_class": "catalogue-value", "value": {"cpu": {"logical_cores": 12}, "memory": {"total_bytes": 34359738368}, "audio": {"hardware_buffer_frames": 256}}},
+      {"id": "mac-max", "platform": "macos", "evidence_class": "catalogue-value", "value": {"cpu": {"logical_cores": 16}, "memory": {"total_bytes": 68719476736}, "audio": {"hardware_buffer_frames": 256}}},
+      {"id": "windows-standard", "platform": "windows", "evidence_class": "catalogue-value", "value": {"cpu": {"logical_cores": 8}, "memory": {"total_bytes": 17179869184}, "audio": {"hardware_buffer_frames": 480}}},
+      {"id": "windows-performance", "platform": "windows", "evidence_class": "catalogue-value", "value": {"cpu": {"logical_cores": 12}, "memory": {"total_bytes": 34359738368}, "audio": {"hardware_buffer_frames": 480}}},
+      {"id": "windows-workstation", "platform": "windows", "evidence_class": "catalogue-value", "value": {"cpu": {"logical_cores": 16}, "memory": {"total_bytes": 68719476736}, "audio": {"hardware_buffer_frames": 480}}}
+    ],
+    "locale": [
+      {"id": "en-us", "platform": "all", "evidence_class": "catalogue-value", "value": {"locale": {"timezone": "America/New_York", "accept_languages": "en-US,en"}, "keyboard": {"layout_map": {"KeyA": "a", "KeyQ": "q", "KeyW": "w", "KeyY": "y", "KeyZ": "z"}}}},
+      {"id": "en-gb", "platform": "all", "evidence_class": "catalogue-value", "value": {"locale": {"timezone": "Europe/London", "accept_languages": "en-GB,en"}, "keyboard": {"layout_map": {"KeyA": "a", "KeyQ": "q", "KeyW": "w", "KeyY": "z", "KeyZ": "y"}}}},
+      {"id": "en-sg", "platform": "all", "evidence_class": "catalogue-value", "value": {"locale": {"timezone": "Asia/Singapore", "accept_languages": "en-SG,en"}, "keyboard": {"layout_map": {"KeyA": "a", "KeyQ": "q", "KeyW": "w", "KeyY": "y", "KeyZ": "z"}}}},
+      {"id": "en-au", "platform": "all", "evidence_class": "catalogue-value", "value": {"locale": {"timezone": "Australia/Sydney", "accept_languages": "en-AU,en"}, "keyboard": {"layout_map": {"KeyA": "a", "KeyQ": "q", "KeyW": "w", "KeyY": "y", "KeyZ": "z"}}}}
+    ],
+    "theme": [
+      {"id": "light", "platform": "all", "evidence_class": "catalogue-value", "value": {"theme": {"prefers_dark": false, "highlight_argb": 4278190335, "highlight_text_argb": 4294967295}}},
+      {"id": "dark", "platform": "all", "evidence_class": "catalogue-value", "value": {"theme": {"prefers_dark": true, "highlight_argb": 3434338303, "highlight_text_argb": 4278190080}}},
+      {"id": "contrast", "platform": "all", "evidence_class": "catalogue-value", "value": {"theme": {"prefers_dark": true, "highlight_argb": 4294967295, "highlight_text_argb": 4278190080}}}
+    ]
+  },
+  "distributions": {
+    "macos": {"platform": "macos", "family_ids": ["apple-metal-m2", "apple-metal-m2-pro", "apple-metal-m3-pro", "apple-metal-m4", "apple-metal-m5"]},
+    "windows": {"platform": "windows", "family_ids": ["intel-d3d11-gen9", "intel-d3d11-gen11", "intel-d3d11-gen12lp", "nvidia-d3d11-maxwell", "nvidia-d3d11-turing", "nvidia-d3d11-ampere", "nvidia-d3d11-blackwell", "amd-d3d11-gcn5", "amd-d3d11-rdna4"]}
+  },
+  "provenance_policy": {
+    "compatibility-capture": "A normalized candidate measured by an external compatibility runtime and exercised against real targets; it is not physical-device ground truth.",
+    "catalogue-value": "An Apostate-owned normalized value constrained by platform and Chromium rules; it is not a claim of a separately captured computer.",
+    "native-derived": "Expected to be emitted by the native Apostate/Chromium path from the selected profile input.",
+    "proxy-derived": "Resolved at launch from the actual network exit and never stored in this catalogue.",
+    "host-inherited": "Omitted from the profile so the native host value remains in effect.",
+    "physical-ground-truth": "Not asserted by this catalogue. No raw physical or third-party capture is redistributed."
+  },
+  "capture_inventory": {
+    "reported_compatibility_captures": 16,
+    "normalized_named_families": 14,
+    "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5",
+    "required_schema_version": 2,
+    "secure_context_required": true,
+    "automation_signal_required": false,
+    "failed_probes_allowed": false,
+    "raw_imported": false
+  },
+  "excluded_artifacts": [
+    {"id": "raw-third-party-corpora", "reason": "Raw vendor, GoLogin, and Cloak corpora are not redistributed or used as profile payloads."},
+    {"id": "unconsented-or-uncertain-captures", "reason": "BrowserStack and other captures without per-file consent and ownership evidence are excluded."},
+    {"id": "screen-details-built-in-retina", "reason": "A shared wrapper label and inconsistent details DPR are excluded; regular geometry is selected independently."},
+    {"id": "chrome-151-browser-identity", "reason": "Browser identity fields from older captures are stripped for Chromium 152 targeting."}
+  ],
+  "native_loader": {
+    "runtime_profile_sections": ["id", "cpu", "memory", "platform", "browser", "screen", "gpu", "webgpu", "gl_limits", "gl_extensions", "locale", "theme", "input", "audio", "media", "keyboard", "fonts"],
+    "unsupported_fields": [],
+    "metadata_outside_runtime_profile": ["profile_id", "catalogue_version", "profile_schema_version", "browser_build", "gpu_family", "display_policy", "hardware_policy", "locale_source", "provenance", "identity"]
+  }
+}

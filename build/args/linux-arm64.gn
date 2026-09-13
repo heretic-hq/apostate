@@ -1,0 +1,16 @@
+target_os = "linux"
+target_cpu = "arm64"
+
+# Use Chromium's pinned Clang/LLD and hermetic ARM64 sysroot. The Linux build
+# image supplies the sysroot and tool binaries; host libraries are excluded.
+use_sysroot = true
+is_clang = true
+use_lld = true
+
+# Release output must not depend on a developer build or remote cache.
+is_component_build = false
+use_remoteexec = false
+use_siso = false
+
+
+use_goma = false

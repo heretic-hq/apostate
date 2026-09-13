@@ -37,10 +37,258 @@ Usage:
 """
 
 import argparse
+import datetime
 import hashlib
 import json
+import os
 import pathlib
+import re
 import sys
+
+EXPECTED_CAPTURE_VERSION = 2
+EXPECTED_BROWSER_MAJOR = 152
+HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
+HEADLESS_MARKER = re.compile(r"headless", re.IGNORECASE)
+FOREIGN_UA_MARKER = re.compile(
+    r"(?:Edg|Edge|OPR|Opera|Brave|Vivaldi|YaBrowser|FxiOS|Firefox|CriOS|Electron)/",
+    re.IGNORECASE,
+)
+DETERMINISTIC_PROBES = (
+    "navigator.scalars", "navigator.userAgentData", "navigator.plugins",
+    "screen.geometry", "intl.locale", "canvas.2d", "canvas.toDataURL_variants",
+    "webgl1", "webgl2", "webgpu", "audio.offline_render", "clientrects",
+    "fonts.detected", "fonts.query_api", "css.system", "css.media",
+    "api.surface", "native_code.toString", "codecs.media",
+    "webrtc.capabilities", "media.devices", "permissions.states",
+    "keyboard.layout", "touch", "wasm", "math.precision", "headers.echo",
+    "headers.echo_worker", "screen.details", "fonts.metrics", "eme.keysystems",
+    "worker.parity", "prototype.shape", "chrome.object", "error.stack",
+    "storage.persist",
+)
+PROBE_FIELDS = {"ok", "value", "error", "encoding", "duration_ms"}
+CONTEXT_FIELDS = {
+    "taken_at", "label", "ua", "collector_sha256", "device_pixel_ratio",
+    "secure_context", "headed", "automation_suspected", "automation_signals",
+    "notes",
+}
+ADMISSION_DIRNAME = "admissions"
+
+
+class CaptureAdmissionError(ValueError):
+    """A capture failed a corpus-admission requirement."""
+
+
+def _version_major(value):
+    if not isinstance(value, str):
+        return None
+    match = re.match(r"^(\d+)(?:\.|$)", value)
+    return int(match.group(1)) if match else None
+
+
+def _is_grease_brand(name):
+    return isinstance(name, str) and name.startswith("Not") and "Brand" in name
+
+
+def _validate_brand_list(brands, where):
+    if not isinstance(brands, list) or not brands:
+        raise CaptureAdmissionError("browser identity missing %s brands" % where)
+    standard = []
+    for entry in brands:
+        if not isinstance(entry, dict) or not isinstance(entry.get("brand"), str):
+            raise CaptureAdmissionError("invalid browser brand entry in %s" % where)
+        name = entry["brand"]
+        if HEADLESS_MARKER.search(name):
+            raise CaptureAdmissionError("browser identity contains a Headless marker")
+        if name in ("Chromium", "Google Chrome"):
+            major = _version_major(entry.get("version"))
+            if major is None:
+                raise CaptureAdmissionError("browser brand %s has no version" % name)
+            standard.append((name, major))
+        elif not _is_grease_brand(name):
+            raise CaptureAdmissionError("browser identity includes foreign brand %s" % name)
+    if not standard:
+        raise CaptureAdmissionError("browser identity has no Chromium or Google Chrome brand")
+    for name, major in standard:
+        if major != EXPECTED_BROWSER_MAJOR:
+            raise CaptureAdmissionError(
+                "browser brand %s is Chromium %s; release requires Chromium %s"
+                % (name, major, EXPECTED_BROWSER_MAJOR)
+            )
+
+
+def validate_context(context):
+    """Validate the provenance fields that are required for corpus admission."""
+    if not isinstance(context, dict):
+        raise CaptureAdmissionError("capture context must be an object")
+    unknown = set(context) - CONTEXT_FIELDS
+    if unknown:
+        raise CaptureAdmissionError("unexpected context fields: %s" % ", ".join(sorted(unknown)))
+    required = ("taken_at", "ua", "collector_sha256", "secure_context",
+                "automation_suspected", "automation_signals")
+    missing = [key for key in required if key not in context]
+    if missing:
+        raise CaptureAdmissionError("context missing required field(s): %s" % ", ".join(missing))
+    taken_at = context["taken_at"]
+    if not isinstance(taken_at, str) or "T" not in taken_at:
+        raise CaptureAdmissionError("context.taken_at must be an RFC3339 date-time")
+    try:
+        parsed = datetime.datetime.fromisoformat(taken_at.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.tzinfo is None:
+        raise CaptureAdmissionError("context.taken_at must include a timezone")
+    if not isinstance(context["ua"], str):
+        raise CaptureAdmissionError("context.ua must be a string")
+    collector = context["collector_sha256"]
+    if not isinstance(collector, str) or not HEX64.fullmatch(collector):
+        raise CaptureAdmissionError("context.collector_sha256 must be 64 hexadecimal characters")
+    if context["secure_context"] is not True:
+        raise CaptureAdmissionError("context.secure_context must be true")
+    if context["automation_suspected"] is not False:
+        raise CaptureAdmissionError("context.automation_suspected must be false")
+    if context["automation_signals"] != []:
+        raise CaptureAdmissionError("context.automation_signals must be an empty array")
+    if context.get("label") is not None and not isinstance(context.get("label"), str):
+        raise CaptureAdmissionError("context.label must be a string or null")
+    if "device_pixel_ratio" in context and (
+            isinstance(context["device_pixel_ratio"], bool)
+            or not isinstance(context["device_pixel_ratio"], (int, float))):
+        raise CaptureAdmissionError("context.device_pixel_ratio must be numeric")
+    if "headed" in context and context["headed"] is not None and type(context["headed"]) is not bool:
+        raise CaptureAdmissionError("context.headed must be boolean or null")
+    if "notes" in context and not isinstance(context["notes"], str):
+        raise CaptureAdmissionError("context.notes must be a string")
+
+
+def _validate_probe(value, where):
+    if not isinstance(value, dict) or set(value) - PROBE_FIELDS or type(value.get("ok")) is not bool:
+        raise CaptureAdmissionError("invalid probe record for %s" % where)
+
+
+def _validate_browser_identity(capture):
+    context = capture["context"]
+    ua = context["ua"]
+    if HEADLESS_MARKER.search(ua):
+        raise CaptureAdmissionError("context.ua contains a Headless marker")
+    if FOREIGN_UA_MARKER.search(ua):
+        raise CaptureAdmissionError("context.ua contains a foreign browser marker")
+    ua_match = re.search(r"(?:Chrome|Chromium)/(\d+)(?:\.|\s|$)", ua)
+    if not ua_match:
+        raise CaptureAdmissionError("context.ua is not a Chromium browser identity")
+    if int(ua_match.group(1)) != EXPECTED_BROWSER_MAJOR:
+        raise CaptureAdmissionError(
+            "context.ua reports Chrome %s; release requires Chromium %s"
+            % (ua_match.group(1), EXPECTED_BROWSER_MAJOR)
+        )
+
+    scalars = capture["probes"]["navigator.scalars"]["value"]
+    if not isinstance(scalars, dict):
+        raise CaptureAdmissionError("navigator.scalars value must be an object")
+    scalar_ua = scalars.get("userAgent")
+    if not isinstance(scalar_ua, str):
+        raise CaptureAdmissionError("navigator.scalars.userAgent is required")
+    if HEADLESS_MARKER.search(scalar_ua):
+        raise CaptureAdmissionError("navigator.scalars.userAgent contains a Headless marker")
+    if FOREIGN_UA_MARKER.search(scalar_ua):
+        raise CaptureAdmissionError("navigator.scalars.userAgent contains a foreign browser marker")
+    if scalar_ua != ua:
+        raise CaptureAdmissionError("context.ua and navigator.scalars.userAgent disagree")
+    if scalars.get("webdriver") is not False:
+        raise CaptureAdmissionError("navigator.scalars.webdriver must be false")
+
+    user_agent_data = capture["probes"]["navigator.userAgentData"]["value"]
+    if not isinstance(user_agent_data, dict):
+        raise CaptureAdmissionError("navigator.userAgentData value must be an object")
+    low = user_agent_data.get("low")
+    high = user_agent_data.get("high")
+    if not isinstance(low, dict) or not isinstance(high, dict):
+        raise CaptureAdmissionError("navigator.userAgentData low/high identity is required")
+    _validate_brand_list(low.get("brands"), "low")
+    for key in ("brands", "fullVersionList"):
+        if key in high:
+            _validate_brand_list(high[key], "high.%s" % key)
+    high_version = _version_major(high.get("uaFullVersion"))
+    if high_version != EXPECTED_BROWSER_MAJOR:
+        raise CaptureAdmissionError(
+            "navigator.userAgentData.uaFullVersion must be Chromium %s"
+            % EXPECTED_BROWSER_MAJOR
+        )
+
+
+def validate_capture(capture):
+    """Raise CaptureAdmissionError unless *capture* is eligible for admission."""
+    if not isinstance(capture, dict):
+        raise CaptureAdmissionError("capture must be an object")
+    allowed = {"capture_version", "context", "probes", "repeat"}
+    unknown = set(capture) - allowed
+    if unknown:
+        raise CaptureAdmissionError("unexpected capture fields: %s" % ", ".join(sorted(unknown)))
+    if type(capture.get("capture_version")) is not int or capture.get("capture_version") != EXPECTED_CAPTURE_VERSION:
+        raise CaptureAdmissionError("capture_version must be 2")
+    validate_context(capture.get("context"))
+    probes = capture.get("probes")
+    repeat = capture.get("repeat")
+    if not isinstance(probes, dict):
+        raise CaptureAdmissionError("capture.probes must be an object")
+    if not isinstance(repeat, dict):
+        raise CaptureAdmissionError("capture.repeat must be an object")
+    for pid, value in probes.items():
+        _validate_probe(value, "probes.%s" % pid)
+        if not value["ok"]:
+            raise CaptureAdmissionError("probe %s did not complete successfully" % pid)
+    for pid, value in repeat.items():
+        _validate_probe(value, "repeat.%s" % pid)
+    for pid in DETERMINISTIC_PROBES:
+        first = probes.get(pid)
+        second = repeat.get(pid)
+        if first is None or second is None:
+            raise CaptureAdmissionError("deterministic probe %s is missing from probes or repeat" % pid)
+        if not first["ok"] or not second["ok"]:
+            raise CaptureAdmissionError("deterministic probe %s did not complete successfully" % pid)
+    _validate_browser_identity(capture)
+    return True
+
+
+def admission_rejection_reason(capture):
+    try:
+        validate_capture(capture)
+    except CaptureAdmissionError as exc:
+        return str(exc)
+    return None
+
+
+def admission_record_path(out_dir, raw_sha256):
+    return pathlib.Path(out_dir) / ADMISSION_DIRNAME / (raw_sha256 + ".json")
+
+
+def persist_admission_decision(out_dir, raw_sha256, decision, reason, context=None, capture_path=None):
+    if not HEX64.fullmatch(raw_sha256):
+        raise ValueError("raw capture hash must be 64 hexadecimal characters")
+    record = {
+        "raw_sha256": raw_sha256,
+        "decision": decision,
+        "reason": reason,
+        "context": context if isinstance(context, dict) else None,
+        "recorded_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    if capture_path is not None:
+        record["capture_path"] = str(capture_path)
+    path = admission_record_path(out_dir, raw_sha256)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    encoded = (json.dumps(record, indent=2, sort_keys=True) + "\n").encode()
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        existing = json.loads(path.read_text())
+        if (existing.get("raw_sha256"), existing.get("decision"), existing.get("reason")) != (
+                raw_sha256, decision, reason):
+            raise ValueError("admission decision already exists for raw capture hash")
+        return path
+    with os.fdopen(fd, "wb") as output:
+        output.write(encoded)
+    return path
+
+EVIDENCE_CLASSES = ("physical-ground-truth", "compatibility-capture")
 
 # Probe -> block. A probe listed nowhere is deliberately not carried into any
 # block; see UNASSIGNED at the bottom for why each one is left out.
@@ -107,69 +355,68 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("capture", type=pathlib.Path)
     ap.add_argument("--out", type=pathlib.Path, default=pathlib.Path("corpus/blocks"))
+    ap.add_argument("--evidence", choices=EVIDENCE_CLASSES,
+                    default="physical-ground-truth",
+                    help="evidence class for the emitted blocks; compatibility "
+                         "captures require --evidence-source")
+    ap.add_argument("--evidence-source",
+                    help="named compatibility runtime or other provenance source")
     ap.add_argument("--allow-software-gpu", action="store_true",
                     help="keep a gpu block whose renderer is a software or "
                          "virtual rasteriser (normally skipped)")
-    ap.add_argument("--allow-foreign-brand", action="store_true",
-                    help="capture is from another Chromium browser: take only "
-                         "the hardware blocks, never the platform block")
     args = ap.parse_args()
+    raw_sha256 = None
+    try:
+        raw = args.capture.read_bytes()
+        raw_sha256 = hashlib.sha256(raw).hexdigest()
+        def reject_constant(_value):
+            raise ValueError("non-finite JSON number")
+        cap = json.loads(raw, parse_constant=reject_constant)
+    except (OSError, ValueError, json.JSONDecodeError, UnicodeError) as exc:
+        reason = "invalid capture JSON: %s" % exc
+        if raw_sha256 is None:
+            print("REFUSED: %s" % reason, file=sys.stderr)
+            return 2
+        try:
+            persist_admission_decision(args.out, raw_sha256, "rejected", reason)
+        except (OSError, ValueError, json.JSONDecodeError) as persist_error:
+            print("REFUSED: %s (admission decision could not be saved: %s)" %
+                  (reason, persist_error), file=sys.stderr)
+            return 2
+        print("REFUSED: %s" % reason, file=sys.stderr)
+        return 2
 
-    cap = json.loads(args.capture.read_text())
+    reason = admission_rejection_reason(cap)
+    if reason:
+        try:
+            persist_admission_decision(args.out, raw_sha256, "rejected", reason,
+                                       cap.get("context") if isinstance(cap, dict) else None)
+        except (OSError, ValueError, json.JSONDecodeError) as persist_error:
+            print("REFUSED: %s (admission decision could not be saved: %s)" %
+                  (reason, persist_error), file=sys.stderr)
+            return 2
+        print("REFUSED: %s" % reason, file=sys.stderr)
+        return 2
+
     ctx = cap["context"]
 
-    # A capture that is not ground truth must never enter the corpus. These are
-    # the same two gates conform.py applies, checked here so a bad capture is
-    # rejected at the door rather than discovered downstream.
-    if ctx.get("automation_suspected"):
-        print("REFUSED: capture reports automation signals: %s"
-              % ctx.get("automation_signals"), file=sys.stderr)
+    # Evidence classification is an explicit command-line decision. Labels and
+    # filenames remain descriptive and never decide whether a capture is valid.
+    if args.evidence == "compatibility-capture" and not args.evidence_source:
+        reason = "--evidence=compatibility-capture requires --evidence-source"
+        persist_admission_decision(args.out, raw_sha256, "rejected", reason, ctx)
+        print("REFUSED: %s" % reason, file=sys.stderr)
         return 2
-    if ctx.get("secure_context") is False:
-        print("REFUSED: capture was not taken in a secure context. Every "
-              "secure-context-gated probe in it reads 'unsupported'.", file=sys.stderr)
-        return 2
-    # The binary we ship is Chrome-branded Chromium and says so in its brand
-    # list, so a capture from another Chromium-derived browser cannot supply a
-    # platform block: the profile would claim Chrome while its Client Hints
-    # named a different vendor, which is a flat contradiction a page reads in
-    # one call. Edge, Brave, Opera and Vivaldi all present as Chromium plus
-    # their own brand.
-    #
-    # The hardware-shaped blocks are a different question. A GPU block is ANGLE
-    # over the same driver whatever Chromium wrapped it, and a screen is a
-    # screen. Those are probably portable — but probably is not measured, so
-    # they are only emitted on request and are stamped with the browser they
-    # came from, never silently.
-    brands = ((probe(cap, "navigator.userAgentData") or {}).get("low") or {}).get("brands") or []
-    names = [b.get("brand") for b in brands]
-    foreign = [n for n in names
-               if n and n not in ("Chromium", "Google Chrome")
-               and "Not" not in n and "Brand" not in n]
-    if foreign and not args.allow_foreign_brand:
-        print("REFUSED: capture is from %s, not Google Chrome (brands: %s)."
-              % (", ".join(foreign), ", ".join(n for n in names if n)), file=sys.stderr)
-        print("  Our binary reports 'Google Chrome', so a platform block from this",
-              file=sys.stderr)
-        print("  capture would contradict the profile it is used in.", file=sys.stderr)
-        print("  Re-capture in Google Chrome, or pass --allow-foreign-brand to take",
-              file=sys.stderr)
-        print("  only the hardware blocks (gpu, display, hardware, locale, theme).",
-              file=sys.stderr)
-        return 2
-
-    failed = [k for k, v in cap["probes"].items() if not v.get("ok")]
-    if failed:
-        print("REFUSED: %d probe(s) failed; a partial capture makes partial "
-              "blocks: %s" % (len(failed), ", ".join(failed)), file=sys.stderr)
+    if args.evidence == "physical-ground-truth" and args.evidence_source:
+        reason = "--evidence-source requires compatibility-capture classification"
+        persist_admission_decision(args.out, raw_sha256, "rejected", reason, ctx)
+        print("REFUSED: %s" % reason, file=sys.stderr)
         return 2
 
     label = ctx.get("label") or args.capture.stem
     written = []
 
     for block, pids in BLOCK_PROBES.items():
-        if foreign and block == "platform":
-            continue
         content = {}
         for pid in pids:
             v = probe(cap, pid)
@@ -180,8 +427,29 @@ def main() -> int:
             content["css.media"] = {k: v for k, v in content["css.media"].items()
                                     if k in keep}
 
-        if not content:
+        if block == "hardware":
+            # navigator.deviceMemory is a browser bucket, not installed RAM.
+            # Keep it out of the hardware content unless an owner sidecar
+            # supplies the physical value used by profile composition.
+            nav = probe(cap, "navigator.scalars") or {}
+            side = args.capture.with_suffix(".memory")
+            if nav.get("deviceMemory") and not side.exists():
+                heap = content.get("memory.heap")
+                if isinstance(heap, dict):
+                    content["memory.heap"] = {
+                        key: value for key, value in heap.items()
+                        if key != "deviceMemory"
+                    }
+
+        if not content and block != "hardware":
             continue
+
+        if not content:
+            if block != "hardware":
+                continue
+            nav = probe(cap, "navigator.scalars") or {}
+            if nav.get("hardwareConcurrency") is None:
+                continue
 
         # The identity hash ignores the part's *name*. Two captures of the same
         # silicon therefore hash equal even if their renderer strings differ,
@@ -194,16 +462,27 @@ def main() -> int:
             "block": block,
             "label": label,
             "source_capture": str(args.capture.name),
+            "source_capture_sha256": raw_sha256,
+            "source_context": ctx,
             "source_taken_at": ctx.get("taken_at"),
+            "provenance": {
+                "source_capture_sha256": raw_sha256,
+                "source_context": ctx,
+                "evidence": args.evidence,
+            },
             "browser_version": (probe(cap, "navigator.userAgentData") or {})
                                .get("high", {}).get("uaFullVersion"),
-            "captured_browser": (foreign[0] if foreign else "Google Chrome"),
+            "captured_browser": "Google Chrome",
             "captured_platform": ((probe(cap, "navigator.userAgentData") or {})
                                   .get("high") or {}).get("platform"),
+            "evidence": args.evidence,
             "content_sha256": sha(content),
             "identity_sha256": sha(ident),
             "content": content,
         }
+        if args.evidence_source:
+            rec["evidence_source"] = args.evidence_source
+            rec["provenance"]["evidence_source"] = args.evidence_source
 
         if block == "platform":
             # Carried as a side field rather than as a probe, because
@@ -230,28 +509,27 @@ def main() -> int:
                 rec["audio_buffer_frames"] = round(
                     audio["baseLatency"] * audio["sampleRate"])
                 rec["audio_sample_rate"] = audio["sampleRate"]
-            # deviceMemory is Chromium's bucket, not installed RAM: it rounds to
-            # a power of two and saturates, so every machine above the top bucket
-            # reports the same number. Recorded as a floor and flagged, because
-            # the incognito storage quota is derived from this field and a
-            # bucketed value there produces a quota no machine of the real size
-            # reports. The true figure has to come from the machine's owner.
-            if nav.get("deviceMemory"):
-                rec["memory_total_bytes"] = int(nav["deviceMemory"]) * 1024**3
-                rec["memory_is_floor"] = True
-                rec["evidence"] = "measured-floor"
-                # Overridable from a sidecar file next to the capture, so an
-                # owner-reported figure is recorded once and survives
-                # re-decomposition. The reference MacBook is 36 GiB, which
-                # deviceMemory reports as 32 and which the incognito quota
-                # proves is not 32.
-                side = args.capture.with_suffix(".memory")
-                if side.exists():
+            # deviceMemory is a browser bucket, not installed RAM. It is never
+            # promoted to profile memory without an owner-reported sidecar.
+            side = args.capture.with_suffix(".memory")
+            if nav.get("deviceMemory") and not side.exists():
+                rec["evidence_detail"] = "memory-deviceMemory-floor-excluded"
+            if side.exists():
+                try:
                     gib_real = int(side.read_text().strip())
-                    rec["memory_total_bytes"] = gib_real * 1024**3
-                    rec["memory_is_floor"] = False
-                    rec["evidence"] = "measured"
-                    rec["memory_source"] = "owner-reported (%s)" % side.name
+                except (OSError, ValueError) as exc:
+                    raise ValueError(
+                        "owner memory sidecar must contain a positive integer GiB"
+                    ) from exc
+                if gib_real <= 0:
+                    raise ValueError(
+                        "owner memory sidecar must contain a positive integer GiB"
+                    )
+                rec["evidence"] = "physical-ground-truth"
+                rec["memory_total_bytes"] = gib_real * 1024**3
+                rec["memory_is_floor"] = False
+                rec["evidence_detail"] = "memory-owner-reported"
+                rec["memory_source"] = "owner-reported (%s)" % side.name
 
         if block == "gpu":
             # Three hashes, because the block spans two different questions and
@@ -322,6 +600,13 @@ def main() -> int:
         path = d / ("%s-%s.json" % (label, rec["content_sha256"][:12]))
         path.write_text(json.dumps(rec, indent=2) + "\n")
         written.append((block, path, rec))
+    try:
+        persist_admission_decision(args.out, raw_sha256, "accepted",
+                                   "capture passed admission checks", ctx)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print("REFUSED: admission decision could not be saved: %s" % exc,
+              file=sys.stderr)
+        return 2
 
     print("decomposed %s" % args.capture.name)
     for block, path, rec in written:
@@ -340,7 +625,8 @@ def main() -> int:
 #                      owns each one rather than carried whole
 #   storage.estimate, timing.resolution, network.connection, permissions.states
 #                      measured volatile, or state rather than identity
-#   memory.heap        carried in hardware, but see the note in compose about
-#                      jsHeapSizeLimit being a V8 constant, not a host fact
+#   memory.heap        carried in hardware for measured heap observations;
+#                      deviceMemory is excluded from composed memory unless an
+#                      owner-reported sidecar supplies installed RAM
 if __name__ == "__main__":
     sys.exit(main())

@@ -112,8 +112,8 @@ Widths alone do not identify a font. Standard/default and math remain absent
 when unmeasured. This does not reconstruct a platform's character fallback.
 
 References: resources/fingerprints/raw/m4-max-chrome-20260908T163229Z.json and
-resources/fingerprints/raw/unlabelled-20260910T140818Z.json, fonts.metrics and
-fonts.detected; Chromium79460ebecaa5625e57a5fb679a735659e73dc687
+fonts.metrics and fonts.detected; Windows generic-family control is unavailable and
+remains pending. Chromium79460ebecaa5625e57a5fb679a735659e73dc687
 chrome/app/resources/locale_settings_{mac,win}.grd and
 chrome/browser/chrome_content_browser_client.cc:4635-4674.
 Ledger: fonts.generic-families. V1 and browser controls remain required.

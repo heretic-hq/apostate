@@ -7,7 +7,13 @@ Built first because every other subsystem inherits its decisions, and because
 its failure mode is invisible in the surface it fixes.
 
 Entry points marked **verified** were confirmed against the pinned checkout of
-152.0.7977.82, not codesearch, which indexes `main`.
+152.0.7977.83, not codesearch, which indexes `main`.
+
+At the release boundary, this loader consumes a resolved profile. Resolution
+may select an explicit catalogue entry or a coherent composition; it does not
+promote an ambiguous raw capture to T0. Evidence class and provenance remain
+metadata for the resolver and release gates, not a value inferred by a child
+process.
 
 ## The constraint that decides the design
 
@@ -51,20 +57,17 @@ geometry), **renderer** (most surfaces), **GPU** (GPUInfo strings), and
 
 ## Mechanism
 
-Follow the field trial pattern, which already solves this problem in-tree and
-already crosses the sandbox correctly:
-`content/browser/child_process_launcher_helper.cc:120` — **verified** — passes
-`switches::kFieldTrialHandle` with a descriptor, delivering a shared memory
-region whose handle travels on the command line.
+The current release transport is the existing Chromium command-line path:
+`--apostate-profile` carries one base64-encoded, strict RFC JSON object. The
+browser process reads the switch lazily on the first call to
+`base::apostate::Profile::Get()`. The common switch propagation list forwards
+that same payload to child processes, so each process parses the same immutable
+profile input.
 
-- **A scalar switch** carries the profile id and a handle to the region.
-- **Shared memory** carries the profile body. Profiles include font lists, WebGL
-  parameter tables and render payloads; those do not belong on a command line.
-- **Parsed immediately after field trials, before mojo**, so no page-observable
-  read can precede it.
-- The browser process loads the profile from disk directly and is the single
-  source; children receive the region rather than re-reading the file, so no
-  process can disagree with another.
+This is intentionally inline and bounded by command-line capacity. Shared
+memory delivery is not part of the current implementation; a future transport
+change would require a native parser patch, cross-process propagation change,
+and a new V2/V3 verification pass before it could be documented here.
 
 Child command lines are assembled at
 `content/browser/renderer_host/render_process_host_impl.cc:3751` via
@@ -163,11 +166,12 @@ jump to a different device.
 
 ## Deliverables
 
-1. `ConfiguredProfile` — the in-memory representation, loaded once in the
-   browser process.
-2. The switch and shared memory region, parsed after field trials and before
-   mojo, in every process type listed above.
-3. A host-capability check that refuses under-capacity profiles at launch.
+1. `ConfiguredProfile` — the in-memory representation, loaded lazily on first
+   `base::apostate::Profile::Get()` access in each process.
+2. The base64 profile payload on `--apostate-profile`, propagated to every
+   process type listed above and decoded identically in each process.
+3. A host-capability check that applies the profile's clamp-and-warn policy;
+   it does not turn a weak capability mismatch into a hard launch failure.
 4. The precedence rule for explicit overrides (`--fingerprint-*` style flags)
    against profile values, so a single field can be changed without the result
    silently becoming incoherent.

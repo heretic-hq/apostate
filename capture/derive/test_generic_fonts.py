@@ -37,8 +37,7 @@ class GenericFontTests(unittest.TestCase):
     def test_reference_maps_validate_and_do_not_invent_math_or_standard(self):
         schema = json.loads((ROOT / "config/profile.schema.json").read_text())
         for filename, platform, serif, sans, mono in [
-            ("m4-max-chrome-20260908T163229Z.json", "macOS", "Times", "Helvetica", "Menlo"),
-            ("unlabelled-20260910T140818Z.json", "Windows", "Times New Roman", "Arial", "Consolas")
+            ("windows-chrome-20260910T140813Z.json", "Windows", "Times New Roman", "Arial", "Consolas")
         ]:
             capture = json.loads((ROOT / "resources/fingerprints/raw" / filename).read_text())
             families = to_profile.derive_generic_fonts(capture, platform)

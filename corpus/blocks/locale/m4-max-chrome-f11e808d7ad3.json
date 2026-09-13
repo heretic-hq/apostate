@@ -1,11 +1,39 @@
 {
   "block": "locale",
   "label": "m4-max-chrome",
-  "source_capture": "m4-max-chrome-20260907T191217Z.json",
-  "source_taken_at": "2026-09-07T19:12:16.869Z",
+  "source_capture": "m4-max-chrome-20260908T163229Z.json",
+  "source_capture_sha256": "e9ea539d46d686e973dca2365c07cb3956d59e9a08c4cadca501bdbff783021f",
+  "source_context": {
+    "taken_at": "2026-09-10T13:17:26.181Z",
+    "label": "m4-max-chrome",
+    "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+    "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5",
+    "device_pixel_ratio": 2,
+    "headed": true,
+    "automation_suspected": false,
+    "automation_signals": [],
+    "secure_context": true
+  },
+  "source_taken_at": "2026-09-10T13:17:26.181Z",
+  "provenance": {
+    "source_capture_sha256": "e9ea539d46d686e973dca2365c07cb3956d59e9a08c4cadca501bdbff783021f",
+    "source_context": {
+      "taken_at": "2026-09-10T13:17:26.181Z",
+      "label": "m4-max-chrome",
+      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+      "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5",
+      "device_pixel_ratio": 2,
+      "headed": true,
+      "automation_suspected": false,
+      "automation_signals": [],
+      "secure_context": true
+    },
+    "evidence": "physical-ground-truth"
+  },
   "browser_version": "152.0.7977.83",
   "captured_browser": "Google Chrome",
   "captured_platform": "macOS",
+  "evidence": "physical-ground-truth",
   "content_sha256": "f11e808d7ad35e38b63562d729146902acb68c44ec528d0014bbbf41eb0aa18f",
   "identity_sha256": "f11e808d7ad35e38b63562d729146902acb68c44ec528d0014bbbf41eb0aa18f",
   "content": {

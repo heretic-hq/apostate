@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/apostate/apostate/release/manifest.schema.json",
+  "title": "Apostate immutable release manifest",
+  "description": "Machine-readable identity and integrity metadata for one immutable Apostate release artifact. SHA-256 fields provide integrity; consumers must independently verify the detached signature and reject a missing or invalid signature before extracting an artifact. This manifest contains no credentials or private signing material.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "package_version",
+    "chromium_version",
+    "catalogue_version",
+    "platform",
+    "artifact",
+    "sha256",
+    "signature",
+    "source_revision",
+    "patch_series_sha256",
+    "build_manifest_sha256"
+  ],
+  "properties": {
+    "package_version": {
+      "const": "0.1.0",
+      "description": "Apostate package release version. The release-candidate contract is immutable at 0.1.0."
+    },
+    "chromium_version": {
+      "const": "152.0.7977.83",
+      "description": "Chromium version embedded in the artifact."
+    },
+    "catalogue_version": {
+      "const": 1,
+      "description": "Version of the Apostate-owned profile catalogue required by the resolver."
+    },
+    "platform": {
+      "enum": [
+        "linux-x64",
+        "linux-arm64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "description": "The exact binary target represented by artifact."
+    },
+    "artifact": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^apostate-152\\.0\\.7977\\.83-(?:linux-x64|linux-arm64|macos-arm64|windows-x64)\\.(?:tar\\.zst|zip)$",
+      "description": "Immutable artifact filename. It is deliberately restricted to the release naming contract and cannot contain a path or credential-bearing URI."
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Lowercase SHA-256 digest of the complete artifact bytes."
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 88,
+      "maxLength": 88,
+      "pattern": "^[A-Za-z0-9+/]{86}==$",
+      "description": "RFC 4648 padded base64 encoding of the 64-byte detached Ed25519 signature over the canonical artifact metadata. Package installers must verify it against the committed verification policy before extraction."
+    },
+    "source_revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Exact 40-character lowercase Git revision used for the source checkout."
+    },
+    "patch_series_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Lowercase SHA-256 digest of patches/series."
+    },
+    "build_manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Lowercase SHA-256 digest of the build manifest that produced this artifact."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "const": "windows-x64"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "artifact": {
+            "pattern": "^apostate-152\\.0\\.7977\\.83-windows-x64\\.zip$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {
+            "enum": [
+              "linux-x64",
+              "linux-arm64",
+              "macos-arm64"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "artifact": {
+            "pattern": "^apostate-152\\.0\\.7977\\.83-(?:linux-x64|linux-arm64|macos-arm64)\\.tar\\.zst$"
+          }
+        }
+      }
+    }
+  ]
+}

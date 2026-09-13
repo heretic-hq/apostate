@@ -47,7 +47,7 @@ class SpeechProviderTests(unittest.TestCase):
                 to_profile.derive_speech_voices(capture([voice]))
 
     def test_real_reference_identity_is_retained_without_admitting_capability(self):
-        for filename in ("unlabelled-20260910T140818Z.json", "m4-max-chrome-20260908T163229Z.json"):
+        for filename in ("windows-chrome-20260910T140813Z.json", "m4-max-chrome-20260908T163229Z.json"):
             data = json.loads((ROOT / "resources/fingerprints/raw" / filename).read_text())
             source = data["probes"]["speech.voices"]["value"]
             voices = to_profile.derive_speech_voices(data)

@@ -2,64 +2,137 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/apostate/apostate/capture/schema/capture.schema.json",
   "title": "Native capture",
-  "description": "Lossless record of what a real device emitted. Raw measurements are stored; digests are derived off-device. Every probe carries its own success state so a failure can never be mistaken for a measurement.",
+  "description": "Lossless record of what a real device emitted. Only capture version 2 records with explicit provenance, no automation signals, a Chromium 152 identity, and complete deterministic repeats are eligible for corpus admission.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["capture_version", "context", "probes"],
+  "required": ["capture_version", "context", "probes", "repeat"],
   "properties": {
-    "capture_version": { "type": "integer", "enum": [1, 2] },
-
+    "capture_version": { "const": 2 },
     "context": {
       "type": "object",
       "description": "Provenance. A capture without this is not evidence.",
       "additionalProperties": false,
-      "required": ["taken_at", "ua", "collector_sha256"],
+      "required": ["taken_at", "ua", "collector_sha256", "secure_context", "automation_suspected", "automation_signals"],
       "properties": {
         "taken_at": { "type": "string", "format": "date-time" },
-        "label": { "type": ["string", "null"], "description": "Human name for the device, e.g. 'apple-m4-max'" },
+        "label": { "type": ["string", "null"], "description": "Human name for the device; descriptive only." },
         "ua": { "type": "string" },
-        "collector_sha256": { "type": "string", "description": "Hash of collector.js that produced this. Captures from different collector versions are not comparable." },
+        "collector_sha256": { "type": "string", "pattern": "^[0-9A-Fa-f]{64}$", "description": "Hash of collector.js that produced this. Unknown hashes are not admissible." },
         "device_pixel_ratio": { "type": "number" },
-        "secure_context": { "type": "boolean" },
+        "secure_context": { "const": true },
         "headed": { "type": ["boolean", "null"], "description": "Whether a real window was on screen. Null when undeterminable." },
-        "automation_suspected": {
-          "type": "boolean",
-          "description": "True if any automation-shaped signal was present (navigator.webdriver, CDP artifacts, headless UA token). A capture with this set is not T0."
-        },
-        "automation_signals": { "type": "array", "items": { "type": "string" } },
+        "automation_suspected": { "const": false },
+        "automation_signals": { "type": "array", "maxItems": 0, "items": { "type": "string" } },
         "notes": { "type": "string" }
       }
     },
-
     "probes": {
       "type": "object",
       "description": "One entry per measured surface, keyed by probe id.",
+      "required": ["navigator.scalars", "navigator.userAgentData", "navigator.plugins", "screen.geometry", "intl.locale", "canvas.2d", "canvas.toDataURL_variants", "webgl1", "webgl2", "webgpu", "audio.offline_render", "clientrects", "fonts.detected", "fonts.query_api", "css.system", "css.media", "api.surface", "native_code.toString", "codecs.media", "webrtc.capabilities", "media.devices", "permissions.states", "keyboard.layout", "touch", "wasm", "math.precision", "headers.echo", "headers.echo_worker", "screen.details", "fonts.metrics", "eme.keysystems", "worker.parity", "prototype.shape", "chrome.object", "error.stack", "storage.persist"],
+      "properties": {
+        "navigator.scalars": { "$ref": "#/$defs/successful_probe" },
+        "navigator.userAgentData": { "$ref": "#/$defs/successful_probe" },
+        "navigator.plugins": { "$ref": "#/$defs/successful_probe" },
+        "screen.geometry": { "$ref": "#/$defs/successful_probe" },
+        "intl.locale": { "$ref": "#/$defs/successful_probe" },
+        "canvas.2d": { "$ref": "#/$defs/successful_probe" },
+        "canvas.toDataURL_variants": { "$ref": "#/$defs/successful_probe" },
+        "webgl1": { "$ref": "#/$defs/successful_probe" },
+        "webgl2": { "$ref": "#/$defs/successful_probe" },
+        "webgpu": { "$ref": "#/$defs/successful_probe" },
+        "audio.offline_render": { "$ref": "#/$defs/successful_probe" },
+        "clientrects": { "$ref": "#/$defs/successful_probe" },
+        "fonts.detected": { "$ref": "#/$defs/successful_probe" },
+        "fonts.query_api": { "$ref": "#/$defs/successful_probe" },
+        "css.system": { "$ref": "#/$defs/successful_probe" },
+        "css.media": { "$ref": "#/$defs/successful_probe" },
+        "api.surface": { "$ref": "#/$defs/successful_probe" },
+        "native_code.toString": { "$ref": "#/$defs/successful_probe" },
+        "codecs.media": { "$ref": "#/$defs/successful_probe" },
+        "webrtc.capabilities": { "$ref": "#/$defs/successful_probe" },
+        "media.devices": { "$ref": "#/$defs/successful_probe" },
+        "permissions.states": { "$ref": "#/$defs/successful_probe" },
+        "keyboard.layout": { "$ref": "#/$defs/successful_probe" },
+        "touch": { "$ref": "#/$defs/successful_probe" },
+        "wasm": { "$ref": "#/$defs/successful_probe" },
+        "math.precision": { "$ref": "#/$defs/successful_probe" },
+        "headers.echo": { "$ref": "#/$defs/successful_probe" },
+        "headers.echo_worker": { "$ref": "#/$defs/successful_probe" },
+        "screen.details": { "$ref": "#/$defs/successful_probe" },
+        "fonts.metrics": { "$ref": "#/$defs/successful_probe" },
+        "eme.keysystems": { "$ref": "#/$defs/successful_probe" },
+        "worker.parity": { "$ref": "#/$defs/successful_probe" },
+        "prototype.shape": { "$ref": "#/$defs/successful_probe" },
+        "chrome.object": { "$ref": "#/$defs/successful_probe" },
+        "error.stack": { "$ref": "#/$defs/successful_probe" },
+        "storage.persist": { "$ref": "#/$defs/successful_probe" }
+      },
       "additionalProperties": { "$ref": "#/$defs/probe" }
     },
-
     "repeat": {
       "type": "object",
-      "description": "Second reading of every deterministic probe, taken in the same session. Divergence here means the field is not stable on real hardware and cannot be treated as a fixed value.",
+      "description": "Second reading of every deterministic probe, taken in the same session.",
+      "required": ["navigator.scalars", "navigator.userAgentData", "navigator.plugins", "screen.geometry", "intl.locale", "canvas.2d", "canvas.toDataURL_variants", "webgl1", "webgl2", "webgpu", "audio.offline_render", "clientrects", "fonts.detected", "fonts.query_api", "css.system", "css.media", "api.surface", "native_code.toString", "codecs.media", "webrtc.capabilities", "media.devices", "permissions.states", "keyboard.layout", "touch", "wasm", "math.precision", "headers.echo", "headers.echo_worker", "screen.details", "fonts.metrics", "eme.keysystems", "worker.parity", "prototype.shape", "chrome.object", "error.stack", "storage.persist"],
+      "properties": {
+        "navigator.scalars": { "$ref": "#/$defs/successful_probe" },
+        "navigator.userAgentData": { "$ref": "#/$defs/successful_probe" },
+        "navigator.plugins": { "$ref": "#/$defs/successful_probe" },
+        "screen.geometry": { "$ref": "#/$defs/successful_probe" },
+        "intl.locale": { "$ref": "#/$defs/successful_probe" },
+        "canvas.2d": { "$ref": "#/$defs/successful_probe" },
+        "canvas.toDataURL_variants": { "$ref": "#/$defs/successful_probe" },
+        "webgl1": { "$ref": "#/$defs/successful_probe" },
+        "webgl2": { "$ref": "#/$defs/successful_probe" },
+        "webgpu": { "$ref": "#/$defs/successful_probe" },
+        "audio.offline_render": { "$ref": "#/$defs/successful_probe" },
+        "clientrects": { "$ref": "#/$defs/successful_probe" },
+        "fonts.detected": { "$ref": "#/$defs/successful_probe" },
+        "fonts.query_api": { "$ref": "#/$defs/successful_probe" },
+        "css.system": { "$ref": "#/$defs/successful_probe" },
+        "css.media": { "$ref": "#/$defs/successful_probe" },
+        "api.surface": { "$ref": "#/$defs/successful_probe" },
+        "native_code.toString": { "$ref": "#/$defs/successful_probe" },
+        "codecs.media": { "$ref": "#/$defs/successful_probe" },
+        "webrtc.capabilities": { "$ref": "#/$defs/successful_probe" },
+        "media.devices": { "$ref": "#/$defs/successful_probe" },
+        "permissions.states": { "$ref": "#/$defs/successful_probe" },
+        "keyboard.layout": { "$ref": "#/$defs/successful_probe" },
+        "touch": { "$ref": "#/$defs/successful_probe" },
+        "wasm": { "$ref": "#/$defs/successful_probe" },
+        "math.precision": { "$ref": "#/$defs/successful_probe" },
+        "headers.echo": { "$ref": "#/$defs/successful_probe" },
+        "headers.echo_worker": { "$ref": "#/$defs/successful_probe" },
+        "screen.details": { "$ref": "#/$defs/successful_probe" },
+        "fonts.metrics": { "$ref": "#/$defs/successful_probe" },
+        "eme.keysystems": { "$ref": "#/$defs/successful_probe" },
+        "worker.parity": { "$ref": "#/$defs/successful_probe" },
+        "prototype.shape": { "$ref": "#/$defs/successful_probe" },
+        "chrome.object": { "$ref": "#/$defs/successful_probe" },
+        "error.stack": { "$ref": "#/$defs/successful_probe" },
+        "storage.persist": { "$ref": "#/$defs/successful_probe" }
+      },
       "additionalProperties": { "$ref": "#/$defs/probe" }
     }
   },
-
   "$defs": {
     "probe": {
       "type": "object",
       "additionalProperties": false,
       "required": ["ok"],
       "properties": {
-        "ok": { "type": "boolean", "description": "False means the probe failed. `value` is then null and `error` explains. Never substitute a plausible value." },
-        "value": { "description": "The raw measurement. Any JSON type. Null when ok is false." },
-        "error": { "type": ["string", "null"], "description": "Exception message or reason the probe could not run." },
-        "encoding": {
-          "type": "string",
-          "enum": ["json", "base64", "float32-array", "uint8-array"],
-          "description": "How `value` is stored. Binary payloads are base64 so nothing is lost to JSON number coercion."
-        },
+        "ok": { "type": "boolean" },
+        "value": {},
+        "error": { "type": ["string", "null"] },
+        "encoding": { "type": "string", "enum": ["json", "base64", "float32-array", "uint8-array"] },
         "duration_ms": { "type": "number" }
       }
+    },
+    "successful_probe": {
+      "allOf": [
+        { "$ref": "#/$defs/probe" },
+        { "properties": { "ok": { "const": true } } }
+      ]
     }
   }
 }

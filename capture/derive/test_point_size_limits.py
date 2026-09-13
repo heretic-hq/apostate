@@ -17,7 +17,7 @@ def gl(pair):
 class PointSizeTests(unittest.TestCase):
     def test_integral_endpoints_are_preserved_for_both_references(self):
         root = Path(__file__).resolve().parents[2]
-        for filename, expected in (("unlabelled-20260910T140818Z.json", 1024),
+        for filename, expected in (("windows-chrome-20260910T140813Z.json", 1024),
                                    ("m4-max-chrome-20260908T163229Z.json", 511)):
             capture = json.loads((root / "resources/fingerprints/raw" / filename).read_text())
             limits = to_profile.derive_gl_limits(to_profile.probe(capture, "webgl1"),

@@ -1,0 +1,18 @@
+{
+  "id": "apple-metal-m5",
+  "platform": "macos",
+  "gpu_family": "apple-metal",
+  "evidence_class": "compatibility-capture",
+  "provenance": "Normalized compatibility candidate; not physical-device ground truth.",
+  "anchor": {"gpu_vendor_renderer": "compatibility-capture", "webgl_extensions_limits": "compatibility-capture", "webgpu_architecture": "compatibility-capture", "ua_family": "catalogue-value", "font_metric_policy": "native-derived", "canvas_text_rendering": "native-derived", "audio_cpu_class": "catalogue-value", "codec_platform_api": "compatibility-capture"},
+  "profile": {
+    "id": "apple-metal-m5",
+    "platform": {"name": "macOS", "version": "26.6.2", "architecture": "arm", "bitness": "64", "mobile": false, "navigator_platform": "MacIntel"},
+    "browser": {"user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"},
+    "gpu": {"unmasked_renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)", "unmasked_vendor": "Google Inc. (Apple)"},
+    "gl_limits": {"MAX_TEXTURE_SIZE": 16384, "MAX_RENDERBUFFER_SIZE": 16384, "MAX_VERTEX_UNIFORM_VECTORS": 1024, "MAX_FRAGMENT_UNIFORM_VECTORS": 1024},
+    "gl_extensions": ["ANGLE_instanced_arrays", "EXT_blend_minmax", "EXT_color_buffer_float", "EXT_disjoint_timer_query_webgl2", "OES_element_index_uint", "OES_texture_float_linear"],
+    "webgpu": {"info": {"vendor": "apple", "architecture": "m5"}},
+    "media": {"hw_decode_codecs": ["h264", "hevc", "vp8", "vp9", "av1"]}
+  }
+}

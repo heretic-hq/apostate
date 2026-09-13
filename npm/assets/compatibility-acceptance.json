@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "catalogue_id": "apostate",
+  "catalogue_version": 1,
+  "profile_schema_version": 2,
+  "browser_build": "152.0.7977.83",
+  "acceptance_track": "V3-C/V4-C",
+  "offering_policy": {
+    "initial_catalogue_status": "offered",
+    "physical_reference_required_for_t0": true,
+    "physical_t0_closure": "never",
+    "raw_compatibility_corpus_redistributed": false,
+    "native_capability_ceiling": "enforced"
+  },
+  "capture_inventory": {
+    "reported_compatibility_captures": 16,
+    "normalized_named_families": 14,
+    "normalization_mapping_status": "private-not-redistributed",
+    "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5",
+    "raw_imported": false
+  },
+  "probe_requirements": {
+    "repeatability_runs": 3,
+    "coherence_check_ids": [
+      "platform-browser-gpu",
+      "webgl-extension-limit",
+      "webgl-webgpu-identity",
+      "native-capability-ceiling"
+    ],
+    "held_out_probe_ids": [
+      "webgl-allocation-boundary",
+      "webgl-readback-boundary",
+      "webgl-shader-compilation-boundary",
+      "webgpu-feature-limit-boundary"
+    ],
+    "webgl_surface_ids": ["identity", "extensions", "limits", "precision", "allocation", "readback", "shader_compilation"],
+    "webgpu_surface_ids": ["identity", "features", "limits", "execution"]
+  },
+  "families": [
+    {
+      "family_id": "apple-metal-m2",
+      "platform": "macos",
+      "evidence_class": "compatibility-capture",
+      "status": "offered",
+      "source": {"runtime": "gologin", "capture_set_id": "gologin-compatibility-capture-set", "normalized_source_sha256": "3f58ac378cf5559e509023a976b47d06f513eeaae687dc5312f8299cd08ccd3d", "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5", "browser_build": "152.0.7977.83", "probe_set_version": "compatibility-capture-v1", "raw_capture_redistributed": false, "physical_reference": false},
+      "surfaces": {"webgl": {"identity": {"coverage": "present", "status": "unvalidated"}, "extensions": {"coverage": "present", "status": "unvalidated"}, "limits": {"coverage": "present", "status": "unvalidated"}, "precision": {"coverage": "absent", "status": "unvalidated"}, "allocation": {"coverage": "not-captured", "status": "unvalidated"}, "readback": {"coverage": "not-captured", "status": "unvalidated"}, "shader_compilation": {"coverage": "not-captured", "status": "unvalidated"}, "cluster_claim": "not-claimed"}, "webgpu": {"identity": {"coverage": "present", "status": "unvalidated"}, "features": {"coverage": "absent", "status": "unvalidated"}, "limits": {"coverage": "absent", "status": "unvalidated"}, "execution": {"coverage": "not-captured", "status": "unvalidated"}}},
+      "receipts": {"repeatability": {"status": "unvalidated", "required_runs": 3, "observed_runs": 0, "same_input_identity": null, "stable_fields": [], "failures": []}, "coherence": {"status": "unvalidated", "checks": []}, "held_out": {"status": "unvalidated", "results": []}, "detector": {"status": "unvalidated", "result": "reported-pass", "suite_id": "gologin-real-target-admission", "suite_version": "unretained-owner-report", "run_id": "unretained", "target_class": "real-world", "receipt_sha256": null, "raw_receipt_retained": false, "raw_receipt_redistributed": false}},
+      "receipt_references": [{"kind": "detector", "id": "owner-reported-gologin-admission", "sha256": null, "retained": false}],
+      "native_constraints": {"webgl_extensions": "remove-only", "webgl_limits": "host-clamped", "webgl_precision": "override-only-when-supplied", "webgpu_features": "native-intersection", "webgpu_limits": "native-intersection", "missing_capabilities": "not-fabricated"},
+      "known_limitations": ["WebGL extensions can only be removed by the native emitter.", "WebGL numeric limits are clamped to the host capability.", "WebGL precision is omitted until a supplied precision map is validated.", "WebGL allocation, readback, and shader-compilation boundaries are unvalidated.", "WebGPU features and limits are intersected with the native adapter.", "Missing codecs, providers, fonts, devices, and resources are not fabricated."]
+    },
+    {
+      "family_id": "apple-metal-m2-pro",
+      "platform": "macos",
+      "evidence_class": "compatibility-capture",
+      "status": "offered",
+      "source": {"runtime": "gologin", "capture_set_id": "gologin-compatibility-capture-set", "normalized_source_sha256": "3f58ac378cf5559e509023a976b47d06f513eeaae687dc5312f8299cd08ccd3d", "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5", "browser_build": "152.0.7977.83", "probe_set_version": "compatibility-capture-v1", "raw_capture_redistributed": false, "physical_reference": false},
+      "surfaces": {"webgl": {"identity": {"coverage": "present", "status": "unvalidated"}, "extensions": {"coverage": "present", "status": "unvalidated"}, "limits": {"coverage": "present", "status": "unvalidated"}, "precision": {"coverage": "absent", "status": "unvalidated"}, "allocation": {"coverage": "not-captured", "status": "unvalidated"}, "readback": {"coverage": "not-captured", "status": "unvalidated"}, "shader_compilation": {"coverage": "not-captured", "status": "unvalidated"}, "cluster_claim": "not-claimed"}, "webgpu": {"identity": {"coverage": "present", "status": "unvalidated"}, "features": {"coverage": "absent", "status": "unvalidated"}, "limits": {"coverage": "absent", "status": "unvalidated"}, "execution": {"coverage": "not-captured", "status": "unvalidated"}}},
+      "receipts": {"repeatability": {"status": "unvalidated", "required_runs": 3, "observed_runs": 0, "same_input_identity": null, "stable_fields": [], "failures": []}, "coherence": {"status": "unvalidated", "checks": []}, "held_out": {"status": "unvalidated", "results": []}, "detector": {"status": "unvalidated", "result": "reported-pass", "suite_id": "gologin-real-target-admission", "suite_version": "unretained-owner-report", "run_id": "unretained", "target_class": "real-world", "receipt_sha256": null, "raw_receipt_retained": false, "raw_receipt_redistributed": false}},
+      "receipt_references": [{"kind": "detector", "id": "owner-reported-gologin-admission", "sha256": null, "retained": false}],
+      "native_constraints": {"webgl_extensions": "remove-only", "webgl_limits": "host-clamped", "webgl_precision": "override-only-when-supplied", "webgpu_features": "native-intersection", "webgpu_limits": "native-intersection", "missing_capabilities": "not-fabricated"},
+      "known_limitations": ["WebGL extensions can only be removed by the native emitter.", "WebGL numeric limits are clamped to the host capability.", "WebGL precision is omitted until a supplied precision map is validated.", "WebGL allocation, readback, and shader-compilation boundaries are unvalidated.", "WebGPU features and limits are intersected with the native adapter.", "Missing codecs, providers, fonts, devices, and resources are not fabricated."]
+    },
+    {
+      "family_id": "apple-metal-m3-pro",
+      "platform": "macos",
+      "evidence_class": "compatibility-capture",
+      "status": "offered",
+      "source": {"runtime": "gologin", "capture_set_id": "gologin-compatibility-capture-set", "normalized_source_sha256": "3f58ac378cf5559e509023a976b47d06f513eeaae687dc5312f8299cd08ccd3d", "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5", "browser_build": "152.0.7977.83", "probe_set_version": "compatibility-capture-v1", "raw_capture_redistributed": false, "physical_reference": false},
+      "surfaces": {"webgl": {"identity": {"coverage": "present", "status": "unvalidated"}, "extensions": {"coverage": "present", "status": "unvalidated"}, "limits": {"coverage": "present", "status": "unvalidated"}, "precision": {"coverage": "absent", "status": "unvalidated"}, "allocation": {"coverage": "not-captured", "status": "unvalidated"}, "readback": {"coverage": "not-captured", "status": "unvalidated"}, "shader_compilation": {"coverage": "not-captured", "status": "unvalidated"}, "cluster_claim": "not-claimed"}, "webgpu": {"identity": {"coverage": "present", "status": "unvalidated"}, "features": {"coverage": "absent", "status": "unvalidated"}, "limits": {"coverage": "absent", "status": "unvalidated"}, "execution": {"coverage": "not-captured", "status": "unvalidated"}}},
+      "receipts": {"repeatability": {"status": "unvalidated", "required_runs": 3, "observed_runs": 0, "same_input_identity": null, "stable_fields": [], "failures": []}, "coherence": {"status": "unvalidated", "checks": []}, "held_out": {"status": "unvalidated", "results": []}, "detector": {"status": "unvalidated", "result": "reported-pass", "suite_id": "gologin-real-target-admission", "suite_version": "unretained-owner-report", "run_id": "unretained", "target_class": "real-world", "receipt_sha256": null, "raw_receipt_retained": false, "raw_receipt_redistributed": false}},
+      "receipt_references": [{"kind": "detector", "id": "owner-reported-gologin-admission", "sha256": null, "retained": false}],
+      "native_constraints": {"webgl_extensions": "remove-only", "webgl_limits": "host-clamped", "webgl_precision": "override-only-when-supplied", "webgpu_features": "native-intersection", "webgpu_limits": "native-intersection", "missing_capabilities": "not-fabricated"},
+      "known_limitations": ["WebGL extensions can only be removed by the native emitter.", "WebGL numeric limits are clamped to the host capability.", "WebGL precision is omitted until a supplied precision map is validated.", "WebGL allocation, readback, and shader-compilation boundaries are unvalidated.", "WebGPU features and limits are intersected with the native adapter.", "Missing codecs, providers, fonts, devices, and resources are not fabricated."]
+    },
+    {
+      "family_id": "apple-metal-m4",
+      "platform": "macos",
+      "evidence_class": "compatibility-capture",
+      "status": "offered",
+      "source": {"runtime": "gologin", "capture_set_id": "gologin-compatibility-capture-set", "normalized_source_sha256": "3f58ac378cf5559e509023a976b47d06f513eeaae687dc5312f8299cd08ccd3d", "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5", "browser_build": "152.0.7977.83", "probe_set_version": "compatibility-capture-v1", "raw_capture_redistributed": false, "physical_reference": false},
+      "surfaces": {"webgl": {"identity": {"coverage": "present", "status": "unvalidated"}, "extensions": {"coverage": "present", "status": "unvalidated"}, "limits": {"coverage": "present", "status": "unvalidated"}, "precision": {"coverage": "absent", "status": "unvalidated"}, "allocation": {"coverage": "not-captured", "status": "unvalidated"}, "readback": {"coverage": "not-captured", "status": "unvalidated"}, "shader_compilation": {"coverage": "not-captured", "status": "unvalidated"}, "cluster_claim": "not-claimed"}, "webgpu": {"identity": {"coverage": "present", "status": "unvalidated"}, "features": {"coverage": "absent", "status": "unvalidated"}, "limits": {"coverage": "absent", "status": "unvalidated"}, "execution": {"coverage": "not-captured", "status": "unvalidated"}}},
+      "receipts": {"repeatability": {"status": "unvalidated", "required_runs": 3, "observed_runs": 0, "same_input_identity": null, "stable_fields": [], "failures": []}, "coherence": {"status": "unvalidated", "checks": []}, "held_out": {"status": "unvalidated", "results": []}, "detector": {"status": "unvalidated", "result": "reported-pass", "suite_id": "gologin-real-target-admission", "suite_version": "unretained-owner-report", "run_id": "unretained", "target_class": "real-world", "receipt_sha256": null, "raw_receipt_retained": false, "raw_receipt_redistributed": false}},
+      "receipt_references": [{"kind": "detector", "id": "owner-reported-gologin-admission", "sha256": null, "retained": false}],
+      "native_constraints": {"webgl_extensions": "remove-only", "webgl_limits": "host-clamped", "webgl_precision": "override-only-when-supplied", "webgpu_features": "native-intersection", "webgpu_limits": "native-intersection", "missing_capabilities": "not-fabricated"},
+      "known_limitations": ["WebGL extensions can only be removed by the native emitter.", "WebGL numeric limits are clamped to the host capability.", "WebGL precision is omitted until a supplied precision map is validated.", "WebGL allocation, readback, and shader-compilation boundaries are unvalidated.", "WebGPU features and limits are intersected with the native adapter.", "Missing codecs, providers, fonts, devices, and resources are not fabricated."]
+    },
+    {
+      "family_id": "apple-metal-m5",
+      "platform": "macos",
+      "evidence_class": "compatibility-capture",
+      "status": "offered",
+      "source": {"runtime": "gologin", "capture_set_id": "gologin-compatibility-capture-set", "normalized_source_sha256": "3f58ac378cf5559e509023a976b47d06f513eeaae687dc5312f8299cd08ccd3d", "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5", "browser_build": "152.0.7977.83", "probe_set_version": "compatibility-capture-v1", "raw_capture_redistributed": false, "physical_reference": false},
+      "surfaces": {"webgl": {"identity": {"coverage": "present", "status": "unvalidated"}, "extensions": {"coverage": "present", "status": "unvalidated"}, "limits": {"coverage": "present", "status": "unvalidated"}, "precision": {"coverage": "absent", "status": "unvalidated"}, "allocation": {"coverage": "not-captured", "status": "unvalidated"}, "readback": {"coverage": "not-captured", "status": "unvalidated"}, "shader_compilation": {"coverage": "not-captured", "status": "unvalidated"}, "cluster_claim": "not-claimed"}, "webgpu": {"identity": {"coverage": "present", "status": "unvalidated"}, "features": {"coverage": "absent", "status": "unvalidated"}, "limits": {"coverage": "absent", "status": "unvalidated"}, "execution": {"coverage": "not-captured", "status": "unvalidated"}}},
+      "receipts": {"repeatability": {"status": "unvalidated", "required_runs": 3, "observed_runs": 0, "same_input_identity": null, "stable_fields": [], "failures": []}, "coherence": {"status": "unvalidated", "checks": []}, "held_out": {"status": "unvalidated", "results": []}, "detector": {"status": "unvalidated", "result": "reported-pass", "suite_id": "gologin-real-target-admission", "suite_version": "unretained-owner-report", "run_id": "unretained", "target_class": "real-world", "receipt_sha256": null, "raw_receipt_retained": false, "raw_receipt_redistributed": false}},
+      "receipt_references": [{"kind": "detector", "id": "owner-reported-gologin-admission", "sha256": null, "retained": false}],
+      "native_constraints": {"webgl_extensions": "remove-only", "webgl_limits": "host-clamped", "webgl_precision": "override-only-when-supplied", "webgpu_features": "native-intersection", "webgpu_limits": "native-intersection", "missing_capabilities": "not-fabricated"},
+      "known_limitations": ["WebGL extensions can only be removed by the native emitter.", "WebGL numeric limits are clamped to the host capability.", "WebGL precision is omitted until a supplied precision map is validated.", "WebGL allocation, readback, and shader-compilation boundaries are unvalidated.", "WebGPU features and limits are intersected with the native adapter.", "Missing codecs, providers, fonts, devices, and resources are not fabricated."]
+    },
+    {
+      "family_id": "intel-d3d11-gen9",
+      "platform": "windows",
+      "evidence_class": "compatibility-capture",
+      "status": "offered",
+      "source": {"runtime": "gologin", "capture_set_id": "gologin-compatibility-capture-set", "normalized_source_sha256": "3f58ac378cf5559e509023a976b47d06f513eeaae687dc5312f8299cd08ccd3d", "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5", "browser_build": "152.0.7977.83", "probe_set_version": "compatibility-capture-v1", "raw_capture_redistributed": false, "physical_reference": false},
+      "surfaces": {"webgl": {"identity": {"coverage": "present", "status": "unvalidated"}, "extensions": {"coverage": "present", "status": "unvalidated"}, "limits": {"coverage": "present", "status": "unvalidated"}, "precision": {"coverage": "absent", "status": "unvalidated"}, "allocation": {"coverage": "not-captured", "status": "unvalidated"}, "readback": {"coverage": "not-captured", "status": "unvalidated"}, "shader_compilation": {"coverage": "not-captured", "status": "unvalidated"}, "cluster_claim": "not-claimed"}, "webgpu": {"identity": {"coverage": "present", "status": "unvalidated"}, "features": {"coverage": "absent", "status": "unvalidated"}, "limits": {"coverage": "absent", "status": "unvalidated"}, "execution": {"coverage": "not-captured", "status": "unvalidated"}}},
+      "receipts": {"repeatability": {"status": "unvalidated", "required_runs": 3, "observed_runs": 0, "same_input_identity": null, "stable_fields": [], "failures": []}, "coherence": {"status": "unvalidated", "checks": []}, "held_out": {"status": "unvalidated", "results": []}, "detector": {"status": "unvalidated", "result": "reported-pass", "suite_id": "gologin-real-target-admission", "suite_version": "unretained-owner-report", "run_id": "unretained", "target_class": "real-world", "receipt_sha256": null, "raw_receipt_retained": false, "raw_receipt_redistributed": false}},
+      "receipt_references": [{"kind": "detector", "id": "owner-reported-gologin-admission", "sha256": null, "retained": false}],
+      "native_constraints": {"webgl_extensions": "remove-only", "webgl_limits": "host-clamped", "webgl_precision": "override-only-when-supplied", "webgpu_features": "native-intersection", "webgpu_limits": "native-intersection", "missing_capabilities": "not-fabricated"},
+      "known_limitations": ["WebGL extensions can only be removed by the native emitter.", "WebGL numeric limits are clamped to the host capability.", "WebGL precision is omitted until a supplied precision map is validated.", "WebGL allocation, readback, and shader-compilation boundaries are unvalidated.", "WebGPU features and limits are intersected with the native adapter.", "Missing codecs, providers, fonts, devices, and resources are not fabricated."]
+    },
+    {
+      "family_id": "intel-d3d11-gen11",
+      "platform": "windows",
+      "evidence_class": "compatibility-capture",
+      "status": "offered",
+      "source": {"runtime": "gologin", "capture_set_id": "gologin-compatibility-capture-set", "normalized_source_sha256": "3f58ac378cf5559e509023a976b47d06f513eeaae687dc5312f8299cd08ccd3d", "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5", "browser_build": "152.0.7977.83", "probe_set_version": "compatibility-capture-v1", "raw_capture_redistributed": false, "physical_reference": false},
+      "surfaces": {"webgl": {"identity": {"coverage": "present", "status": "unvalidated"}, "extensions": {"coverage": "present", "status": "unvalidated"}, "limits": {"coverage": "present", "status": "unvalidated"}, "precision": {"coverage": "absent", "status": "unvalidated"}, "allocation": {"coverage": "not-captured", "status": "unvalidated"}, "readback": {"coverage": "not-captured", "status": "unvalidated"}, "shader_compilation": {"coverage": "not-captured", "status": "unvalidated"}, "cluster_claim": "not-claimed"}, "webgpu": {"identity": {"coverage": "present", "status": "unvalidated"}, "features": {"coverage": "absent", "status": "unvalidated"}, "limits": {"coverage": "absent", "status": "unvalidated"}, "execution": {"coverage": "not-captured", "status": "unvalidated"}}},
+      "receipts": {"repeatability": {"status": "unvalidated", "required_runs": 3, "observed_runs": 0, "same_input_identity": null, "stable_fields": [], "failures": []}, "coherence": {"status": "unvalidated", "checks": []}, "held_out": {"status": "unvalidated", "results": []}, "detector": {"status": "unvalidated", "result": "reported-pass", "suite_id": "gologin-real-target-admission", "suite_version": "unretained-owner-report", "run_id": "unretained", "target_class": "real-world", "receipt_sha256": null, "raw_receipt_retained": false, "raw_receipt_redistributed": false}},
+      "receipt_references": [{"kind": "detector", "id": "owner-reported-gologin-admission", "sha256": null, "retained": false}],
+      "native_constraints": {"webgl_extensions": "remove-only", "webgl_limits": "host-clamped", "webgl_precision": "override-only-when-supplied", "webgpu_features": "native-intersection", "webgpu_limits": "native-intersection", "missing_capabilities": "not-fabricated"},
+      "known_limitations": ["WebGL extensions can only be removed by the native emitter.", "WebGL numeric limits are clamped to the host capability.", "WebGL precision is omitted until a supplied precision map is validated.", "WebGL allocation, readback, and shader-compilation boundaries are unvalidated.", "WebGPU features and limits are intersected with the native adapter.", "Missing codecs, providers, fonts, devices, and resources are not fabricated."]
+    },
+    {
+      "family_id": "intel-d3d11-gen12lp",
+      "platform": "windows",
+      "evidence_class": "compatibility-capture",
+      "status": "offered",
+      "source": {"runtime": "gologin", "capture_set_id": "gologin-compatibility-capture-set", "normalized_source_sha256": "3f58ac378cf5559e509023a976b47d06f513eeaae687dc5312f8299cd08ccd3d", "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5", "browser_build": "152.0.7977.83", "probe_set_version": "compatibility-capture-v1", "raw_capture_redistributed": false, "physical_reference": false},
+      "surfaces": {"webgl": {"identity": {"coverage": "present", "status": "unvalidated"}, "extensions": {"coverage": "present", "status": "unvalidated"}, "limits": {"coverage": "present", "status": "unvalidated"}, "precision": {"coverage": "absent", "status": "unvalidated"}, "allocation": {"coverage": "not-captured", "status": "unvalidated"}, "readback": {"coverage": "not-captured", "status": "unvalidated"}, "shader_compilation": {"coverage": "not-captured", "status": "unvalidated"}, "cluster_claim": "not-claimed"}, "webgpu": {"identity": {"coverage": "present", "status": "unvalidated"}, "features": {"coverage": "absent", "status": "unvalidated"}, "limits": {"coverage": "absent", "status": "unvalidated"}, "execution": {"coverage": "not-captured", "status": "unvalidated"}}},
+      "receipts": {"repeatability": {"status": "unvalidated", "required_runs": 3, "observed_runs": 0, "same_input_identity": null, "stable_fields": [], "failures": []}, "coherence": {"status": "unvalidated", "checks": []}, "held_out": {"status": "unvalidated", "results": []}, "detector": {"status": "unvalidated", "result": "reported-pass", "suite_id": "gologin-real-target-admission", "suite_version": "unretained-owner-report", "run_id": "unretained", "target_class": "real-world", "receipt_sha256": null, "raw_receipt_retained": false, "raw_receipt_redistributed": false}},
+      "receipt_references": [{"kind": "detector", "id": "owner-reported-gologin-admission", "sha256": null, "retained": false}],
+      "native_constraints": {"webgl_extensions": "remove-only", "webgl_limits": "host-clamped", "webgl_precision": "override-only-when-supplied", "webgpu_features": "native-intersection", "webgpu_limits": "native-intersection", "missing_capabilities": "not-fabricated"},
+      "known_limitations": ["WebGL extensions can only be removed by the native emitter.", "WebGL numeric limits are clamped to the host capability.", "WebGL precision is omitted until a supplied precision map is validated.", "WebGL allocation, readback, and shader-compilation boundaries are unvalidated.", "WebGPU features and limits are intersected with the native adapter.", "Missing codecs, providers, fonts, devices, and resources are not fabricated."]
+    },
+    {
+      "family_id": "nvidia-d3d11-maxwell",
+      "platform": "windows",
+      "evidence_class": "compatibility-capture",
+      "status": "offered",
+      "source": {"runtime": "gologin", "capture_set_id": "gologin-compatibility-capture-set", "normalized_source_sha256": "3f58ac378cf5559e509023a976b47d06f513eeaae687dc5312f8299cd08ccd3d", "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5", "browser_build": "152.0.7977.83", "probe_set_version": "compatibility-capture-v1", "raw_capture_redistributed": false, "physical_reference": false},
+      "surfaces": {"webgl": {"identity": {"coverage": "present", "status": "unvalidated"}, "extensions": {"coverage": "present", "status": "unvalidated"}, "limits": {"coverage": "present", "status": "unvalidated"}, "precision": {"coverage": "absent", "status": "unvalidated"}, "allocation": {"coverage": "not-captured", "status": "unvalidated"}, "readback": {"coverage": "not-captured", "status": "unvalidated"}, "shader_compilation": {"coverage": "not-captured", "status": "unvalidated"}, "cluster_claim": "not-claimed"}, "webgpu": {"identity": {"coverage": "present", "status": "unvalidated"}, "features": {"coverage": "absent", "status": "unvalidated"}, "limits": {"coverage": "absent", "status": "unvalidated"}, "execution": {"coverage": "not-captured", "status": "unvalidated"}}},
+      "receipts": {"repeatability": {"status": "unvalidated", "required_runs": 3, "observed_runs": 0, "same_input_identity": null, "stable_fields": [], "failures": []}, "coherence": {"status": "unvalidated", "checks": []}, "held_out": {"status": "unvalidated", "results": []}, "detector": {"status": "unvalidated", "result": "reported-pass", "suite_id": "gologin-real-target-admission", "suite_version": "unretained-owner-report", "run_id": "unretained", "target_class": "real-world", "receipt_sha256": null, "raw_receipt_retained": false, "raw_receipt_redistributed": false}},
+      "receipt_references": [{"kind": "detector", "id": "owner-reported-gologin-admission", "sha256": null, "retained": false}],
+      "native_constraints": {"webgl_extensions": "remove-only", "webgl_limits": "host-clamped", "webgl_precision": "override-only-when-supplied", "webgpu_features": "native-intersection", "webgpu_limits": "native-intersection", "missing_capabilities": "not-fabricated"},
+      "known_limitations": ["WebGL extensions can only be removed by the native emitter.", "WebGL numeric limits are clamped to the host capability.", "WebGL precision is omitted until a supplied precision map is validated.", "WebGL allocation, readback, and shader-compilation boundaries are unvalidated.", "WebGPU features and limits are intersected with the native adapter.", "Missing codecs, providers, fonts, devices, and resources are not fabricated."]
+    },
+    {
+      "family_id": "nvidia-d3d11-turing",
+      "platform": "windows",
+      "evidence_class": "compatibility-capture",
+      "status": "offered",
+      "source": {"runtime": "gologin", "capture_set_id": "gologin-compatibility-capture-set", "normalized_source_sha256": "3f58ac378cf5559e509023a976b47d06f513eeaae687dc5312f8299cd08ccd3d", "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5", "browser_build": "152.0.7977.83", "probe_set_version": "compatibility-capture-v1", "raw_capture_redistributed": false, "physical_reference": false},
+      "surfaces": {"webgl": {"identity": {"coverage": "present", "status": "unvalidated"}, "extensions": {"coverage": "present", "status": "unvalidated"}, "limits": {"coverage": "present", "status": "unvalidated"}, "precision": {"coverage": "absent", "status": "unvalidated"}, "allocation": {"coverage": "not-captured", "status": "unvalidated"}, "readback": {"coverage": "not-captured", "status": "unvalidated"}, "shader_compilation": {"coverage": "not-captured", "status": "unvalidated"}, "cluster_claim": "not-claimed"}, "webgpu": {"identity": {"coverage": "present", "status": "unvalidated"}, "features": {"coverage": "absent", "status": "unvalidated"}, "limits": {"coverage": "absent", "status": "unvalidated"}, "execution": {"coverage": "not-captured", "status": "unvalidated"}}},
+      "receipts": {"repeatability": {"status": "unvalidated", "required_runs": 3, "observed_runs": 0, "same_input_identity": null, "stable_fields": [], "failures": []}, "coherence": {"status": "unvalidated", "checks": []}, "held_out": {"status": "unvalidated", "results": []}, "detector": {"status": "unvalidated", "result": "reported-pass", "suite_id": "gologin-real-target-admission", "suite_version": "unretained-owner-report", "run_id": "unretained", "target_class": "real-world", "receipt_sha256": null, "raw_receipt_retained": false, "raw_receipt_redistributed": false}},
+      "receipt_references": [{"kind": "detector", "id": "owner-reported-gologin-admission", "sha256": null, "retained": false}],
+      "native_constraints": {"webgl_extensions": "remove-only", "webgl_limits": "host-clamped", "webgl_precision": "override-only-when-supplied", "webgpu_features": "native-intersection", "webgpu_limits": "native-intersection", "missing_capabilities": "not-fabricated"},
+      "known_limitations": ["WebGL extensions can only be removed by the native emitter.", "WebGL numeric limits are clamped to the host capability.", "WebGL precision is omitted until a supplied precision map is validated.", "WebGL allocation, readback, and shader-compilation boundaries are unvalidated.", "WebGPU features and limits are intersected with the native adapter.", "Missing codecs, providers, fonts, devices, and resources are not fabricated."]
+    },
+    {
+      "family_id": "nvidia-d3d11-ampere",
+      "platform": "windows",
+      "evidence_class": "compatibility-capture",
+      "status": "offered",
+      "source": {"runtime": "gologin", "capture_set_id": "gologin-compatibility-capture-set", "normalized_source_sha256": "3f58ac378cf5559e509023a976b47d06f513eeaae687dc5312f8299cd08ccd3d", "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5", "browser_build": "152.0.7977.83", "probe_set_version": "compatibility-capture-v1", "raw_capture_redistributed": false, "physical_reference": false},
+      "surfaces": {"webgl": {"identity": {"coverage": "present", "status": "unvalidated"}, "extensions": {"coverage": "present", "status": "unvalidated"}, "limits": {"coverage": "present", "status": "unvalidated"}, "precision": {"coverage": "absent", "status": "unvalidated"}, "allocation": {"coverage": "not-captured", "status": "unvalidated"}, "readback": {"coverage": "not-captured", "status": "unvalidated"}, "shader_compilation": {"coverage": "not-captured", "status": "unvalidated"}, "cluster_claim": "not-claimed"}, "webgpu": {"identity": {"coverage": "present", "status": "unvalidated"}, "features": {"coverage": "absent", "status": "unvalidated"}, "limits": {"coverage": "absent", "status": "unvalidated"}, "execution": {"coverage": "not-captured", "status": "unvalidated"}}},
+      "receipts": {"repeatability": {"status": "unvalidated", "required_runs": 3, "observed_runs": 0, "same_input_identity": null, "stable_fields": [], "failures": []}, "coherence": {"status": "unvalidated", "checks": []}, "held_out": {"status": "unvalidated", "results": []}, "detector": {"status": "unvalidated", "result": "reported-pass", "suite_id": "gologin-real-target-admission", "suite_version": "unretained-owner-report", "run_id": "unretained", "target_class": "real-world", "receipt_sha256": null, "raw_receipt_retained": false, "raw_receipt_redistributed": false}},
+      "receipt_references": [{"kind": "detector", "id": "owner-reported-gologin-admission", "sha256": null, "retained": false}],
+      "native_constraints": {"webgl_extensions": "remove-only", "webgl_limits": "host-clamped", "webgl_precision": "override-only-when-supplied", "webgpu_features": "native-intersection", "webgpu_limits": "native-intersection", "missing_capabilities": "not-fabricated"},
+      "known_limitations": ["WebGL extensions can only be removed by the native emitter.", "WebGL numeric limits are clamped to the host capability.", "WebGL precision is omitted until a supplied precision map is validated.", "WebGL allocation, readback, and shader-compilation boundaries are unvalidated.", "WebGPU features and limits are intersected with the native adapter.", "Missing codecs, providers, fonts, devices, and resources are not fabricated."]
+    },
+    {
+      "family_id": "nvidia-d3d11-blackwell",
+      "platform": "windows",
+      "evidence_class": "compatibility-capture",
+      "status": "offered",
+      "source": {"runtime": "gologin", "capture_set_id": "gologin-compatibility-capture-set", "normalized_source_sha256": "3f58ac378cf5559e509023a976b47d06f513eeaae687dc5312f8299cd08ccd3d", "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5", "browser_build": "152.0.7977.83", "probe_set_version": "compatibility-capture-v1", "raw_capture_redistributed": false, "physical_reference": false},
+      "surfaces": {"webgl": {"identity": {"coverage": "present", "status": "unvalidated"}, "extensions": {"coverage": "present", "status": "unvalidated"}, "limits": {"coverage": "present", "status": "unvalidated"}, "precision": {"coverage": "absent", "status": "unvalidated"}, "allocation": {"coverage": "not-captured", "status": "unvalidated"}, "readback": {"coverage": "not-captured", "status": "unvalidated"}, "shader_compilation": {"coverage": "not-captured", "status": "unvalidated"}, "cluster_claim": "not-claimed"}, "webgpu": {"identity": {"coverage": "present", "status": "unvalidated"}, "features": {"coverage": "absent", "status": "unvalidated"}, "limits": {"coverage": "absent", "status": "unvalidated"}, "execution": {"coverage": "not-captured", "status": "unvalidated"}}},
+      "receipts": {"repeatability": {"status": "unvalidated", "required_runs": 3, "observed_runs": 0, "same_input_identity": null, "stable_fields": [], "failures": []}, "coherence": {"status": "unvalidated", "checks": []}, "held_out": {"status": "unvalidated", "results": []}, "detector": {"status": "unvalidated", "result": "reported-pass", "suite_id": "gologin-real-target-admission", "suite_version": "unretained-owner-report", "run_id": "unretained", "target_class": "real-world", "receipt_sha256": null, "raw_receipt_retained": false, "raw_receipt_redistributed": false}},
+      "receipt_references": [{"kind": "detector", "id": "owner-reported-gologin-admission", "sha256": null, "retained": false}],
+      "native_constraints": {"webgl_extensions": "remove-only", "webgl_limits": "host-clamped", "webgl_precision": "override-only-when-supplied", "webgpu_features": "native-intersection", "webgpu_limits": "native-intersection", "missing_capabilities": "not-fabricated"},
+      "known_limitations": ["WebGL extensions can only be removed by the native emitter.", "WebGL numeric limits are clamped to the host capability.", "WebGL precision is omitted until a supplied precision map is validated.", "WebGL allocation, readback, and shader-compilation boundaries are unvalidated.", "WebGPU features and limits are intersected with the native adapter.", "Missing codecs, providers, fonts, devices, and resources are not fabricated."]
+    },
+    {
+      "family_id": "amd-d3d11-gcn5",
+      "platform": "windows",
+      "evidence_class": "compatibility-capture",
+      "status": "offered",
+      "source": {"runtime": "gologin", "capture_set_id": "gologin-compatibility-capture-set", "normalized_source_sha256": "3f58ac378cf5559e509023a976b47d06f513eeaae687dc5312f8299cd08ccd3d", "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5", "browser_build": "152.0.7977.83", "probe_set_version": "compatibility-capture-v1", "raw_capture_redistributed": false, "physical_reference": false},
+      "surfaces": {"webgl": {"identity": {"coverage": "present", "status": "unvalidated"}, "extensions": {"coverage": "present", "status": "unvalidated"}, "limits": {"coverage": "present", "status": "unvalidated"}, "precision": {"coverage": "absent", "status": "unvalidated"}, "allocation": {"coverage": "not-captured", "status": "unvalidated"}, "readback": {"coverage": "not-captured", "status": "unvalidated"}, "shader_compilation": {"coverage": "not-captured", "status": "unvalidated"}, "cluster_claim": "not-claimed"}, "webgpu": {"identity": {"coverage": "present", "status": "unvalidated"}, "features": {"coverage": "absent", "status": "unvalidated"}, "limits": {"coverage": "absent", "status": "unvalidated"}, "execution": {"coverage": "not-captured", "status": "unvalidated"}}},
+      "receipts": {"repeatability": {"status": "unvalidated", "required_runs": 3, "observed_runs": 0, "same_input_identity": null, "stable_fields": [], "failures": []}, "coherence": {"status": "unvalidated", "checks": []}, "held_out": {"status": "unvalidated", "results": []}, "detector": {"status": "unvalidated", "result": "reported-pass", "suite_id": "gologin-real-target-admission", "suite_version": "unretained-owner-report", "run_id": "unretained", "target_class": "real-world", "receipt_sha256": null, "raw_receipt_retained": false, "raw_receipt_redistributed": false}},
+      "receipt_references": [{"kind": "detector", "id": "owner-reported-gologin-admission", "sha256": null, "retained": false}],
+      "native_constraints": {"webgl_extensions": "remove-only", "webgl_limits": "host-clamped", "webgl_precision": "override-only-when-supplied", "webgpu_features": "native-intersection", "webgpu_limits": "native-intersection", "missing_capabilities": "not-fabricated"},
+      "known_limitations": ["WebGL extensions can only be removed by the native emitter.", "WebGL numeric limits are clamped to the host capability.", "WebGL precision is omitted until a supplied precision map is validated.", "WebGL allocation, readback, and shader-compilation boundaries are unvalidated.", "WebGPU features and limits are intersected with the native adapter.", "Missing codecs, providers, fonts, devices, and resources are not fabricated."]
+    },
+    {
+      "family_id": "amd-d3d11-rdna4",
+      "platform": "windows",
+      "evidence_class": "compatibility-capture",
+      "status": "offered",
+      "source": {"runtime": "gologin", "capture_set_id": "gologin-compatibility-capture-set", "normalized_source_sha256": "3f58ac378cf5559e509023a976b47d06f513eeaae687dc5312f8299cd08ccd3d", "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5", "browser_build": "152.0.7977.83", "probe_set_version": "compatibility-capture-v1", "raw_capture_redistributed": false, "physical_reference": false},
+      "surfaces": {"webgl": {"identity": {"coverage": "present", "status": "unvalidated"}, "extensions": {"coverage": "present", "status": "unvalidated"}, "limits": {"coverage": "present", "status": "unvalidated"}, "precision": {"coverage": "absent", "status": "unvalidated"}, "allocation": {"coverage": "not-captured", "status": "unvalidated"}, "readback": {"coverage": "not-captured", "status": "unvalidated"}, "shader_compilation": {"coverage": "not-captured", "status": "unvalidated"}, "cluster_claim": "not-claimed"}, "webgpu": {"identity": {"coverage": "present", "status": "unvalidated"}, "features": {"coverage": "absent", "status": "unvalidated"}, "limits": {"coverage": "absent", "status": "unvalidated"}, "execution": {"coverage": "not-captured", "status": "unvalidated"}}},
+      "receipts": {"repeatability": {"status": "unvalidated", "required_runs": 3, "observed_runs": 0, "same_input_identity": null, "stable_fields": [], "failures": []}, "coherence": {"status": "unvalidated", "checks": []}, "held_out": {"status": "unvalidated", "results": []}, "detector": {"status": "unvalidated", "result": "reported-pass", "suite_id": "gologin-real-target-admission", "suite_version": "unretained-owner-report", "run_id": "unretained", "target_class": "real-world", "receipt_sha256": null, "raw_receipt_retained": false, "raw_receipt_redistributed": false}},
+      "receipt_references": [{"kind": "detector", "id": "owner-reported-gologin-admission", "sha256": null, "retained": false}],
+      "native_constraints": {"webgl_extensions": "remove-only", "webgl_limits": "host-clamped", "webgl_precision": "override-only-when-supplied", "webgpu_features": "native-intersection", "webgpu_limits": "native-intersection", "missing_capabilities": "not-fabricated"},
+      "known_limitations": ["WebGL extensions can only be removed by the native emitter.", "WebGL numeric limits are clamped to the host capability.", "WebGL precision is omitted until a supplied precision map is validated.", "WebGL allocation, readback, and shader-compilation boundaries are unvalidated.", "WebGPU features and limits are intersected with the native adapter.", "Missing codecs, providers, fonts, devices, and resources are not fabricated."]
+    }
+  ]
+}

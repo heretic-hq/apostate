@@ -1,8 +1,9 @@
 target_os = "linux"
 target_cpu = "arm64"
 
-# Use Chromium's pinned Clang/LLD and hermetic ARM64 sysroot. The Linux build
-# image supplies the sysroot and tool binaries; host libraries are excluded.
+# Use Chromium's pinned Clang/LLD and hermetic ARM64 sysroot. The pinned
+# sysroot is installed into the checkout after patch application; host
+# libraries are excluded.
 use_sysroot = true
 is_clang = true
 use_lld = true

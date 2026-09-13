@@ -21,6 +21,7 @@ jobs:
     runs-on: [self-hosted, apostate-build, apostate-macos-arm64]
     timeout-minutes: 240
     env:
+      APOSTATE_WORKSPACE: /Users/Shared/apostate/macos-arm64/.workspace
       TARGET: macos-arm64
       ARCHIVE: apostate-152.0.7977.83-macos-arm64.tar.zst
     steps:
@@ -37,6 +38,7 @@ jobs:
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
           bash scripts/verify-runner.sh "$TARGET"
+          bash scripts/verify-workspace.sh "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -58,14 +60,14 @@ jobs:
           set -euo pipefail
           python3 scripts/test_profile_resolver.py
           python3 scripts/validate-release-baseline.py --root .
-          smoke=".workspace/src/out/$TARGET/Chromium.app/Contents/MacOS/Chromium"
+          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/Chromium.app/Contents/MacOS/Chromium"
           test -x "$smoke"
           "$smoke" --version
       - name: Package unsigned nightly artifact and manifest
         shell: bash
         run: |
           set -euo pipefail
-          out=".workspace/src/out/$TARGET"
+          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
           stage="nightly-stage-$TARGET"
           rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.manifest.json"
           mkdir -p "$stage/resources/profiles"
@@ -107,9 +109,10 @@ jobs:
     name: nightly-linux-arm64
     needs: build-linux-x64
     if: ${{ needs.build-linux-x64.result == 'success' }}
-    runs-on: [self-hosted, apostate-build, apostate-linux-arm64]
+    runs-on: [self-hosted, apostate-build, apostate-linux-x64]
     timeout-minutes: 240
     env:
+      APOSTATE_WORKSPACE: /var/lib/apostate/linux-arm64/.workspace
       TARGET: linux-arm64
       ARCHIVE: apostate-152.0.7977.83-linux-arm64.tar.zst
     steps:
@@ -126,6 +129,7 @@ jobs:
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
           bash scripts/verify-runner.sh "$TARGET"
+          bash scripts/verify-workspace.sh "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -135,6 +139,10 @@ jobs:
       - name: Apply patch series without fuzz
         shell: bash
         run: bash scripts/apply-patches.sh --check && bash scripts/apply-patches.sh
+      - name: Run Chromium hooks and install target sysroot
+        if: ${{ startsWith(env.TARGET, 'linux-') }}
+        shell: bash
+        run: cd "$APOSTATE_WORKSPACE" && "$APOSTATE_WORKSPACE/depot_tools/gclient" runhooks && bash "$GITHUB_WORKSPACE/scripts/prepare-linux-sysroot.sh" "$TARGET"
       - name: Configure target
         shell: bash
         run: bash scripts/configure.sh "$TARGET"
@@ -147,14 +155,14 @@ jobs:
           set -euo pipefail
           python3 scripts/test_profile_resolver.py
           python3 scripts/validate-release-baseline.py --root .
-          smoke=".workspace/src/out/$TARGET/chrome"
+          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/chrome"
           test -x "$smoke"
           "$smoke" --version
       - name: Package unsigned nightly artifact and manifest
         shell: bash
         run: |
           set -euo pipefail
-          out=".workspace/src/out/$TARGET"
+          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
           stage="nightly-stage-$TARGET"
           rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.manifest.json"
           mkdir -p "$stage/resources/profiles"
@@ -200,6 +208,7 @@ jobs:
     runs-on: [self-hosted, apostate-build, apostate-linux-x64]
     timeout-minutes: 240
     env:
+      APOSTATE_WORKSPACE: /var/lib/apostate/linux-x64/.workspace
       TARGET: linux-x64
       ARCHIVE: apostate-152.0.7977.83-linux-x64.tar.zst
     steps:
@@ -216,6 +225,7 @@ jobs:
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
           bash scripts/verify-runner.sh "$TARGET"
+          bash scripts/verify-workspace.sh "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -225,6 +235,10 @@ jobs:
       - name: Apply patch series without fuzz
         shell: bash
         run: bash scripts/apply-patches.sh --check && bash scripts/apply-patches.sh
+      - name: Run Chromium hooks and install target sysroot
+        if: ${{ startsWith(env.TARGET, 'linux-') }}
+        shell: bash
+        run: cd "$APOSTATE_WORKSPACE" && "$APOSTATE_WORKSPACE/depot_tools/gclient" runhooks && bash "$GITHUB_WORKSPACE/scripts/prepare-linux-sysroot.sh" "$TARGET"
       - name: Configure target
         shell: bash
         run: bash scripts/configure.sh "$TARGET"
@@ -237,14 +251,14 @@ jobs:
           set -euo pipefail
           python3 scripts/test_profile_resolver.py
           python3 scripts/validate-release-baseline.py --root .
-          smoke=".workspace/src/out/$TARGET/chrome"
+          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/chrome"
           test -x "$smoke"
           "$smoke" --version
       - name: Package unsigned nightly artifact and manifest
         shell: bash
         run: |
           set -euo pipefail
-          out=".workspace/src/out/$TARGET"
+          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
           stage="nightly-stage-$TARGET"
           rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.manifest.json"
           mkdir -p "$stage/resources/profiles"
@@ -292,6 +306,7 @@ jobs:
     runs-on: [self-hosted, apostate-build, apostate-windows-x64]
     timeout-minutes: 240
     env:
+      APOSTATE_WORKSPACE: C:/apostate/windows-x64/.workspace
       TARGET: windows-x64
       ARCHIVE: apostate-152.0.7977.83-windows-x64.zip
     steps:
@@ -304,10 +319,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for path in scripts/verify-runner.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
+          for path in scripts/verify-runner.sh scripts/verify-workspace.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
           bash scripts/verify-runner.sh "$TARGET"
+          bash scripts/verify-workspace.sh "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -329,14 +345,14 @@ jobs:
           set -euo pipefail
           python3 scripts/test_profile_resolver.py
           python3 scripts/validate-release-baseline.py --root .
-          smoke=".workspace/src/out/$TARGET/chrome.exe"
+          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/chrome.exe"
           test -f "$smoke"
           "$smoke" --version
       - name: Package unsigned nightly artifact and manifest
         shell: bash
         run: |
           set -euo pipefail
-          out=".workspace/src/out/$TARGET"
+          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
           stage="nightly-stage-$TARGET"
           rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.manifest.json"
           mkdir -p "$stage/resources/profiles"

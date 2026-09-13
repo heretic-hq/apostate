@@ -3,7 +3,7 @@ set -euo pipefail
 
 target="${1:-}"
 case "$target:${RUNNER_OS:-}:${RUNNER_ARCH:-}" in
-  macos-arm64:macOS:ARM64|linux-arm64:Linux:ARM64|linux-x64:Linux:X64|windows-x64:Windows:X64)
+  macos-arm64:macOS:ARM64|linux-x64:Linux:X64|linux-arm64:Linux:X64|windows-x64:Windows:X64)
     ;;
   *)
     printf 'error: runner does not match target %s (OS=%s ARCH=%s)\n' \

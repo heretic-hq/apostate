@@ -82,37 +82,38 @@ when an independent rebuild from the same pins reproduces every hash.
 ## Hosts
 
 The CI build jobs run on persistent self-hosted VMs. Register each VM with the
-`self-hosted` and `apostate-build` labels, plus exactly one target label:
+`self-hosted` and `apostate-build` labels, plus exactly one host label:
 
-| VM guest | Required target label | Jobs |
+| VM guest | Required host label | Jobs |
 | --- | --- | --- |
-| Linux x64 | `apostate-linux-x64` | Linux x64 |
-| Linux arm64 | `apostate-linux-arm64` | Linux arm64 |
+| Linux x64 | `apostate-linux-x64` | Linux x64 and Linux arm64 cross-build |
 | Windows x64 | `apostate-windows-x64` | Windows x64 |
 | macOS arm64 | `apostate-macos-arm64` | macOS arm64 |
 
-The Linux x64 and arm64 guests and the Windows guest may run on the 7950X host.
-The macOS arm64 guest runs on the Mac host. Keep all guests powered on with
-their runner services active. GitHub Actions queues a target until its guest
-is available, so no manual VM switching is required.
+Linux arm64 is an x86_64-hosted cross-build. The Linux container remains an
+amd64 image; Chromium's hermetic Clang/LLD and pinned ARM64 sysroot provide the
+target toolchain. It must not be scheduled on an ARM64 runner.
 
-The guest must report the target OS and architecture through the GitHub runner
-environment. Each workflow checks that `TARGET` agrees with `RUNNER_OS` and
-`RUNNER_ARCH` before bootstrapping.
+The guest must report the target host OS and architecture through the GitHub
+runner environment. Each workflow checks that `TARGET` agrees with
+`RUNNER_OS` and `RUNNER_ARCH` before bootstrapping; the Linux arm64 target is
+the intentional exception at the target/host boundary.
 
 Keep the Chromium checkout, depot_tools checkout, Go cache, CIPD cache, and
 build output on persistent storage outside the ephemeral runner workspace. The
 workflow still checks out the requested commit or tag and the scripts still
-enforce the pinned Chromium and depot_tools revisions.
+enforce the pinned Chromium and depot_tools revisions. Each job also validates
+the external workspace identity and briefly acquires its lock after checkout.
 
 The three 7950X targets run sequentially to avoid competing for compiler CPU,
 memory, and disk bandwidth. Linux x64 runs first, followed by Linux arm64 and
 Windows x64. macOS runs independently on the Mac host.
 
-Linux builds run in the pinned container on the Linux VM. macOS builds run
-natively on pinned Xcode. Windows builds run in the Windows VM with the pinned
-depot_tools checkout. All jobs fail before fetching sources when the runner
-labels or guest architecture do not match the target.
+Linux builds run in the pinned container on the Linux VM. Docker image reuse is
+only VM-local and only valid when the complete target-specific input hash is
+unchanged. macOS builds run natively on pinned Xcode. Windows builds run in the
+Windows VM with the pinned depot_tools checkout. All jobs fail before fetching
+sources when the runner labels or guest architecture do not match the target.
 
 ## Extensions stay enabled
 

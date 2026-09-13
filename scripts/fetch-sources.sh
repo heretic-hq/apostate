@@ -27,6 +27,24 @@ solutions = [
   },
 ]
 GCLIENT
+target="${TARGET:-$(target_default)}"
+case "$target" in
+  linux-arm64)
+    printf 'target_os = ["linux"]\ntarget_cpu = ["x64", "arm64"]\n' >> .gclient
+    ;;
+  linux-x64)
+    printf 'target_os = ["linux"]\ntarget_cpu = ["x64"]\n' >> .gclient
+    ;;
+  macos-arm64)
+    printf 'target_os = ["mac"]\ntarget_cpu = ["arm64"]\n' >> .gclient
+    ;;
+  windows-x64)
+    printf 'target_os = ["win"]\ntarget_cpu = ["x64"]\n' >> .gclient
+    ;;
+  *)
+    die "unsupported target: $target"
+    ;;
+esac
 
 if [ ! -d "$SRC/.git" ]; then
   # Fetch only the pinned release tag. A single-branch shallow clone avoids
@@ -49,6 +67,8 @@ if [ "$MODE" = "--fetch-only" ]; then
 fi
 say "gclient sync (pinned by DEPS at the tag; no hooks; 16 jobs)"
 gclient sync --with_branch_heads --with_tags --no-history --shallow --nohooks -j16 -D
+say "running pinned Chromium hooks"
+gclient runhooks
 
 if [ "$(uname -s)" = "Linux" ] && [ -x "$SRC/build/install-build-deps.sh" ]; then
   say "installing chromium build dependencies"

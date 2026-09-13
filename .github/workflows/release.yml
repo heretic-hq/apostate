@@ -108,6 +108,7 @@ jobs:
     runs-on: [self-hosted, apostate-build, apostate-macos-arm64]
     timeout-minutes: 240
     env:
+      APOSTATE_WORKSPACE: /Users/Shared/apostate/macos-arm64/.workspace
       TARGET: macos-arm64
       ARCHIVE: apostate-152.0.7977.83-macos-arm64.tar.zst
       RELEASE_SIGNING_KEY: ${{ secrets.APOSTATE_RELEASE_PRIVATE_KEY }}
@@ -126,6 +127,7 @@ jobs:
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
           bash scripts/verify-runner.sh "$TARGET"
+          bash scripts/verify-workspace.sh "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -147,7 +149,7 @@ jobs:
           set -euo pipefail
           python3 scripts/test_profile_resolver.py
           python3 scripts/validate-release-baseline.py --root .
-          smoke=".workspace/src/out/$TARGET/Chromium.app/Contents/MacOS/Chromium"
+          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/Chromium.app/Contents/MacOS/Chromium"
           test -x "$smoke"
           "$smoke" --version
       - name: Package and sign verified artifact
@@ -155,7 +157,7 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "$RELEASE_SIGNING_KEY" ] || { echo "APOSTATE_RELEASE_PRIVATE_KEY is required" >&2; exit 1; }
-          out=".workspace/src/out/$TARGET"
+          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
           stage="release-stage-$TARGET"
           key="$RUNNER_TEMP/apostate-release-signing-key.pem"
           rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.sig" "$ARCHIVE.manifest.json" "$key"
@@ -211,9 +213,10 @@ jobs:
     name: build-linux-arm64
     needs: build-linux-x64
     if: ${{ needs.build-linux-x64.result == 'success' }}
-    runs-on: [self-hosted, apostate-build, apostate-linux-arm64]
+    runs-on: [self-hosted, apostate-build, apostate-linux-x64]
     timeout-minutes: 240
     env:
+      APOSTATE_WORKSPACE: /var/lib/apostate/linux-arm64/.workspace
       TARGET: linux-arm64
       ARCHIVE: apostate-152.0.7977.83-linux-arm64.tar.zst
       RELEASE_SIGNING_KEY: ${{ secrets.APOSTATE_RELEASE_PRIVATE_KEY }}
@@ -232,6 +235,7 @@ jobs:
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
           bash scripts/verify-runner.sh "$TARGET"
+          bash scripts/verify-workspace.sh "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -241,6 +245,9 @@ jobs:
       - name: Apply patch series without fuzz
         shell: bash
         run: bash scripts/apply-patches.sh --check && bash scripts/apply-patches.sh
+      - name: Run Chromium hooks and install target sysroot
+        shell: bash
+        run: cd "$APOSTATE_WORKSPACE" && "$APOSTATE_WORKSPACE/depot_tools/gclient" runhooks && bash "$GITHUB_WORKSPACE/scripts/prepare-linux-sysroot.sh" "$TARGET"
       - name: Configure target
         shell: bash
         run: bash scripts/configure.sh "$TARGET"
@@ -253,7 +260,7 @@ jobs:
           set -euo pipefail
           python3 scripts/test_profile_resolver.py
           python3 scripts/validate-release-baseline.py --root .
-          smoke=".workspace/src/out/$TARGET/chrome"
+          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/chrome"
           test -x "$smoke"
           "$smoke" --version
       - name: Package and sign verified artifact
@@ -261,7 +268,7 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "$RELEASE_SIGNING_KEY" ] || { echo "APOSTATE_RELEASE_PRIVATE_KEY is required" >&2; exit 1; }
-          out=".workspace/src/out/$TARGET"
+          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
           stage="release-stage-$TARGET"
           key="$RUNNER_TEMP/apostate-release-signing-key.pem"
           rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.sig" "$ARCHIVE.manifest.json" "$key"
@@ -323,6 +330,7 @@ jobs:
     runs-on: [self-hosted, apostate-build, apostate-linux-x64]
     timeout-minutes: 240
     env:
+      APOSTATE_WORKSPACE: /var/lib/apostate/linux-x64/.workspace
       TARGET: linux-x64
       ARCHIVE: apostate-152.0.7977.83-linux-x64.tar.zst
       RELEASE_SIGNING_KEY: ${{ secrets.APOSTATE_RELEASE_PRIVATE_KEY }}
@@ -341,6 +349,7 @@ jobs:
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
           bash scripts/verify-runner.sh "$TARGET"
+          bash scripts/verify-workspace.sh "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -350,6 +359,9 @@ jobs:
       - name: Apply patch series without fuzz
         shell: bash
         run: bash scripts/apply-patches.sh --check && bash scripts/apply-patches.sh
+      - name: Run Chromium hooks and install target sysroot
+        shell: bash
+        run: cd "$APOSTATE_WORKSPACE" && "$APOSTATE_WORKSPACE/depot_tools/gclient" runhooks && bash "$GITHUB_WORKSPACE/scripts/prepare-linux-sysroot.sh" "$TARGET"
       - name: Configure target
         shell: bash
         run: bash scripts/configure.sh "$TARGET"
@@ -362,7 +374,7 @@ jobs:
           set -euo pipefail
           python3 scripts/test_profile_resolver.py
           python3 scripts/validate-release-baseline.py --root .
-          smoke=".workspace/src/out/$TARGET/chrome"
+          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/chrome"
           test -x "$smoke"
           "$smoke" --version
       - name: Package and sign verified artifact
@@ -370,7 +382,7 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "$RELEASE_SIGNING_KEY" ] || { echo "APOSTATE_RELEASE_PRIVATE_KEY is required" >&2; exit 1; }
-          out=".workspace/src/out/$TARGET"
+          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
           stage="release-stage-$TARGET"
           key="$RUNNER_TEMP/apostate-release-signing-key.pem"
           rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.sig" "$ARCHIVE.manifest.json" "$key"
@@ -432,6 +444,7 @@ jobs:
     runs-on: [self-hosted, apostate-build, apostate-windows-x64]
     timeout-minutes: 240
     env:
+      APOSTATE_WORKSPACE: C:/apostate/windows-x64/.workspace
       TARGET: windows-x64
       ARCHIVE: apostate-152.0.7977.83-windows-x64.zip
       RELEASE_SIGNING_KEY: ${{ secrets.APOSTATE_RELEASE_PRIVATE_KEY }}
@@ -450,6 +463,7 @@ jobs:
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
           bash scripts/verify-runner.sh "$TARGET"
+          bash scripts/verify-workspace.sh "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -471,7 +485,7 @@ jobs:
           set -euo pipefail
           python3 scripts/test_profile_resolver.py
           python3 scripts/validate-release-baseline.py --root .
-          smoke=".workspace/src/out/$TARGET/chrome.exe"
+          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/chrome.exe"
           test -f "$smoke"
           "$smoke" --version
       - name: Package and sign verified artifact
@@ -479,7 +493,7 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "$RELEASE_SIGNING_KEY" ] || { echo "APOSTATE_RELEASE_PRIVATE_KEY is required" >&2; exit 1; }
-          out=".workspace/src/out/$TARGET"
+          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
           stage="release-stage-$TARGET"
           key="$RUNNER_TEMP/apostate-release-signing-key.pem"
           rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.sig" "$ARCHIVE.manifest.json" "$key"

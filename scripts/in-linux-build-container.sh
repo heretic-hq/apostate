@@ -30,6 +30,30 @@ else
   [[ "$command_path" != "$REPO_ROOT/scripts/in-linux-build-container.sh" ]] || fail 'recursive container invocation'
   shift
 fi
+target="${APOSTATE_TARGET:-}"
+if ! "$prepare"; then
+  for argument in "$@"; do
+    case "$argument" in
+      linux-x64|linux-arm64) target="$argument"; break ;;
+    esac
+  done
+fi
+target="${target:-linux-x64}"
+case "$target" in
+  linux-x64)
+    dependency_mode='host-x64'
+    dependency_flags='--no-arm'
+    ;;
+  linux-arm64)
+    # Chromium's installer --arm flag is ARMHF-only. ARM64 is provided by
+    # the pinned arm64 sysroot installed by the fetch script.
+    dependency_mode='clang-arm64-sysroot'
+    dependency_flags='--no-arm'
+    ;;
+  *)
+    fail "unsupported Linux build target: $target"
+    ;;
+esac
 workspace="$(realpath "${APOSTATE_WORKSPACE:-$REPO_ROOT/.workspace}")"
 src="$workspace/src"
 version="$(tr -d '[:space:]' < "$REPO_ROOT/build/CHROMIUM_VERSION")"
@@ -46,20 +70,20 @@ done
 cp "$REPO_ROOT/build/linux/Dockerfile" "$context/Dockerfile"
 cp "$REPO_ROOT/build/linux/prefetch-build-deps.py" "$context/prefetch-build-deps.py"
 cp "$REPO_ROOT/build/linux/snapshot-transport.py" "$context/snapshot-transport.py"
-cat >> "$context/Dockerfile" <<'DOCKER'
+cat >> "$context/Dockerfile" <<DOCKER
 
 # These files are extracted from the pinned commit by the wrapper script.
 USER root
 COPY install-build-deps.sh install-build-deps.py prefetch-build-deps.py snapshot-transport.py /opt/apostate-build-deps/
 RUN rm -f /etc/apt/apt.conf.d/docker-clean \
  && printf 'Acquire::https::No-Cache "true";\nAcquire::http::No-Cache "true";\n' > /etc/apt/apt.conf.d/51-no-cache \
- && python3 /opt/apostate-build-deps/snapshot-transport.py python3 /opt/apostate-build-deps/prefetch-build-deps.py --no-prompt --no-syms --no-arm --no-android --no-chromeos-fonts --no-backwards-compatible
-RUN python3 /opt/apostate-build-deps/snapshot-transport.py /opt/apostate-build-deps/install-build-deps.sh --no-prompt --no-syms --no-arm --no-android --no-chromeos-fonts --no-backwards-compatible \
- && dpkg-query -W -f='${binary:Package}\t${Version}\n' | LC_ALL=C sort > /opt/apostate-build-deps/packages.lock \
+ && python3 /opt/apostate-build-deps/snapshot-transport.py python3 /opt/apostate-build-deps/prefetch-build-deps.py --no-prompt --no-syms $dependency_flags --no-android --no-chromeos-fonts --no-backwards-compatible
+RUN python3 /opt/apostate-build-deps/snapshot-transport.py /opt/apostate-build-deps/install-build-deps.sh --no-prompt --no-syms $dependency_flags --no-android --no-chromeos-fonts --no-backwards-compatible \
+ && dpkg-query -W -f='\${binary:Package}\t\${Version}\n' | LC_ALL=C sort > /opt/apostate-build-deps/packages.lock \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
 USER build
 DOCKER
-input_hash="$(python3 - "$context" "$version" "$chromium_revision" "$depot_revision" <<'PY'
+input_hash="$(python3 - "$context" "$version" "$chromium_revision" "$depot_revision" "$target" "$dependency_mode" "$dependency_flags" <<'PY'
 import hashlib, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 h = hashlib.sha256()
@@ -73,19 +97,22 @@ PY
 tag="apostate-linux-build:$input_hash"
 if ! docker image inspect "$tag" >/dev/null 2>&1; then
   docker build --platform linux/amd64 --label "org.apostate.build-inputs=$input_hash" \
-    --label "org.apostate.chromium-revision=$chromium_revision" --tag "$tag" "$context"
+    --label "org.apostate.chromium-revision=$chromium_revision" \
+    --label "org.apostate.build-target=$target" --tag "$tag" "$context"
 fi
 image_id="$(docker image inspect --format '{{.Id}}' "$tag")"
 [[ "$(docker image inspect --format '{{index .Config.Labels "org.apostate.build-inputs"}}' "$image_id")" == "$input_hash" ]] || fail 'cached image input label mismatch'
+[[ "$(docker image inspect --format '{{index .Config.Labels "org.apostate.build-target"}}' "$image_id")" == "$target" ]] || fail 'cached image target label mismatch'
 receipt_dir="$workspace/build-container"
 mkdir -p "$receipt_dir"
 docker run --rm --network none --entrypoint cat "$image_id" /opt/apostate-build-deps/packages.lock > "$context/packages.lock"
-python3 - "$receipt_dir" "$input_hash" "$image_id" "$version" "$chromium_revision" "$depot_revision" "$context/packages.lock" <<'PY'
+python3 - "$receipt_dir" "$input_hash" "$image_id" "$version" "$chromium_revision" "$depot_revision" "$target" "$dependency_mode" "$context/packages.lock" <<'PY'
 import hashlib, json, pathlib, sys
-out, inputs, image, version, chromium, depot, packages = sys.argv[1:]
+out, inputs, image, version, chromium, depot, target, dependency_mode, packages = sys.argv[1:]
 data = pathlib.Path(packages).read_bytes()
 receipt = {'input_sha256': inputs, 'image_id': image, 'chromium_version': version,
            'chromium_revision': chromium, 'depot_tools_revision': depot,
+           'target': target, 'dependency_mode': dependency_mode,
            'packages_sha256': hashlib.sha256(data).hexdigest()}
 path = pathlib.Path(out)
 (path / (inputs + '.json')).write_text(json.dumps(receipt, indent=2) + '\n')

@@ -81,9 +81,30 @@ when an independent rebuild from the same pins reproduces every hash.
 
 ## Hosts
 
-Linux x64 builds run in the pinned container, on the remote build machine.
-macOS builds run natively on pinned Xcode. Both produce a manifest; both are
-verified by rebuild.
+The CI build jobs run on persistent self-hosted VMs. Register each VM with the
+`self-hosted` and `apostate-build` labels, plus exactly one target label:
+
+| VM guest | Required target label | Jobs |
+| --- | --- | --- |
+| Linux x64 | `apostate-linux-x64` | Linux x64 |
+| Linux arm64 | `apostate-linux-arm64` | Linux arm64 |
+| Windows x64 | `apostate-windows-x64` | Windows x64 |
+| macOS arm64 | `apostate-macos-arm64` | macOS arm64 |
+
+The Linux x64 and arm64 guests and the Windows guest may run on the 7950X host.
+The macOS arm64 guest runs on the Mac host. The guest must report the target
+OS and architecture through the GitHub runner environment. Each workflow checks
+that `TARGET` agrees with `RUNNER_OS` and `RUNNER_ARCH` before bootstrapping.
+
+Keep the Chromium checkout, depot_tools checkout, Go cache, CIPD cache, and
+build output on persistent storage outside the ephemeral runner workspace. The
+workflow still checks out the requested commit or tag and the scripts still
+enforce the pinned Chromium and depot_tools revisions.
+
+Linux builds run in the pinned container on the Linux VM. macOS builds run
+natively on pinned Xcode. Windows builds run in the Windows VM with the pinned
+depot_tools checkout. All jobs fail before fetching sources when the runner
+labels or guest architecture do not match the target.
 
 ## Extensions stay enabled
 

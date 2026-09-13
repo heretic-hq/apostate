@@ -18,7 +18,7 @@ env:
 jobs:
   build-macos-arm64:
     name: nightly-macos-arm64
-    runs-on: blacksmith-12vcpu-macos-latest
+    runs-on: [self-hosted, apostate-build, apostate-macos-arm64]
     timeout-minutes: 240
     env:
       TARGET: macos-arm64
@@ -33,9 +33,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for path in scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
+          for path in scripts/verify-runner.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
+          bash scripts/verify-runner.sh "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -104,7 +105,7 @@ jobs:
 
   build-linux-arm64:
     name: nightly-linux-arm64
-    runs-on: blacksmith-32vcpu-ubuntu-2404-arm
+    runs-on: [self-hosted, apostate-build, apostate-linux-arm64]
     timeout-minutes: 240
     env:
       TARGET: linux-arm64
@@ -119,9 +120,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for path in scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
+          for path in scripts/verify-runner.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
+          bash scripts/verify-runner.sh "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -193,7 +195,7 @@ jobs:
 
   build-linux-x64:
     name: nightly-linux-x64
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: [self-hosted, apostate-build, apostate-linux-x64]
     timeout-minutes: 240
     env:
       TARGET: linux-x64
@@ -208,9 +210,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for path in scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
+          for path in scripts/verify-runner.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
+          bash scripts/verify-runner.sh "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -282,7 +285,7 @@ jobs:
 
   build-windows-x64:
     name: nightly-windows-x64
-    runs-on: blacksmith-32vcpu-windows-2025
+    runs-on: [self-hosted, apostate-build, apostate-windows-x64]
     timeout-minutes: 240
     env:
       TARGET: windows-x64
@@ -297,9 +300,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for path in scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
+          for path in scripts/verify-runner.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
+          bash scripts/verify-runner.sh "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh

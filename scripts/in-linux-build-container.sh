@@ -126,6 +126,7 @@ if [[ "$workspace" != "$REPO_ROOT/"* ]]; then
   mounts+=(--mount "type=bind,source=$workspace,target=$workspace")
 fi
 env_args=(--env DEPOT_TOOLS_UPDATE=0 --env DEPOT_TOOLS_METRICS=0 --env HOME=/tmp
+          --env VPYTHON_ROOT=/tmp/vpython-root --env XDG_CACHE_HOME=/tmp/.cache
           --env "APOSTATE_WORKSPACE=$workspace" --env "APOSTATE_BUILD_IMAGE_ID=$image_id")
 if [[ -n "${APOSTATE_JOBS:-}" ]]; then env_args+=(--env "APOSTATE_JOBS=$APOSTATE_JOBS"); fi
 docker run --rm --init --user "$run_user" --workdir "$REPO_ROOT" \

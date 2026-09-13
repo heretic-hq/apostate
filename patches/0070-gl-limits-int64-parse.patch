@@ -1,0 +1,88 @@
+Subject: [PATCH] profile: parse gl_limits wider than int32
+
+MAX_ELEMENT_INDEX never reaches the ANGLE gate 0063 added, and the reason is
+not in ANGLE at all. The profile carries 4294967294, the schema allows it, and
+derive emits it exactly — but Chromium's JSON parser stores integers outside
+the int32 range as doubles, and the gl_limits loader only accepts GetIfInt().
+The entry is dropped silently (wrong subtype logs nothing), the embedder
+callback reports the key absent, and updateCaps keeps the SwiftShader default
+2^30-1. Every other clause of the 0063 gate checks out: the validated index is
+set for the SwiftShader ICD, WebGL contexts require robust behavior without
+robust access, and initCaps copies the whole Caps struct.
+
+The fix mirrors what webgpu.limits already does: accept int or integral
+double, store int64. Doubles represent integers exactly to 2^53, so the
+conversion is lossless for every value the schema admits. No consumer changes:
+the embedder callback and the 64-bit clamp already widen, and the 32-bit and
+float clamp tables never serve this enum.
+
+Ledger: webgl.limits (extends).
+diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -366,15 +366,26 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+   }
+
+   if (const DictValue* gl = dict->FindDict("gl_limits")) {
+     for (const auto [name, value] : *gl) {
+-      if (std::optional<int> v = value.GetIfInt()) {
+-        if (*v > 0) {
+-          profile->gl_limits_[name] = *v;
+-        } else {
+-          LOG(ERROR) << "apostate: gl_limits." << name
+-                     << " must be positive; ignoring";
++      // A JSON number past int32 arrives as a double — the same representation
++      // gap webgpu.limits already handles — so accept both, and only integral
++      // positive values either way. MAX_ELEMENT_INDEX at 2^32-2 is the value
++      // that proved the int-only loader silently drops entries.
++      std::optional<int64_t> v;
++      if (std::optional<int> iv = value.GetIfInt()) {
++        v = *iv;
++      } else if (std::optional<double> dv = value.GetIfDouble()) {
++        if (std::isfinite(*dv) && *dv > 0 && *dv < 9007199254740992.0 &&
++            std::trunc(*dv) == *dv) {
++          v = static_cast<int64_t>(*dv);
+         }
+       }
++      if (v && *v > 0) {
++        profile->gl_limits_[name] = *v;
++      } else {
++        LOG(ERROR) << "apostate: gl_limits." << name
++                   << " must be a positive integer; ignoring";
++      }
+     }
+   }
+
+diff --git a/base/apostate/profile.h b/base/apostate/profile.h
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -216,13 +216,19 @@ class BASE_EXPORT Profile {
+   // GL integer limits the claimed device reports, keyed by the GLenum's name
+   // as WebGL spells it — MAX_TEXTURE_SIZE and so on.
+   //
++  // Stored 64-bit wide: values past int32 (MAX_ELEMENT_INDEX at 2^32-2)
++  // arrive from JSON as doubles, and an int map cannot hold them even when
++  // parsed. Doubles represent integers exactly to 2^53.
++  //
+   // These are never reported above what the driver underneath actually does.
+   // A limit is the one class of value a page can falsify by *using* it: ask for
+   // a texture larger than the driver can allocate and the claim collapses. So
+   // the emitter takes the smaller of the claim and the truth, which makes
+   // over-claiming structurally impossible rather than a thing selection has to
+   // avoid. Under-claiming is safe in the other direction, because ANGLE
+   // validates every allocation against the value it reported.
+-  const std::map<std::string, int>& gl_limits() const { return gl_limits_; }
++  const std::map<std::string, int64_t>& gl_limits() const {
++    return gl_limits_;
++  }
+
+   // WebGL extension names the claimed device exposes, as
+@@ -438,7 +441,7 @@ class BASE_EXPORT Profile {
+   std::optional<int> media_audioinput_count_;
+   std::optional<int> media_videoinput_count_;
+   std::map<std::string, std::string> keyboard_layout_map_;
+-  std::map<std::string, int> gl_limits_;
++  std::map<std::string, int64_t> gl_limits_;
+   std::set<std::string> gl_extensions_;
+   std::set<std::string> webgpu_features_;
+   std::string webgpu_vendor_;

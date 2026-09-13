@@ -66,3 +66,5 @@
 0063-validated-software-element-indices.patch
 0068-webgpu-adapter-from-profile.patch
 0069-webgpu-emitter-override.patch
+0070-gl-limits-int64-parse.patch
+0071-validated-index-under-robustness.patch

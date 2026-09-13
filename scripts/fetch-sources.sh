@@ -29,26 +29,26 @@ solutions = [
 GCLIENT
 
 if [ ! -d "$SRC/.git" ]; then
-  # Partial clone: skip blob history and fetch file contents on demand. A full
-  # Chromium clone downloads decades of every file's history that no build ever
-  # reads. Tags still resolve, so the pinned version checks out normally.
-  say "cloning chromium (partial clone; large but far smaller than full history)"
-  git clone -q --filter=blob:none \
+  # Fetch only the pinned release tag. A single-branch shallow clone avoids
+  # downloading unrelated Chromium refs and history before the build starts.
+  say "cloning pinned chromium tag $CHROMIUM_VERSION (shallow single-branch)"
+  git clone -q --depth 1 --single-branch --branch "$CHROMIUM_VERSION" \
     https://chromium.googlesource.com/chromium/src.git "$SRC"
 fi
 
-say "fetching pinned tag $CHROMIUM_VERSION"
-git -C "$SRC" fetch -q --no-tags origin "refs/tags/$CHROMIUM_VERSION:refs/tags/$CHROMIUM_VERSION"
+if [ "$(git -C "$SRC" rev-parse --is-shallow-repository 2>/dev/null || true)" != true ]; then
+  die "Chromium checkout is not shallow; refusing an unbounded source fetch"
+fi
+
+say "checking out $CHROMIUM_VERSION"
+git -C "$SRC" checkout -q --detach "refs/tags/$CHROMIUM_VERSION"
+
 if [ "$MODE" = "--fetch-only" ]; then
   git -C "$SRC" rev-parse "refs/tags/$CHROMIUM_VERSION^{commit}"
   exit 0
 fi
-say "checking out $CHROMIUM_VERSION"
-git -C "$SRC" checkout -q --detach "refs/tags/$CHROMIUM_VERSION"
-
-# --with_branch_heads and --with_tags are required for a release tag to resolve.
-say "gclient sync (pinned by DEPS at the tag; this is the slow step)"
-gclient sync --with_branch_heads --with_tags --no-history --shallow -D
+say "gclient sync (pinned by DEPS at the tag; no hooks; 16 jobs)"
+gclient sync --with_branch_heads --with_tags --no-history --shallow --nohooks -j16 -D
 
 if [ "$(uname -s)" = "Linux" ] && [ -x "$SRC/build/install-build-deps.sh" ]; then
   say "installing chromium build dependencies"

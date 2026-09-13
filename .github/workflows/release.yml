@@ -262,7 +262,12 @@ jobs:
           python3 scripts/validate-release-baseline.py --root .
           smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/chrome"
           test -x "$smoke"
-          "$smoke" --version
+          if [ "$TARGET" = linux-arm64 ]; then
+            format="$(file -b "$smoke")"
+            case "$format" in *aarch64*|*ARM64*) : ;; *) echo "unexpected ARM64 binary format: $format" >&2; exit 1 ;; esac
+          else
+            "$smoke" --version
+          fi
       - name: Package and sign verified artifact
         shell: bash
         run: |

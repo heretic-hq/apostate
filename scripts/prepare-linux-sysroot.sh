@@ -2,9 +2,10 @@
 # Install and attest the pinned Chromium sysroot for a configured Linux target.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-if [ "$(uname -s)" = Linux ] && [ -z "${APOSTATE_BUILD_IMAGE_ID:-}" ]; then
-  exec bash "$REPO_ROOT/scripts/in-linux-build-container.sh" scripts/prepare-linux-sysroot.sh "$@"
-fi
+# The pinned installer downloads the checksum-addressed archive. Run this
+# explicit dependency fetch on the host; build and hook execution stay in the
+# isolated Linux container, while the resulting checkout sysroot is mounted
+# into it. This avoids relying on a hidden Docker network exception.
 source "$REPO_ROOT/scripts/lib.sh"
 
 target="${1:-${TARGET:-$(target_default)}}"
@@ -39,7 +40,19 @@ PY
 )"
 receipt_dir="$WORKSPACE/sysroot-receipts"
 mkdir -p "$receipt_dir"
-python3 - "$receipt_dir/$target.json" "$target" "$arch" "$expected" "$actual_tree" "$sysroot" <<'PY'
+receipt_path="$receipt_dir/$target.json"
+if [ -e "$receipt_path" ]; then
+  python3 - "$receipt_path" "$expected" "$actual_tree" <<'PY'
+import json, pathlib, sys
+path, expected, actual = sys.argv[1:]
+data = json.loads(pathlib.Path(path).read_text(encoding='utf-8'))
+if data.get('expected_tarball_sha256') != expected:
+    raise SystemExit(f'cached sysroot receipt checksum mismatch: {path}')
+if data.get('extracted_tree_sha256') != actual:
+    raise SystemExit(f'cached sysroot tree drift detected: {path}')
+PY
+fi
+python3 - "$receipt_path" "$target" "$arch" "$expected" "$actual_tree" "$sysroot" <<'PY'
 import json, pathlib, sys
 path, target, arch, expected, actual, sysroot = sys.argv[1:]
 data = {'target': target, 'arch': arch, 'expected_tarball_sha256': expected,

@@ -99,11 +99,13 @@ runner environment. Each workflow checks that `TARGET` agrees with
 `RUNNER_OS` and `RUNNER_ARCH` before bootstrapping; the Linux arm64 target is
 the intentional exception at the target/host boundary.
 
-Keep the Chromium checkout, depot_tools checkout, Go cache, CIPD cache, and
-build output on persistent storage outside the ephemeral runner workspace. The
-workflow still checks out the requested commit or tag and the scripts still
-enforce the pinned Chromium and depot_tools revisions. Each job also validates
-the external workspace identity and briefly acquires its lock after checkout.
+The workflow derives each workspace from the runner service account's durable
+`$HOME/.cache/apostate/<target>/.workspace` path. Keep that home directory on
+persistent storage outside the ephemeral runner workspace. The Chromium
+checkout, depot_tools checkout, Go cache, CIPD cache, and build output remain
+there across jobs. Each job validates the workspace identity, acquires a
+target/run-owned lock before fetch, and releases it with an `always()` cleanup
+step.
 
 The three 7950X targets run sequentially to avoid competing for compiler CPU,
 memory, and disk bandwidth. Linux x64 runs first, followed by Linux arm64 and

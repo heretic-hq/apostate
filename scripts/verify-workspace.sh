@@ -18,9 +18,4 @@ if [ -e "$marker" ] && [ "$(cat "$marker")" != "$expected" ]; then
   die "persistent workspace identity mismatch at $workspace"
 fi
 printf '%s\n' "$expected" > "$marker"
-lock="$workspace/.lock"
-if ! mkdir "$lock" 2>/dev/null; then
-  die "persistent workspace is locked: $workspace"
-fi
-trap 'rmdir "$lock"' EXIT
-printf 'workspace matches %s (%s)\n' "$target" "$workspace"
+printf 'workspace identity matches %s (%s)\n' "$target" "$workspace"

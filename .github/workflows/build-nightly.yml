@@ -21,10 +21,16 @@ jobs:
     runs-on: [self-hosted, apostate-build, apostate-macos-arm64]
     timeout-minutes: 240
     env:
-      APOSTATE_WORKSPACE: /Users/Shared/apostate/macos-arm64/.workspace
       TARGET: macos-arm64
       ARCHIVE: apostate-152.0.7977.83-macos-arm64.tar.zst
     steps:
+      - name: Initialize persistent workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace="$HOME/.cache/apostate/$TARGET/.workspace"
+          mkdir -p "$workspace"
+          printf 'APOSTATE_WORKSPACE=%s\n' "$workspace" >> "$GITHUB_ENV"
       - name: Check out exact revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -37,8 +43,17 @@ jobs:
           for path in scripts/verify-runner.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
+          test -f scripts/verify-workspace.sh || { echo "missing build input: scripts/verify-workspace.sh" >&2; exit 1; }
+          test -f scripts/run-chromium-hooks.sh || { echo "missing build input: scripts/run-chromium-hooks.sh" >&2; exit 1; }
+          test -f scripts/lock-workspace.sh || { echo "missing build input: scripts/lock-workspace.sh" >&2; exit 1; }
+          if [[ "$TARGET" == linux-* ]]; then
+            test -f scripts/prepare-linux-sysroot.sh || { echo "missing build input: scripts/prepare-linux-sysroot.sh" >&2; exit 1; }
+          fi
           bash scripts/verify-runner.sh "$TARGET"
           bash scripts/verify-workspace.sh "$TARGET"
+      - name: Acquire persistent workspace lock
+        shell: bash
+        run: bash scripts/lock-workspace.sh acquire "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -105,6 +120,10 @@ jobs:
             ${{ env.ARCHIVE }}
             ${{ env.ARCHIVE }}.manifest.json
 
+      - name: Release persistent workspace lock
+        if: ${{ always() && env.APOSTATE_WORKSPACE_LOCK_ACQUIRED == '1' }}
+        shell: bash
+        run: bash scripts/lock-workspace.sh release "$TARGET"
   build-linux-arm64:
     name: nightly-linux-arm64
     needs: build-linux-x64
@@ -112,10 +131,16 @@ jobs:
     runs-on: [self-hosted, apostate-build, apostate-linux-x64]
     timeout-minutes: 240
     env:
-      APOSTATE_WORKSPACE: /var/lib/apostate/linux-arm64/.workspace
       TARGET: linux-arm64
       ARCHIVE: apostate-152.0.7977.83-linux-arm64.tar.zst
     steps:
+      - name: Initialize persistent workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace="$HOME/.cache/apostate/$TARGET/.workspace"
+          mkdir -p "$workspace"
+          printf 'APOSTATE_WORKSPACE=%s\n' "$workspace" >> "$GITHUB_ENV"
       - name: Check out exact revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -128,8 +153,17 @@ jobs:
           for path in scripts/verify-runner.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
+          test -f scripts/verify-workspace.sh || { echo "missing build input: scripts/verify-workspace.sh" >&2; exit 1; }
+          test -f scripts/run-chromium-hooks.sh || { echo "missing build input: scripts/run-chromium-hooks.sh" >&2; exit 1; }
+          test -f scripts/lock-workspace.sh || { echo "missing build input: scripts/lock-workspace.sh" >&2; exit 1; }
+          if [[ "$TARGET" == linux-* ]]; then
+            test -f scripts/prepare-linux-sysroot.sh || { echo "missing build input: scripts/prepare-linux-sysroot.sh" >&2; exit 1; }
+          fi
           bash scripts/verify-runner.sh "$TARGET"
           bash scripts/verify-workspace.sh "$TARGET"
+      - name: Acquire persistent workspace lock
+        shell: bash
+        run: bash scripts/lock-workspace.sh acquire "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -142,7 +176,7 @@ jobs:
       - name: Run Chromium hooks and install target sysroot
         if: ${{ startsWith(env.TARGET, 'linux-') }}
         shell: bash
-        run: cd "$APOSTATE_WORKSPACE" && "$APOSTATE_WORKSPACE/depot_tools/gclient" runhooks && bash "$GITHUB_WORKSPACE/scripts/prepare-linux-sysroot.sh" "$TARGET"
+        run: bash scripts/run-chromium-hooks.sh "$TARGET" && bash scripts/prepare-linux-sysroot.sh "$TARGET"
       - name: Configure target
         shell: bash
         run: bash scripts/configure.sh "$TARGET"
@@ -208,15 +242,25 @@ jobs:
             ${{ env.ARCHIVE }}
             ${{ env.ARCHIVE }}.manifest.json
 
+      - name: Release persistent workspace lock
+        if: ${{ always() && env.APOSTATE_WORKSPACE_LOCK_ACQUIRED == '1' }}
+        shell: bash
+        run: bash scripts/lock-workspace.sh release "$TARGET"
   build-linux-x64:
     name: nightly-linux-x64
     runs-on: [self-hosted, apostate-build, apostate-linux-x64]
     timeout-minutes: 240
     env:
-      APOSTATE_WORKSPACE: /var/lib/apostate/linux-x64/.workspace
       TARGET: linux-x64
       ARCHIVE: apostate-152.0.7977.83-linux-x64.tar.zst
     steps:
+      - name: Initialize persistent workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace="$HOME/.cache/apostate/$TARGET/.workspace"
+          mkdir -p "$workspace"
+          printf 'APOSTATE_WORKSPACE=%s\n' "$workspace" >> "$GITHUB_ENV"
       - name: Check out exact revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -229,8 +273,17 @@ jobs:
           for path in scripts/verify-runner.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
+          test -f scripts/verify-workspace.sh || { echo "missing build input: scripts/verify-workspace.sh" >&2; exit 1; }
+          test -f scripts/run-chromium-hooks.sh || { echo "missing build input: scripts/run-chromium-hooks.sh" >&2; exit 1; }
+          test -f scripts/lock-workspace.sh || { echo "missing build input: scripts/lock-workspace.sh" >&2; exit 1; }
+          if [[ "$TARGET" == linux-* ]]; then
+            test -f scripts/prepare-linux-sysroot.sh || { echo "missing build input: scripts/prepare-linux-sysroot.sh" >&2; exit 1; }
+          fi
           bash scripts/verify-runner.sh "$TARGET"
           bash scripts/verify-workspace.sh "$TARGET"
+      - name: Acquire persistent workspace lock
+        shell: bash
+        run: bash scripts/lock-workspace.sh acquire "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -243,7 +296,7 @@ jobs:
       - name: Run Chromium hooks and install target sysroot
         if: ${{ startsWith(env.TARGET, 'linux-') }}
         shell: bash
-        run: cd "$APOSTATE_WORKSPACE" && "$APOSTATE_WORKSPACE/depot_tools/gclient" runhooks && bash "$GITHUB_WORKSPACE/scripts/prepare-linux-sysroot.sh" "$TARGET"
+        run: bash scripts/run-chromium-hooks.sh "$TARGET" && bash scripts/prepare-linux-sysroot.sh "$TARGET"
       - name: Configure target
         shell: bash
         run: bash scripts/configure.sh "$TARGET"
@@ -304,6 +357,10 @@ jobs:
             ${{ env.ARCHIVE }}
             ${{ env.ARCHIVE }}.manifest.json
 
+      - name: Release persistent workspace lock
+        if: ${{ always() && env.APOSTATE_WORKSPACE_LOCK_ACQUIRED == '1' }}
+        shell: bash
+        run: bash scripts/lock-workspace.sh release "$TARGET"
   build-windows-x64:
     name: nightly-windows-x64
     needs: build-linux-arm64
@@ -311,10 +368,16 @@ jobs:
     runs-on: [self-hosted, apostate-build, apostate-windows-x64]
     timeout-minutes: 240
     env:
-      APOSTATE_WORKSPACE: C:/apostate/windows-x64/.workspace
       TARGET: windows-x64
       ARCHIVE: apostate-152.0.7977.83-windows-x64.zip
     steps:
+      - name: Initialize persistent workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace="$HOME/.cache/apostate/$TARGET/.workspace"
+          mkdir -p "$workspace"
+          printf 'APOSTATE_WORKSPACE=%s\n' "$workspace" >> "$GITHUB_ENV"
       - name: Check out exact revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -327,8 +390,17 @@ jobs:
           for path in scripts/verify-runner.sh scripts/verify-workspace.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
             test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
           done
+          test -f scripts/verify-workspace.sh || { echo "missing build input: scripts/verify-workspace.sh" >&2; exit 1; }
+          test -f scripts/run-chromium-hooks.sh || { echo "missing build input: scripts/run-chromium-hooks.sh" >&2; exit 1; }
+          test -f scripts/lock-workspace.sh || { echo "missing build input: scripts/lock-workspace.sh" >&2; exit 1; }
+          if [[ "$TARGET" == linux-* ]]; then
+            test -f scripts/prepare-linux-sysroot.sh || { echo "missing build input: scripts/prepare-linux-sysroot.sh" >&2; exit 1; }
+          fi
           bash scripts/verify-runner.sh "$TARGET"
           bash scripts/verify-workspace.sh "$TARGET"
+      - name: Acquire persistent workspace lock
+        shell: bash
+        run: bash scripts/lock-workspace.sh acquire "$TARGET"
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh
@@ -395,3 +467,7 @@ jobs:
           path: |
             ${{ env.ARCHIVE }}
             ${{ env.ARCHIVE }}.manifest.json
+      - name: Release persistent workspace lock
+        if: ${{ always() && env.APOSTATE_WORKSPACE_LOCK_ACQUIRED == '1' }}
+        shell: bash
+        run: bash scripts/lock-workspace.sh release "$TARGET"

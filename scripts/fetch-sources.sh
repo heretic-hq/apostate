@@ -67,8 +67,7 @@ if [ "$MODE" = "--fetch-only" ]; then
 fi
 say "gclient sync (pinned by DEPS at the tag; no hooks; 16 jobs)"
 gclient sync --with_branch_heads --with_tags --no-history --shallow --nohooks -j16 -D
-say "running pinned Chromium hooks"
-gclient runhooks
+bash "$REPO_ROOT/scripts/run-chromium-hooks.sh" "$target"
 
 if [ "$(uname -s)" = "Linux" ] && [ -x "$SRC/build/install-build-deps.sh" ]; then
   say "installing chromium build dependencies"

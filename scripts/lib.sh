@@ -25,7 +25,8 @@ export PATH="$DEPOT_TOOLS:$PATH"
 # what the build contract actually promises.
 case "$(uname -s)" in
   Darwin) _bt_dir="mac_arm64" ;;
-  *)      _bt_dir="linux64" ;;
+  MINGW*|MSYS*|CYGWIN*) _bt_dir="win64" ;;
+  *) _bt_dir="linux64" ;;
 esac
 GN="$SRC/buildtools/$_bt_dir/gn"
 NINJA="$SRC/third_party/ninja/ninja"

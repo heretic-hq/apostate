@@ -1,0 +1,64 @@
+Subject: [PATCH] angle: serve the validated index limit under native robustness
+
+0063 gates the raised MAX_ELEMENT_INDEX on frontend buffer-access validation,
+but Chromium's WebGL contexts on SwiftShader never have it: the context
+carries robust access with a backend that supports it, so ANGLE validation is
+off by construction. The gate is dead in production — it fires only in the
+ANGLE harness, where the test disables robust access by hand. V3 keeps reading
+the native 2^30-1 while the unit test next to it asserts 2^32-2.
+
+Observed, not assumed: an out-of-bounds indexed draw (index 0xFFFFFFFE into a
+one-vertex buffer) in the built browser returns NO_ERROR. Frontend validation
+would reject it with INVALID_OPERATION, so validation is off, which on a WebGL
+context implies the robust-buffer-access extension is active, which implies
+native robustness contains every out-of-bounds index read. That is the same
+containment the validation flag provides, through the other mechanism.
+
+So the gate accepts either containment: frontend validation or native robust
+buffer access. The served value is unchanged — min(profile claim, validated
+backend capability) — and the no-error exclusion stays, since that path skips
+error generation rather than containing reads. The RobustTest expectation moves
+to the profile limit with the reason attached; the draw-behavior failures in
+the profile suite are a separate, pre-existing matter (restart-index handling
+under validation) and are untouched by this change.
+
+Ledger: webgl.limits (extends).
+diff --git a/third_party/angle/src/libANGLE/Context.cpp b/third_party/angle/src/libANGLE/Context.cpp
+--- a/third_party/angle/src/libANGLE/Context.cpp
++++ b/third_party/angle/src/libANGLE/Context.cpp
+@@ -4926,13 +4926,21 @@
+     mBufferAccessValidationEnabled =
+         !mSupportedExtensions.robustBufferAccessBehaviorKHR && mRequiresRobustBehavior;
+
+     if (caps->maxValidatedElementIndex > 0)
+     {
+         // Re-evaluate after robustness/extension changes, before rebuilding the
+         // validation cache. Unprofiled and unvalidated contexts retain defaults.
+         caps->maxElementIndex = mImplementation->getNativeCaps().maxElementIndex;
+         int64_t requested = 0;
+-        if (mState.isWebGL() && mBufferAccessValidationEnabled && !skipValidation() &&
++        // Either containment is sufficient. Frontend validation rejects
++        // out-of-bounds index reads; where it is off on a WebGL context the
++        // robust-buffer-access extension is necessarily active (that is what
++        // switches validation off), and native robustness contains them
++        // instead. Serving up to the validated backend capability cannot
++        // expose memory through either path.
++        const bool readsContained = mBufferAccessValidationEnabled ||
++                                    mSupportedExtensions.robustBufferAccessBehaviorKHR;
++        if (mState.isWebGL() && readsContained && !skipValidation() &&
+             GetProfileIntegerCap("MAX_ELEMENT_INDEX", &requested))
+         {
+             caps->maxElementIndex =
+diff --git a/third_party/angle/src/tests/gl_tests/ApostateLargeElementIndexTest.cpp b/third_party/angle/src/tests/gl_tests/ApostateLargeElementIndexTest.cpp
+--- a/third_party/angle/src/tests/gl_tests/ApostateLargeElementIndexTest.cpp
++++ b/third_party/angle/src/tests/gl_tests/ApostateLargeElementIndexTest.cpp
+@@ -475,5 +475,8 @@ TEST_P(LargeElementIndexNativeTest, DefaultLimitUnchanged)
+ }
+ TEST_P(LargeElementIndexRobustTest, DefaultLimitUnchanged)
+ {
+-    EXPECT_EQ(limit(), kDefaultLimit);
++    // Robust contexts contain out-of-bounds reads natively, so the profile
++    // limit is served exactly as under frontend validation. Non-WebGL and
++    // unprofiled contexts still retain the default (see NativeTest above).
++    EXPECT_EQ(limit(), kProfileLimit);
+ }

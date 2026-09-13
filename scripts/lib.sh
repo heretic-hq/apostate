@@ -11,6 +11,7 @@ DEPOT_TOOLS_REVISION="$(tr -d '[:space:]' < "$REPO_ROOT/build/DEPOT_TOOLS_REVISI
 WORKSPACE="${APOSTATE_WORKSPACE:-$REPO_ROOT/.workspace}"
 DEPOT_TOOLS="$WORKSPACE/depot_tools"
 SRC="$WORKSPACE/src"
+export GOCACHE="${GOCACHE:-$WORKSPACE/.go-cache}"
 
 # depot_tools updates itself on every invocation unless told not to. That single
 # behaviour is the most common cause of a build that worked yesterday.

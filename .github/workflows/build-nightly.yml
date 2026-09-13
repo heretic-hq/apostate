@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: nightly-${{ github.ref }}
-  cancel-in-progress: true
+  group: apostate-build-host
+  cancel-in-progress: false
 
 env:
   PYTHONUNBUFFERED: "1"
@@ -105,6 +105,8 @@ jobs:
 
   build-linux-arm64:
     name: nightly-linux-arm64
+    needs: build-linux-x64
+    if: ${{ needs.build-linux-x64.result == 'success' }}
     runs-on: [self-hosted, apostate-build, apostate-linux-arm64]
     timeout-minutes: 240
     env:
@@ -285,6 +287,8 @@ jobs:
 
   build-windows-x64:
     name: nightly-windows-x64
+    needs: build-linux-arm64
+    if: ${{ needs.build-linux-arm64.result == 'success' }}
     runs-on: [self-hosted, apostate-build, apostate-windows-x64]
     timeout-minutes: 240
     env:

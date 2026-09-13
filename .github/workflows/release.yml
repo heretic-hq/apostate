@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: apostate-build-host
   cancel-in-progress: false
 
 env:
@@ -209,8 +209,8 @@ jobs:
 
   build-linux-arm64:
     name: build-linux-arm64
-    needs: release-gate
-    if: ${{ needs.release-gate.result == 'success' }}
+    needs: build-linux-x64
+    if: ${{ needs.build-linux-x64.result == 'success' }}
     runs-on: [self-hosted, apostate-build, apostate-linux-arm64]
     timeout-minutes: 240
     env:
@@ -427,8 +427,8 @@ jobs:
 
   build-windows-x64:
     name: build-windows-x64
-    needs: release-gate
-    if: ${{ needs.release-gate.result == 'success' }}
+    needs: build-linux-arm64
+    if: ${{ needs.build-linux-arm64.result == 'success' }}
     runs-on: [self-hosted, apostate-build, apostate-windows-x64]
     timeout-minutes: 240
     env:

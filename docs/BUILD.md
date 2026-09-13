@@ -92,14 +92,22 @@ The CI build jobs run on persistent self-hosted VMs. Register each VM with the
 | macOS arm64 | `apostate-macos-arm64` | macOS arm64 |
 
 The Linux x64 and arm64 guests and the Windows guest may run on the 7950X host.
-The macOS arm64 guest runs on the Mac host. The guest must report the target
-OS and architecture through the GitHub runner environment. Each workflow checks
-that `TARGET` agrees with `RUNNER_OS` and `RUNNER_ARCH` before bootstrapping.
+The macOS arm64 guest runs on the Mac host. Keep all guests powered on with
+their runner services active. GitHub Actions queues a target until its guest
+is available, so no manual VM switching is required.
+
+The guest must report the target OS and architecture through the GitHub runner
+environment. Each workflow checks that `TARGET` agrees with `RUNNER_OS` and
+`RUNNER_ARCH` before bootstrapping.
 
 Keep the Chromium checkout, depot_tools checkout, Go cache, CIPD cache, and
 build output on persistent storage outside the ephemeral runner workspace. The
 workflow still checks out the requested commit or tag and the scripts still
 enforce the pinned Chromium and depot_tools revisions.
+
+The three 7950X targets run sequentially to avoid competing for compiler CPU,
+memory, and disk bandwidth. Linux x64 runs first, followed by Linux arm64 and
+Windows x64. macOS runs independently on the Mac host.
 
 Linux builds run in the pinned container on the Linux VM. macOS builds run
 natively on pinned Xcode. Windows builds run in the Windows VM with the pinned

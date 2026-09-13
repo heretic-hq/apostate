@@ -2,6 +2,9 @@
 # Write args.gn from the pinned target file and run gn gen.
 source "$(dirname "$0")/lib.sh"
 
+if [ "${1:-$(target_default)}" = macos-arm64 ] && [ "$(uname -s)" != Darwin ]; then
+  die "macos-arm64 configuration requires a native macOS runner"
+fi
 if [ "$(uname -s)" = Linux ] && [ -z "${APOSTATE_BUILD_IMAGE_ID:-}" ]; then
   exec bash "$REPO_ROOT/scripts/in-linux-build-container.sh" scripts/configure.sh "$@"
 fi

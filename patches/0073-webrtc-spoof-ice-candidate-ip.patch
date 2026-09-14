@@ -1,0 +1,18 @@
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index c905e5535e..b9e3a809fe 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -3746,6 +3746,13 @@ void RenderProcessHostImpl::AppendRendererCommandLine(
+         switches::kGpuClientId, base::NumberToString(gpu_client_->client_id()));
+   }
+ 
++const base::CommandLine& browser_cmd = *base::CommandLine::ForCurrentProcess();
++  if (browser_cmd.HasSwitch("fingerprint-webrtc-ip")) {
++    command_line->AppendSwitchASCII(
++        "fingerprint-webrtc-ip",
++        browser_cmd.GetSwitchValueASCII("fingerprint-webrtc-ip"));
++  }
++
+   // Call this as early as possible so that --extension-process will show early
+   // in process listings. See https://crbug.com/1211558 for details.
+   GetContentClient()->browser()->AppendExtraCommandLineSwitches(

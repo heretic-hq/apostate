@@ -19,6 +19,7 @@ diff --git a/gpu/command_buffer/service/shared_image/gl_texture_image_backing_fa
                                    progress_reporter),
        supports_cpu_upload_(supports_cpu_upload),
 +      profile_software_webgpu_([&gpu_preferences] {
++        (void)gpu_preferences;
 +#if BUILDFLAG(IS_LINUX) && BUILDFLAG(USE_DAWN)
 +        const auto* profile = base::apostate::Profile::Get();
 +        if (!profile || !profile->ua_platform() ||

@@ -68,3 +68,6 @@
 0069-webgpu-emitter-override.patch
 0070-gl-limits-int64-parse.patch
 0071-validated-index-under-robustness.patch
+0072-native-proxy-authentication.patch
+0073-webrtc-candidate-address-override.patch
+0074-webrtc-spoof-ice-candidate-ip.patch

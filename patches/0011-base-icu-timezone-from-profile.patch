@@ -73,11 +73,13 @@ diff --git a/base/i18n/icu_util.cc b/base/i18n/icu_util.cc
 index 0261246..b22b735 100644
 --- a/base/i18n/icu_util.cc
 +++ b/base/i18n/icu_util.cc
-@@ -4,6 +4,8 @@
+@@ -4,6 +4,10 @@
  
  #include "base/i18n/icu_util.h"
  
 +#include "base/apostate/profile.h"
++#include "third_party/icu/source/common/unicode/unistr.h"
++#include "third_party/icu/source/i18n/unicode/timezone.h"
 +
  #include "build/build_config.h"
  

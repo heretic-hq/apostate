@@ -1,0 +1,89 @@
+Subject: webrtc: allow deterministic ICE candidate address override
+
+Expose the caller-provided address at WebRTC's native candidate serializer. The
+wrapper can pass --fingerprint-webrtc-ip as an explicit launch argument; the
+browser forwards it to child processes alongside the existing Apostate profile
+switch. This changes only host and server-reflexive SDP candidate text and its
+related address, preventing the original local address from remaining in raddr.
+It does not add a media relay.
+
+--- a/third_party/webrtc/api/candidate.cc
++++ b/third_party/webrtc/api/candidate.cc
+@@ -9,6 +9,9 @@
+  */
+ 
+ #include "api/candidate.h"
++#if defined(WEBRTC_CHROMIUM_BUILD)
++#include "base/command_line.h"
++#endif
+ 
+ #include <algorithm>  // IWYU pragma: keep
+ #include <cstddef>
+@@ -81,19 +84,38 @@
+   os << kAttributeCandidate;
+ 
+   absl::string_view type = candidate.type_name();
++  std::string address =
++      candidate.address().ipaddr().IsNil()
++          ? candidate.address().hostname()
++          : candidate.address().ipaddr().ToString();
++  bool address_overridden = false;
++#if defined(WEBRTC_CHROMIUM_BUILD)
++  if (candidate.is_stun() || candidate.is_local()) {
++    const base::CommandLine* command_line =
++        base::CommandLine::ForCurrentProcess();
++    if (command_line->HasSwitch("fingerprint-webrtc-ip")) {
++      std::string spoofed_address =
++          command_line->GetSwitchValueASCII("fingerprint-webrtc-ip");
++      if (!spoofed_address.empty()) {
++        address = std::move(spoofed_address);
++        address_overridden = true;
++      }
++    }
++  }
++#endif
+   os << kSdpDelimiterColon << candidate.foundation() << " "
+      << candidate.component() << " " << candidate.protocol() << " "
+      << candidate.priority() << " "
+-     << (candidate.address().ipaddr().IsNil()
+-             ? candidate.address().hostname()
+-             : candidate.address().ipaddr().ToString())
++     << address
+      << " " << candidate.address().PortAsString() << " "
+      << kAttributeCandidateTyp << " " << type << " ";
+ 
+   // Related address
+   if (!candidate.related_address().IsNil()) {
+     os << kAttributeCandidateRaddr << " "
+-       << candidate.related_address().ipaddr().ToString() << " "
++       << (address_overridden ? address
++                              : candidate.related_address().ipaddr().ToString())
++       << " "
+        << kAttributeCandidateRport << " "
+        << candidate.related_address().PortAsString() << " ";
+   }
+
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -2960,6 +2960,7 @@
+       // child, which is why the switch belongs here rather than in a
+       // per-process-type list.
+       ::switches::kApostateProfile,
++      "fingerprint-webrtc-ip",
+   };
+   command_line->CopySwitchesFrom(browser_command_line, kCommonSwitchNames);
+ 
+
+--- a/third_party/webrtc/api/BUILD.gn
++++ b/third_party/webrtc/api/BUILD.gn
+@@ -205,6 +205,9 @@
+     "//third_party/abseil-cpp/absl/strings",
+     "//third_party/abseil-cpp/absl/strings:string_view",
+   ]
++  if (build_with_chromium) {
++    deps += [ "//base" ]
++  }
+ }
+ 
+ rtc_source_set("turn_customizer") {
+

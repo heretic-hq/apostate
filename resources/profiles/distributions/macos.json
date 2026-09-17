@@ -1,8 +1,0 @@
-{
-  "id": "apostate-macos",
-  "platform": "macos",
-  "evidence_class": "catalogue-value",
-  "family_ids": ["apple-metal-m2", "apple-metal-m2-pro", "apple-metal-m3-pro", "apple-metal-m4", "apple-metal-m5"],
-  "policy_ids": {"display": ["mac-compact", "mac-standard", "mac-external"], "hardware": ["mac-compact", "mac-pro", "mac-max"], "locale": ["en-au", "en-gb", "en-sg", "en-us"], "theme": ["contrast", "dark", "light"]},
-  "notes": "Apostate-owned normalized distribution; values are compatibility/catalogue policy choices, not physical-device claims."
-}

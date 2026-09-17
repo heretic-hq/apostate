@@ -21,6 +21,16 @@
 /ledger/inbox/*.json
 !/ledger/inbox/.gitkeep
 
+# Private key material. This repository's history is public and permanent, so a
+# key committed once is a key rotated forever. Release provenance is a keyless
+# GitHub artifact attestation, so there is no signing key to hold at all; these
+# rules exist because one `git add -A` is enough to publish a stray key that
+# was only ever meant to be local.
+*.pem
+*.key
+/apostate-release.pem
+/public-key.txt
+
 .DS_Store
 __pycache__/
 *.pyc
@@ -29,6 +39,10 @@ venv/
 /python/dist/
 /python/*.egg-info/
 /npm/dist/
+/npm/node_modules/
+
+# Scratch planning notes written during a session, not repository content.
+/local/
 .venv/
 
 # Third-party fingerprint corpora are never redistributed from this repository.

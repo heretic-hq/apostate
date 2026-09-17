@@ -274,6 +274,14 @@ def provision(*, target: str | None = None, source: str | Path | None = None,
         "version": _read_version(store),
         "store": str(store),
         "installed": None,
+        # A CDM being present is not a CDM being registered. `launch()` strips
+        # the switch from the driver's defaults, but anyone driving the binary
+        # directly must do it too.
+        "requires": (
+            "the browser must not run with --disable-component-update; it blocks "
+            "component registration and a provisioned CDM is silently inert. "
+            "launch() removes it from the driver's defaults automatically."
+        ),
     }
 
     if install is not None:

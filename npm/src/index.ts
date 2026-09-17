@@ -1966,6 +1966,7 @@ export async function launch(options = {}) {
     headless: prepared.config.headless,
     args,
     env: { ...process.env, ...env },
+    ignoreDefaultArgs: ignoreDefaultArgsFor(options.ignoreDefaultArgs, prepared.config.args),
   };
   try {
     if (driver.kind === "playwright") {
@@ -2027,6 +2028,44 @@ export async function launchPersistentContext(userDataDir, options = {}) {
   }
   await mkdir(resolve(userDataDir), { recursive: true });
   return launch({ ...options, userDataDir });
+}
+
+// Playwright passes this by default; Patchright and Puppeteer do not.
+// chrome/browser/chrome_browser_main.cc wraps the whole
+// RegisterComponentsForUpdate() call in a check for it, and that function is the
+// only caller of ComponentInstaller::Register, which is the only path to
+// FindPreinstallation. So it does not merely stop downloads -- it stops an
+// already-present component from ever being REGISTERED.
+//
+// Two reasons to drop it. A provisioned Widevine CDM is silently dead with it
+// set, which is the exact "told you DRM works, it does not" failure that
+// provisioning exists to remove. And the artifact ships preinstalled components
+// in Libraries/: MEIPreload and PrivacySandboxAttestationsPreloaded register on
+// every launch, IwaKeyDistribution is feature-gated and does not. The switch
+// gates the entire RegisterComponentsForUpdate() call, so it suppresses all of
+// them at once, and a real Chrome has them registered. Suppressing registration
+// is therefore itself a divergence from the browser being imitated,
+// independent of DRM.
+//
+// Measured on the provisioned install, offline, counting the browser's own
+// "Component ready" lines: without the switch, MEIPreload 1.0.7.1652906823,
+// PrivacySandboxAttestationsPreloaded 2025.7.18.0 and WidevineCdm 4.10.3050.0
+// register; with it, zero components register at all.
+//
+// Measured on macos-arm64 152.0.7977.83 with a provisioned CDM and no network:
+// through Patchright the empty robustness level resolved; through Playwright,
+// same install and same code, it rejected NotSupportedError.
+const DISABLE_COMPONENT_UPDATE = "--disable-component-update";
+
+// A switch the caller put in args themselves is honoured; only the driver's
+// injected default is removed.
+function ignoreDefaultArgsFor(requested, args) {
+  if (hasSwitch(args, DISABLE_COMPONENT_UPDATE)) return requested;
+  if (requested === true) return requested;
+  if (requested === undefined || requested === null || requested === false) return [DISABLE_COMPONENT_UPDATE];
+  const merged = Array.isArray(requested) ? [...requested] : [String(requested)];
+  if (!merged.includes(DISABLE_COMPONENT_UPDATE)) merged.push(DISABLE_COMPONENT_UPDATE);
+  return merged;
 }
 
 // --- Widevine DRM provisioning -------------------------------------------
@@ -2141,6 +2180,9 @@ export async function provisionWidevine(options = {}) {
     version: manifestVersion,
     store,
     installed,
+    // A CDM being present is not a CDM being registered. launch() strips the
+    // switch, but anyone driving the binary directly must too.
+    requires: `the browser must not run with ${DISABLE_COMPONENT_UPDATE}; it blocks component registration and a provisioned CDM is silently inert. launch() removes it from the driver's defaults automatically.`,
   };
 }
 export const provision_widevine = provisionWidevine;

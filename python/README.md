@@ -145,6 +145,17 @@ found, run any Chromium-based browser with a persistent profile and play a DRM
 video once, then re-run. Measured on macOS; Linux and Windows use the same
 command but have not been verified.
 
+One switch matters: `--disable-component-update` gates the whole of
+Chromium's component registration, not just downloading. With it set, **no**
+preinstalled component registers — measured offline, zero of them — so a
+provisioned CDM is silently inert and the browser diverges from a real Chrome
+across every preinstalled component at once. `launch()` removes it from the
+driver's default arguments for you. If you drive the binary yourself, do not
+pass it — Playwright passes it by default, so use
+`ignore_default_args=["--disable-component-update"]` (Python) or
+`ignoreDefaultArgs: ["--disable-component-update"]` (Node). Patchright and
+Puppeteer do not pass it.
+
 ## The browser cache
 
 The install lives under `~/Library/Caches/apostate` on macOS,

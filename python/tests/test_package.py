@@ -34,6 +34,7 @@ from apostate import (  # noqa: E402
     ProfileError,
     UnpublishedArtifactError,
     UnsupportedArchiveError,
+    launch,
     launch_async,
     launch_persistent_context,
     load_catalogue,
@@ -66,6 +67,10 @@ class _FakeAsyncPlaywright:
 class _FakeSyncChromium:
     def __init__(self) -> None:
         self.options: dict[str, Any] | None = None
+
+    def launch(self, **options: Any) -> dict[str, Any]:
+        self.options = options
+        return options
 
     def launch_persistent_context(self, **options: Any) -> dict[str, Any]:
         self.options = options
@@ -548,6 +553,36 @@ print(catalogue['browser_build'])
             with self.assertRaises(WidevineError):
                 provision(target="macos-arm64", source=empty, cache_dir=temporary,
                           chromium_version=CHROMIUM_VERSION, install=Path(temporary) / "install")
+
+    def test_component_update_switch_is_dropped_from_driver_defaults(self) -> None:
+        # Playwright passes --disable-component-update by default, and it blocks
+        # ComponentInstaller::Register outright, so a provisioned Widevine CDM is
+        # silently inert. Measured: same install and same code, Patchright
+        # resolved and Playwright rejected NotSupportedError. Patchright does not
+        # pass the switch, which is why the first version of this feature passed
+        # its own test and would still have failed for a plain-Playwright user.
+        launch_module = importlib.import_module("apostate.launch")
+        fake = _FakeSyncPlaywright()
+        with tempfile.NamedTemporaryFile() as executable:
+            os.chmod(executable.name, 0o755)
+            with mock.patch.object(launch_module, "_load_sync_backend", return_value=lambda: fake):
+                launch(geoip=False, binary_path=executable.name, fingerprint="host")
+        assert fake.chromium.options is not None
+        self.assertIn("--disable-component-update", fake.chromium.options["ignore_default_args"])
+
+    def test_an_explicitly_requested_component_update_switch_is_honoured(self) -> None:
+        # Suppressing a switch the caller asked for would be the package
+        # overriding an explicit decision; only the driver's default is removed.
+        launch_module = importlib.import_module("apostate.launch")
+        fake = _FakeSyncPlaywright()
+        with tempfile.NamedTemporaryFile() as executable:
+            os.chmod(executable.name, 0o755)
+            with mock.patch.object(launch_module, "_load_sync_backend", return_value=lambda: fake):
+                launch(geoip=False, binary_path=executable.name, fingerprint="host",
+                       args=["--disable-component-update"])
+        assert fake.chromium.options is not None
+        self.assertIsNone(fake.chromium.options["ignore_default_args"])
+        self.assertIn("--disable-component-update", fake.chromium.options["args"])
 
     def test_async_launch_delegates_to_async_backend(self) -> None:
         launch_module = importlib.import_module("apostate.launch")

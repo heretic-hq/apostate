@@ -259,6 +259,55 @@ def _backend_error(exc: Exception) -> LaunchError:
     return LaunchError(f"native Apostate browser launch failed: {text or 'unknown error'}")
 
 
+#: Playwright passes this by default; Patchright and Puppeteer do not.
+#: ``chrome/browser/chrome_browser_main.cc`` wraps the whole
+#: ``RegisterComponentsForUpdate()`` call in a check for it, and that function is
+#: the only caller of ``ComponentInstaller::Register``, which is the only path to
+#: ``FindPreinstallation``. So it does not merely stop downloads -- it stops an
+#: already-present component from ever being REGISTERED.
+#:
+#: Two reasons to drop it. A provisioned Widevine CDM is silently dead with it
+#: set, which is the exact "told you DRM works, it does not" failure provisioning
+#: exists to remove. And the artifact ships preinstalled components in
+#: ``Libraries/``: MEIPreload and PrivacySandboxAttestationsPreloaded register on
+#: every launch, IwaKeyDistribution is feature-gated and does not. The switch
+#: gates the entire ``RegisterComponentsForUpdate()`` call, so it suppresses all
+#: of them at once, and a real Chrome has them registered. Suppressing
+#: registration is therefore itself a divergence from the browser being imitated,
+#: independent of DRM.
+#:
+#: Measured on the provisioned install, offline, counting the browser's own
+#: "Component ready" lines: without the switch, MEIPreload 1.0.7.1652906823,
+#: PrivacySandboxAttestationsPreloaded 2025.7.18.0 and WidevineCdm 4.10.3050.0
+#: register; with it, zero components register at all.
+#:
+#: Measured on macos-arm64 152.0.7977.83 with a provisioned CDM and no network:
+#: through Patchright the empty robustness level resolved; through Playwright,
+#: same install and same code, it rejected NotSupportedError.
+_DISABLE_COMPONENT_UPDATE = "--disable-component-update"
+
+
+def _ignore_default_args(requested: Any, args: Any) -> Any:
+    """Drop the driver's component-update switch unless the caller asked for it.
+
+    A switch the caller put in ``args`` themselves is honoured; only the
+    driver's injected default is removed.
+    """
+    if _has_switch(args, _DISABLE_COMPONENT_UPDATE):
+        return requested
+    if requested is True:
+        # Every default is already suppressed.
+        return requested
+    if requested is None or requested is False:
+        return [_DISABLE_COMPONENT_UPDATE]
+    if isinstance(requested, str):
+        requested = [requested]
+    merged = list(requested)
+    if _DISABLE_COMPONENT_UPDATE not in merged:
+        merged.append(_DISABLE_COMPONENT_UPDATE)
+    return merged
+
+
 def _own_driver(target: Any, driver: Any) -> Any:
     """Make *target* stop the Playwright driver it was created from.
 
@@ -358,6 +407,8 @@ def launch(*, fingerprint: int | str | None = None, fingerprint_platform: str | 
     playwright = sync_playwright().start()
     launch_options = dict(playwright_options)
     launch_options.update(executable_path=str(binary), headless=config.headless, args=_native_args(plan))
+    launch_options["ignore_default_args"] = _ignore_default_args(
+        launch_options.get("ignore_default_args"), config.args)
     if config.proxy is not None and "proxy" not in launch_options:
         launch_options["proxy"] = _playwright_proxy(config.proxy)
     try:
@@ -417,6 +468,8 @@ def launch_persistent_context(user_data_dir: str | Path, *, context_options: Map
     launch_options.update(options)
     launch_options.update(executable_path=str(binary), headless=config.headless,
                           args=_native_args(plan, persistent=True), user_data_dir=str(path))
+    launch_options["ignore_default_args"] = _ignore_default_args(
+        launch_options.get("ignore_default_args"), config.args)
     if config.proxy is not None and "proxy" not in launch_options:
         launch_options["proxy"] = _playwright_proxy(config.proxy)
     playwright = sync_playwright().start()
@@ -450,6 +503,8 @@ async def launch_async(**options: Any) -> Any:
     playwright = await async_playwright().start()
     launch_options = dict(options)
     launch_options.update(executable_path=str(binary), headless=config.headless, args=_native_args(plan))
+    launch_options["ignore_default_args"] = _ignore_default_args(
+        launch_options.get("ignore_default_args"), config.args)
     if config.proxy is not None and "proxy" not in launch_options:
         launch_options["proxy"] = _playwright_proxy(config.proxy)
     try:
@@ -498,6 +553,8 @@ async def launch_persistent_context_async(user_data_dir: str | Path, *, context_
     launch_options.update(options)
     launch_options.update(executable_path=str(binary), headless=config.headless,
                           args=_native_args(plan, persistent=True), user_data_dir=str(path))
+    launch_options["ignore_default_args"] = _ignore_default_args(
+        launch_options.get("ignore_default_args"), config.args)
     if config.proxy is not None and "proxy" not in launch_options:
         launch_options["proxy"] = _playwright_proxy(config.proxy)
     try:

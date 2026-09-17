@@ -30,6 +30,39 @@ Which packs your persona drew is printed by `--fingerprint-explain`, on the
 [`resources/profiles/dispersion/font_packs.json`](../resources/profiles/dispersion/font_packs.json).
 The core pack is always drawn; the rest depend on the seed.
 
+### Pin a seed so the list stops moving
+
+A bare launch draws a fresh seed, and the optional packs move with it, so
+"which fonts do I install" has no fixed answer until you fix the seed. Four
+seeds on a Windows persona, as printed by `--fingerprint-explain`:
+
+```
+--fingerprint=7      platform-core  microsoft-office  cjk-language-pack
+--fingerprint=42     platform-core  microsoft-office  adobe-creative-cloud
+--fingerprint=999    platform-core  cjk-language-pack
+--fingerprint=12345  platform-core  microsoft-office  libreoffice
+```
+
+`platform-core` is in every one of them and is labelled `core` in the output.
+The others are labelled `included` and are the seed's choice.
+
+So the workflow is: pick a seed, pass `--fingerprint=<seed>`, run
+`--fingerprint-explain`, install the families those packs name. The same seed
+selects the same packs on any host, so the install list is settled once. If you
+are running against one target regularly you want a pinned seed anyway, because
+a returning visitor with a new identity every time is its own signal.
+
+A missing optional pack is not the same failure as a missing core family. The
+filter only removes, so a persona whose `microsoft-office` faces are absent
+presents a Windows machine without Microsoft Office, which is an ordinary
+Windows machine. A persona missing `platform-core` faces presents a Windows
+machine without Arial, which is not a machine that exists.
+
+One thing the browser cannot do for you: it cannot check. The host's installed
+families are not enumerable before the graphics stack starts, so composition
+offers packs without knowing what is on disk, and `--fingerprint-explain` says
+so in its limitations block rather than implying it verified anything.
+
 ### Windows persona
 
 `platform-core`, 35 families, always drawn:

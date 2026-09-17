@@ -56,6 +56,30 @@ jobs:
           python3 scripts/validate-release-baseline.py --root . --series-only
           python3 scripts/validate-release-baseline.py --root .
 
+  patches:
+    name: patch header validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Validate unified-diff hunk headers
+        if: ${{ hashFiles('scripts/validate-patch-headers.py') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/validate-patch-headers.py
+          test -f patches/series
+          # Read-only, deliberately. A hunk header that overstates its body
+          # makes git apply drop the surplus lines silently: the patch reports
+          # that it applied cleanly and writes a truncated file. That is how
+          # base/apostate/profile.cc lost its closing brace, the series died at
+          # patch 7 against drifted context, and a build directory kept a
+          # binary from a partial tree. Five corrupt hunks across three patches
+          # were found this way. --fix is for a human repairing a patch; a CI
+          # run that repaired its own inputs would prove nothing.
+          python3 scripts/validate-patch-headers.py
+
   schema:
     name: schema validation
     runs-on: ubuntu-24.04
@@ -100,15 +124,6 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - name: Validate compatibility acceptance
-        if: ${{ hashFiles('scripts/validate-compatibility-acceptance.py') != '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f scripts/validate-compatibility-acceptance.py
-          test -f resources/profiles/compatibility-acceptance.json
-          test -f ledger/schema/compatibility-acceptance.schema.json
-          python3 scripts/validate-compatibility-acceptance.py
       - name: Validate catalogue index
         if: ${{ hashFiles('scripts/profile_resolver.py') != '' }}
         shell: bash
@@ -116,7 +131,7 @@ jobs:
           set -euo pipefail
           test -f scripts/profile_resolver.py
           test -f resources/profiles/catalogue.json
-          test -d resources/profiles/families
+          test -d resources/profiles/dispersion
           python3 scripts/profile_resolver.py --catalogue
       - name: Run deterministic resolver checks
         if: ${{ hashFiles('scripts/test_profile_resolver.py') != '' }}
@@ -125,7 +140,7 @@ jobs:
           set -euo pipefail
           test -f scripts/test_profile_resolver.py
           test -f resources/profiles/catalogue.json
-          test -d resources/profiles/families
+          test -d resources/profiles/dispersion
           python3 scripts/test_profile_resolver.py
 
   geoip:

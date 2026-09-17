@@ -7,11 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Existing signed version tag to rebuild and publish"
+        description: "Existing version tag to rebuild and publish"
         required: true
         type: string
-      signed:
-        description: "Confirm that this manual release is explicitly authorized"
+      confirm:
+        description: "Confirm this manual release; each run is a multi-hour paid build"
         required: true
         type: boolean
         default: false
@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: apostate-build-host
+  group: apostate-build
   cancel-in-progress: false
 
 env:
@@ -28,7 +28,7 @@ env:
 
 jobs:
   release-gate:
-    name: signed tag and pre-release gates
+    name: version tag and pre-release gates
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
@@ -41,34 +41,39 @@ jobs:
           ref: ${{ inputs.release_tag || github.ref }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Require signed version tag
+      - name: Require a version tag
         id: tag
         env:
           EVENT_NAME: ${{ github.event_name }}
           REQUESTED_TAG: ${{ inputs.release_tag }}
-          SIGNED_CONFIRMATION: ${{ inputs.signed }}
+          CONFIRMATION: ${{ inputs.confirm }}
         shell: bash
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = "push" ]; then
             tag="$GITHUB_REF_NAME"
           else
-            [ "$SIGNED_CONFIRMATION" = true ] || { echo "workflow_dispatch requires signed=true" >&2; exit 1; }
+            [ "$CONFIRMATION" = true ] || { echo "workflow_dispatch requires confirm=true" >&2; exit 1; }
             tag="$REQUESTED_TAG"
           fi
           [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
             echo "release must use a version tag such as v1.2.3" >&2
             exit 1
           }
+          # No GPG verification. The trust root is push access to this
+          # repository -- the same one that authorises the workflow file
+          # itself -- and artifact provenance is attested by GitHub against
+          # the commit. Verifying a tag signature here would also fail
+          # closed on every hosted runner, because none has the signer's
+          # public key in its keyring.
           git fetch --force --tags origin
           git rev-parse --verify "refs/tags/$tag^{commit}" >/dev/null
-          git tag -v "$tag"
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             git checkout --detach "refs/tags/$tag"
           fi
           revision="$(git rev-parse HEAD)"
           [ "$revision" = "$(git rev-parse "refs/tags/$tag^{commit}")" ] || {
-            echo "checked out revision is not the signed tag target" >&2
+            echo "checked out revision is not the tag target" >&2
             exit 1
           }
           printf 'tag=%s\nrevision=%s\n' "$tag" "$revision" >> "$GITHUB_OUTPUT"
@@ -101,541 +106,71 @@ jobs:
           test -d npm/test
           npm --prefix npm test
 
-  build-macos-arm64:
-    name: build-macos-arm64
+  setup:
+    name: resolve available build targets
     needs: release-gate
     if: ${{ needs.release-gate.result == 'success' }}
-    runs-on: [self-hosted, apostate-build, apostate-macos-arm64]
-    timeout-minutes: 240
-    env:
-      TARGET: macos-arm64
-      ARCHIVE: apostate-152.0.7977.83-macos-arm64.tar.zst
-      RELEASE_SIGNING_KEY: ${{ secrets.APOSTATE_RELEASE_PRIVATE_KEY }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      targets: ${{ steps.resolve.outputs.targets }}
     steps:
-      - name: Initialize persistent workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          workspace="$HOME/.cache/apostate/$TARGET/.workspace"
-          mkdir -p "$workspace"
-          printf 'APOSTATE_WORKSPACE=%s\n' "$workspace" >> "$GITHUB_ENV"
-      - name: Check out exact signed revision
+      - name: Check out tagged revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.release-gate.outputs.tag }}
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
-      - name: Verify build inputs
+      - name: Resolve target matrix
+        id: resolve
+        env:
+          CONFIGURED_TARGETS: ${{ vars.APOSTATE_BUILD_TARGETS }}
         shell: bash
-        run: |
-          set -euo pipefail
-          for path in scripts/verify-runner.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
-            test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
-          done
-          test -f scripts/verify-workspace.sh || { echo "missing build input: scripts/verify-workspace.sh" >&2; exit 1; }
-          test -f scripts/run-chromium-hooks.sh || { echo "missing build input: scripts/run-chromium-hooks.sh" >&2; exit 1; }
-          test -f scripts/lock-workspace.sh || { echo "missing build input: scripts/lock-workspace.sh" >&2; exit 1; }
-          if [[ "$TARGET" == linux-* ]]; then
-            test -f scripts/prepare-linux-sysroot.sh || { echo "missing build input: scripts/prepare-linux-sysroot.sh" >&2; exit 1; }
-          fi
-          bash scripts/verify-runner.sh "$TARGET"
-          bash scripts/verify-workspace.sh "$TARGET"
-      - name: Acquire persistent workspace lock
+        run: bash scripts/resolve-build-targets.sh >> "$GITHUB_OUTPUT"
+      - name: Report resolved targets
+        env:
+          RESOLVED_TARGETS: ${{ steps.resolve.outputs.targets }}
         shell: bash
-        run: bash scripts/lock-workspace.sh acquire "$TARGET"
-      - name: Bootstrap pinned toolchain
-        shell: bash
-        run: bash scripts/bootstrap.sh
-      - name: Fetch pinned Chromium
-        shell: bash
-        run: bash scripts/fetch-sources.sh
-      - name: Apply patch series without fuzz
-        shell: bash
-        run: bash scripts/apply-patches.sh --check && bash scripts/apply-patches.sh
-      - name: Configure target
-        shell: bash
-        run: bash scripts/configure.sh "$TARGET"
-      - name: Build official binary and manifest
-        shell: bash
-        run: bash scripts/build.sh "$TARGET"
-      - name: Run native smoke and manifest checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/test_profile_resolver.py
-          python3 scripts/validate-release-baseline.py --root .
-          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/Chromium.app/Contents/MacOS/Chromium"
-          test -x "$smoke"
-          "$smoke" --version
-      - name: Package and sign verified artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          [ -n "$RELEASE_SIGNING_KEY" ] || { echo "APOSTATE_RELEASE_PRIVATE_KEY is required" >&2; exit 1; }
-          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
-          stage="release-stage-$TARGET"
-          key="$RUNNER_TEMP/apostate-release-signing-key.pem"
-          rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.sig" "$ARCHIVE.manifest.json" "$key"
-          trap 'rm -f "$key"' EXIT
-          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$key"
-          chmod 600 "$key"
-          mkdir -p "$stage/resources/profiles"
-          cp -R "$out/Chromium.app" "$stage/"
-          cp LICENSE "$stage/"
-          if [ -f NOTICE ]; then cp NOTICE "$stage/"; fi
-          cp build/MANIFEST.lock "$stage/build-MANIFEST.lock"
-          cp -R resources/profiles/. "$stage/resources/profiles/"
-          tar --zstd -cf "$ARCHIVE" "$stage"
-          python3 - "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sig" "$TARGET" "$key" <<'PY'
-          import base64, hashlib, json, pathlib, subprocess, sys
-          artifact, manifest, signature_path, target, key = map(pathlib.Path, sys.argv[1:])
-          catalogue = json.loads(pathlib.Path("resources/profiles/catalogue.json").read_text(encoding="utf-8"))
-          data = {
-              "package_version": "0.1.0",
-              "chromium_version": pathlib.Path("build/CHROMIUM_VERSION").read_text(encoding="utf-8").strip(),
-              "catalogue_version": catalogue["catalogue_version"],
-              "platform": target,
-              "artifact": artifact.name,
-              "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
-              "signature": None,
-              "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-              "patch_series_sha256": hashlib.sha256(pathlib.Path("patches/series").read_bytes()).hexdigest(),
-              "build_manifest_sha256": hashlib.sha256(pathlib.Path("build/MANIFEST.lock").read_bytes()).hexdigest(),
-          }
-          canonical = (json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-          unsigned = manifest.with_name(manifest.name + ".unsigned")
-          unsigned.write_bytes(canonical)
-          subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(key), "-in", str(unsigned), "-out", str(signature_path)], check=True)
-          raw = signature_path.read_bytes()
-          if len(raw) != 64:
-              raise SystemExit(f"Ed25519 signature must be 64 bytes, got {len(raw)}")
-          data["signature"] = base64.b64encode(raw).decode("ascii")
-          manifest.write_bytes((json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
-          unsigned.unlink()
-          PY
-      - name: Upload signed release candidate
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with:
-          name: release-${{ env.TARGET }}-${{ needs.release-gate.outputs.tag }}
-          if-no-files-found: error
-          retention-days: 7
-          path: |
-            ${{ env.ARCHIVE }}
-            ${{ env.ARCHIVE }}.sig
-            ${{ env.ARCHIVE }}.manifest.json
+        run: printf 'building %s\n' "$RESOLVED_TARGETS"
 
-      - name: Release persistent workspace lock
-        if: ${{ always() && env.APOSTATE_WORKSPACE_LOCK_ACQUIRED == '1' }}
-        shell: bash
-        run: bash scripts/lock-workspace.sh release "$TARGET"
-  build-linux-arm64:
-    name: build-linux-arm64
-    needs: build-linux-x64
-    if: ${{ needs.build-linux-x64.result == 'success' }}
-    runs-on: [self-hosted, apostate-build, apostate-linux-x64]
-    timeout-minutes: 240
-    env:
-      TARGET: linux-arm64
-      ARCHIVE: apostate-152.0.7977.83-linux-arm64.tar.zst
-      RELEASE_SIGNING_KEY: ${{ secrets.APOSTATE_RELEASE_PRIVATE_KEY }}
-    steps:
-      - name: Initialize persistent workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          workspace="$HOME/.cache/apostate/$TARGET/.workspace"
-          mkdir -p "$workspace"
-          printf 'APOSTATE_WORKSPACE=%s\n' "$workspace" >> "$GITHUB_ENV"
-      - name: Check out exact signed revision
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ needs.release-gate.outputs.tag }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify build inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          for path in scripts/verify-runner.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
-            test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
-          done
-          test -f scripts/verify-workspace.sh || { echo "missing build input: scripts/verify-workspace.sh" >&2; exit 1; }
-          test -f scripts/run-chromium-hooks.sh || { echo "missing build input: scripts/run-chromium-hooks.sh" >&2; exit 1; }
-          test -f scripts/lock-workspace.sh || { echo "missing build input: scripts/lock-workspace.sh" >&2; exit 1; }
-          if [[ "$TARGET" == linux-* ]]; then
-            test -f scripts/prepare-linux-sysroot.sh || { echo "missing build input: scripts/prepare-linux-sysroot.sh" >&2; exit 1; }
-          fi
-          bash scripts/verify-runner.sh "$TARGET"
-          bash scripts/verify-workspace.sh "$TARGET"
-      - name: Acquire persistent workspace lock
-        shell: bash
-        run: bash scripts/lock-workspace.sh acquire "$TARGET"
-      - name: Bootstrap pinned toolchain
-        shell: bash
-        run: bash scripts/bootstrap.sh
-      - name: Fetch pinned Chromium
-        shell: bash
-        run: bash scripts/fetch-sources.sh
-      - name: Apply patch series without fuzz
-        shell: bash
-        run: bash scripts/apply-patches.sh --check && bash scripts/apply-patches.sh
-      - name: Run Chromium hooks and install target sysroot
-        shell: bash
-        run: bash scripts/run-chromium-hooks.sh "$TARGET" && bash scripts/prepare-linux-sysroot.sh "$TARGET"
-      - name: Configure target
-        shell: bash
-        run: bash scripts/configure.sh "$TARGET"
-      - name: Build official binary and manifest
-        shell: bash
-        run: bash scripts/build.sh "$TARGET"
-      - name: Run native smoke and manifest checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/test_profile_resolver.py
-          python3 scripts/validate-release-baseline.py --root .
-          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/chrome"
-          test -x "$smoke"
-          if [ "$TARGET" = linux-arm64 ]; then
-            format="$(file -b "$smoke")"
-            case "$format" in *aarch64*|*ARM64*) : ;; *) echo "unexpected ARM64 binary format: $format" >&2; exit 1 ;; esac
-          else
-            "$smoke" --version
-          fi
-      - name: Package and sign verified artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          [ -n "$RELEASE_SIGNING_KEY" ] || { echo "APOSTATE_RELEASE_PRIVATE_KEY is required" >&2; exit 1; }
-          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
-          stage="release-stage-$TARGET"
-          key="$RUNNER_TEMP/apostate-release-signing-key.pem"
-          rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.sig" "$ARCHIVE.manifest.json" "$key"
-          trap 'rm -f "$key"' EXIT
-          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$key"
-          chmod 600 "$key"
-          mkdir -p "$stage/resources/profiles"
-          cp "$out/chrome" "$stage/"
-          for file in chrome_crashpad_handler libEGL.so libGLESv2.so; do
-            if [ -e "$out/$file" ]; then cp "$out/$file" "$stage/"; fi
-          done
-          cp LICENSE "$stage/"
-          if [ -f NOTICE ]; then cp NOTICE "$stage/"; fi
-          cp build/MANIFEST.lock "$stage/build-MANIFEST.lock"
-          cp -R resources/profiles/. "$stage/resources/profiles/"
-          tar --zstd -cf "$ARCHIVE" "$stage"
-          python3 - "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sig" "$TARGET" "$key" <<'PY'
-          import base64, hashlib, json, pathlib, subprocess, sys
-          artifact, manifest, signature_path, target, key = map(pathlib.Path, sys.argv[1:])
-          catalogue = json.loads(pathlib.Path("resources/profiles/catalogue.json").read_text(encoding="utf-8"))
-          data = {
-              "package_version": "0.1.0",
-              "chromium_version": pathlib.Path("build/CHROMIUM_VERSION").read_text(encoding="utf-8").strip(),
-              "catalogue_version": catalogue["catalogue_version"],
-              "platform": target,
-              "artifact": artifact.name,
-              "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
-              "signature": None,
-              "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-              "patch_series_sha256": hashlib.sha256(pathlib.Path("patches/series").read_bytes()).hexdigest(),
-              "build_manifest_sha256": hashlib.sha256(pathlib.Path("build/MANIFEST.lock").read_bytes()).hexdigest(),
-          }
-          canonical = (json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-          unsigned = manifest.with_name(manifest.name + ".unsigned")
-          unsigned.write_bytes(canonical)
-          subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(key), "-in", str(unsigned), "-out", str(signature_path)], check=True)
-          raw = signature_path.read_bytes()
-          if len(raw) != 64:
-              raise SystemExit(f"Ed25519 signature must be 64 bytes, got {len(raw)}")
-          data["signature"] = base64.b64encode(raw).decode("ascii")
-          manifest.write_bytes((json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
-          unsigned.unlink()
-          PY
-      - name: Upload signed release candidate
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with:
-          name: release-${{ env.TARGET }}-${{ needs.release-gate.outputs.tag }}
-          if-no-files-found: error
-          retention-days: 7
-          path: |
-            ${{ env.ARCHIVE }}
-            ${{ env.ARCHIVE }}.sig
-            ${{ env.ARCHIVE }}.manifest.json
+  build:
+    name: release
+    needs:
+      - release-gate
+      - setup
+    if: ${{ needs.release-gate.result == 'success' && needs.setup.result == 'success' }}
+    # Grants what the attestation needs. The keypair is minted by Sigstore for
+    # this run from the OIDC token and discarded, which is why no signing
+    # secret is passed to the reusable workflow any more.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    # All targets concurrently. Each leg is its own ephemeral VM and Blacksmith
+    # imposes no concurrency limit, so serializing only lengthens the release
+    # without saving anything. fail-fast is the cost control: a release is dead
+    # the moment any target fails, and cancelling the siblings immediately
+    # stops their spend.
+    strategy:
+      fail-fast: true
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    uses: ./.github/workflows/build-target.yml
+    with:
+      target: ${{ matrix.target }}
+      runner_labels: ${{ matrix.runner_labels }}
+      attest: true
+      ref: ${{ needs.release-gate.outputs.tag }}
+      artifact_prefix: release
+      retention_days: 7
 
-      - name: Release persistent workspace lock
-        if: ${{ always() && env.APOSTATE_WORKSPACE_LOCK_ACQUIRED == '1' }}
-        shell: bash
-        run: bash scripts/lock-workspace.sh release "$TARGET"
-  build-linux-x64:
-    name: build-linux-x64
-    needs: release-gate
-    if: ${{ needs.release-gate.result == 'success' }}
-    runs-on: [self-hosted, apostate-build, apostate-linux-x64]
-    timeout-minutes: 240
-    env:
-      TARGET: linux-x64
-      ARCHIVE: apostate-152.0.7977.83-linux-x64.tar.zst
-      RELEASE_SIGNING_KEY: ${{ secrets.APOSTATE_RELEASE_PRIVATE_KEY }}
-    steps:
-      - name: Initialize persistent workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          workspace="$HOME/.cache/apostate/$TARGET/.workspace"
-          mkdir -p "$workspace"
-          printf 'APOSTATE_WORKSPACE=%s\n' "$workspace" >> "$GITHUB_ENV"
-      - name: Check out exact signed revision
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ needs.release-gate.outputs.tag }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify build inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          for path in scripts/verify-runner.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
-            test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
-          done
-          test -f scripts/verify-workspace.sh || { echo "missing build input: scripts/verify-workspace.sh" >&2; exit 1; }
-          test -f scripts/run-chromium-hooks.sh || { echo "missing build input: scripts/run-chromium-hooks.sh" >&2; exit 1; }
-          test -f scripts/lock-workspace.sh || { echo "missing build input: scripts/lock-workspace.sh" >&2; exit 1; }
-          if [[ "$TARGET" == linux-* ]]; then
-            test -f scripts/prepare-linux-sysroot.sh || { echo "missing build input: scripts/prepare-linux-sysroot.sh" >&2; exit 1; }
-          fi
-          bash scripts/verify-runner.sh "$TARGET"
-          bash scripts/verify-workspace.sh "$TARGET"
-      - name: Acquire persistent workspace lock
-        shell: bash
-        run: bash scripts/lock-workspace.sh acquire "$TARGET"
-      - name: Bootstrap pinned toolchain
-        shell: bash
-        run: bash scripts/bootstrap.sh
-      - name: Fetch pinned Chromium
-        shell: bash
-        run: bash scripts/fetch-sources.sh
-      - name: Apply patch series without fuzz
-        shell: bash
-        run: bash scripts/apply-patches.sh --check && bash scripts/apply-patches.sh
-      - name: Run Chromium hooks and install target sysroot
-        shell: bash
-        run: bash scripts/run-chromium-hooks.sh "$TARGET" && bash scripts/prepare-linux-sysroot.sh "$TARGET"
-      - name: Configure target
-        shell: bash
-        run: bash scripts/configure.sh "$TARGET"
-      - name: Build official binary and manifest
-        shell: bash
-        run: bash scripts/build.sh "$TARGET"
-      - name: Run native smoke and manifest checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/test_profile_resolver.py
-          python3 scripts/validate-release-baseline.py --root .
-          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/chrome"
-          test -x "$smoke"
-          "$smoke" --version
-      - name: Package and sign verified artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          [ -n "$RELEASE_SIGNING_KEY" ] || { echo "APOSTATE_RELEASE_PRIVATE_KEY is required" >&2; exit 1; }
-          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
-          stage="release-stage-$TARGET"
-          key="$RUNNER_TEMP/apostate-release-signing-key.pem"
-          rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.sig" "$ARCHIVE.manifest.json" "$key"
-          trap 'rm -f "$key"' EXIT
-          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$key"
-          chmod 600 "$key"
-          mkdir -p "$stage/resources/profiles"
-          cp "$out/chrome" "$stage/"
-          for file in chrome_crashpad_handler libEGL.so libGLESv2.so; do
-            if [ -e "$out/$file" ]; then cp "$out/$file" "$stage/"; fi
-          done
-          cp LICENSE "$stage/"
-          if [ -f NOTICE ]; then cp NOTICE "$stage/"; fi
-          cp build/MANIFEST.lock "$stage/build-MANIFEST.lock"
-          cp -R resources/profiles/. "$stage/resources/profiles/"
-          tar --zstd -cf "$ARCHIVE" "$stage"
-          python3 - "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sig" "$TARGET" "$key" <<'PY'
-          import base64, hashlib, json, pathlib, subprocess, sys
-          artifact, manifest, signature_path, target, key = map(pathlib.Path, sys.argv[1:])
-          catalogue = json.loads(pathlib.Path("resources/profiles/catalogue.json").read_text(encoding="utf-8"))
-          data = {
-              "package_version": "0.1.0",
-              "chromium_version": pathlib.Path("build/CHROMIUM_VERSION").read_text(encoding="utf-8").strip(),
-              "catalogue_version": catalogue["catalogue_version"],
-              "platform": target,
-              "artifact": artifact.name,
-              "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
-              "signature": None,
-              "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-              "patch_series_sha256": hashlib.sha256(pathlib.Path("patches/series").read_bytes()).hexdigest(),
-              "build_manifest_sha256": hashlib.sha256(pathlib.Path("build/MANIFEST.lock").read_bytes()).hexdigest(),
-          }
-          canonical = (json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-          unsigned = manifest.with_name(manifest.name + ".unsigned")
-          unsigned.write_bytes(canonical)
-          subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(key), "-in", str(unsigned), "-out", str(signature_path)], check=True)
-          raw = signature_path.read_bytes()
-          if len(raw) != 64:
-              raise SystemExit(f"Ed25519 signature must be 64 bytes, got {len(raw)}")
-          data["signature"] = base64.b64encode(raw).decode("ascii")
-          manifest.write_bytes((json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
-          unsigned.unlink()
-          PY
-      - name: Upload signed release candidate
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with:
-          name: release-${{ env.TARGET }}-${{ needs.release-gate.outputs.tag }}
-          if-no-files-found: error
-          retention-days: 7
-          path: |
-            ${{ env.ARCHIVE }}
-            ${{ env.ARCHIVE }}.sig
-            ${{ env.ARCHIVE }}.manifest.json
-
-      - name: Release persistent workspace lock
-        if: ${{ always() && env.APOSTATE_WORKSPACE_LOCK_ACQUIRED == '1' }}
-        shell: bash
-        run: bash scripts/lock-workspace.sh release "$TARGET"
-  build-windows-x64:
-    name: build-windows-x64
-    needs: build-linux-arm64
-    if: ${{ needs.build-linux-arm64.result == 'success' }}
-    runs-on: [self-hosted, apostate-build, apostate-windows-x64]
-    timeout-minutes: 240
-    env:
-      TARGET: windows-x64
-      ARCHIVE: apostate-152.0.7977.83-windows-x64.zip
-      RELEASE_SIGNING_KEY: ${{ secrets.APOSTATE_RELEASE_PRIVATE_KEY }}
-    steps:
-      - name: Initialize persistent workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          workspace="$HOME/.cache/apostate/$TARGET/.workspace"
-          mkdir -p "$workspace"
-          printf 'APOSTATE_WORKSPACE=%s\n' "$workspace" >> "$GITHUB_ENV"
-      - name: Check out exact signed revision
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ needs.release-gate.outputs.tag }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify build inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          for path in scripts/verify-runner.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
-            test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
-          done
-          test -f scripts/verify-workspace.sh || { echo "missing build input: scripts/verify-workspace.sh" >&2; exit 1; }
-          test -f scripts/run-chromium-hooks.sh || { echo "missing build input: scripts/run-chromium-hooks.sh" >&2; exit 1; }
-          test -f scripts/lock-workspace.sh || { echo "missing build input: scripts/lock-workspace.sh" >&2; exit 1; }
-          if [[ "$TARGET" == linux-* ]]; then
-            test -f scripts/prepare-linux-sysroot.sh || { echo "missing build input: scripts/prepare-linux-sysroot.sh" >&2; exit 1; }
-          fi
-          bash scripts/verify-runner.sh "$TARGET"
-          bash scripts/verify-workspace.sh "$TARGET"
-      - name: Acquire persistent workspace lock
-        shell: bash
-        run: bash scripts/lock-workspace.sh acquire "$TARGET"
-      - name: Bootstrap pinned toolchain
-        shell: bash
-        run: bash scripts/bootstrap.sh
-      - name: Fetch pinned Chromium
-        shell: bash
-        run: bash scripts/fetch-sources.sh
-      - name: Apply patch series without fuzz
-        shell: bash
-        run: bash scripts/apply-patches.sh --check && bash scripts/apply-patches.sh
-      - name: Configure target
-        shell: bash
-        run: bash scripts/configure.sh "$TARGET"
-      - name: Build official binary and manifest
-        shell: bash
-        run: bash scripts/build.sh "$TARGET"
-      - name: Run native smoke and manifest checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/test_profile_resolver.py
-          python3 scripts/validate-release-baseline.py --root .
-          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/chrome.exe"
-          test -f "$smoke"
-          "$smoke" --version
-      - name: Package and sign verified artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          [ -n "$RELEASE_SIGNING_KEY" ] || { echo "APOSTATE_RELEASE_PRIVATE_KEY is required" >&2; exit 1; }
-          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
-          stage="release-stage-$TARGET"
-          key="$RUNNER_TEMP/apostate-release-signing-key.pem"
-          rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.sig" "$ARCHIVE.manifest.json" "$key"
-          trap 'rm -f "$key"' EXIT
-          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$key"
-          chmod 600 "$key"
-          mkdir -p "$stage/resources/profiles"
-          cp "$out/chrome.exe" "$stage/"
-          cp LICENSE "$stage/"
-          if [ -f NOTICE ]; then cp NOTICE "$stage/"; fi
-          cp build/MANIFEST.lock "$stage/build-MANIFEST.lock"
-          cp -R resources/profiles/. "$stage/resources/profiles/"
-          command -v 7z >/dev/null
-          7z a -tzip "$ARCHIVE" "$stage" >/dev/null
-          python3 - "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sig" "$TARGET" "$key" <<'PY'
-          import base64, hashlib, json, pathlib, subprocess, sys
-          artifact, manifest, signature_path, target, key = map(pathlib.Path, sys.argv[1:])
-          catalogue = json.loads(pathlib.Path("resources/profiles/catalogue.json").read_text(encoding="utf-8"))
-          data = {
-              "package_version": "0.1.0",
-              "chromium_version": pathlib.Path("build/CHROMIUM_VERSION").read_text(encoding="utf-8").strip(),
-              "catalogue_version": catalogue["catalogue_version"],
-              "platform": target,
-              "artifact": artifact.name,
-              "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
-              "signature": None,
-              "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-              "patch_series_sha256": hashlib.sha256(pathlib.Path("patches/series").read_bytes()).hexdigest(),
-              "build_manifest_sha256": hashlib.sha256(pathlib.Path("build/MANIFEST.lock").read_bytes()).hexdigest(),
-          }
-          canonical = (json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-          unsigned = manifest.with_name(manifest.name + ".unsigned")
-          unsigned.write_bytes(canonical)
-          subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(key), "-in", str(unsigned), "-out", str(signature_path)], check=True)
-          raw = signature_path.read_bytes()
-          if len(raw) != 64:
-              raise SystemExit(f"Ed25519 signature must be 64 bytes, got {len(raw)}")
-          data["signature"] = base64.b64encode(raw).decode("ascii")
-          manifest.write_bytes((json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
-          unsigned.unlink()
-          PY
-      - name: Upload signed release candidate
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with:
-          name: release-${{ env.TARGET }}-${{ needs.release-gate.outputs.tag }}
-          if-no-files-found: error
-          retention-days: 7
-          path: |
-            ${{ env.ARCHIVE }}
-            ${{ env.ARCHIVE }}.sig
-            ${{ env.ARCHIVE }}.manifest.json
-
-      - name: Release persistent workspace lock
-        if: ${{ always() && env.APOSTATE_WORKSPACE_LOCK_ACQUIRED == '1' }}
-        shell: bash
-        run: bash scripts/lock-workspace.sh release "$TARGET"
   publish:
     name: verify all artifacts and publish release
     needs:
       - release-gate
-      - build-macos-arm64
-      - build-linux-arm64
-      - build-linux-x64
-      - build-windows-x64
-    if: ${{ needs.release-gate.result == 'success' && needs.build-macos-arm64.result == 'success' && needs.build-linux-arm64.result == 'success' && needs.build-linux-x64.result == 'success' && needs.build-windows-x64.result == 'success' }}
+      - setup
+      - build
+    if: ${{ needs.release-gate.result == 'success' && needs.setup.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -651,7 +186,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for path in .github/release/public-key.txt .github/release/artifact-policy.json scripts/validate-release-contract.py release/manifest.schema.json; do
+          for path in .github/release/artifact-policy.json scripts/validate-release-contract.py scripts/verify-release-inputs.sh release/manifest.schema.json resources/profiles/catalogue.json; do
             test -f "$path" || { echo "missing release verification input: $path" >&2; exit 1; }
           done
           python3 - <<'PY'
@@ -659,84 +194,30 @@ jobs:
           for path in (".github/release/artifact-policy.json", "release/manifest.schema.json"):
               json.load(open(path, encoding="utf-8"))
           PY
-      - name: Download all four signed artifacts
+      - name: Download every release artifact
         uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
         with:
           pattern: release-*-${{ needs.release-gate.outputs.tag }}
           path: release-inputs
           merge-multiple: true
-      - name: Verify manifests, hashes, and Ed25519 signatures
+      - name: Verify manifests and artifact hashes
         env:
+          BUILT_TARGETS: ${{ needs.setup.outputs.targets }}
           EXPECTED_SOURCE_REVISION: ${{ needs.release-gate.outputs.revision }}
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          manifests=(release-inputs/*.manifest.json)
-          [ "${#manifests[@]}" -eq 4 ] || { echo "expected four release manifests, got ${#manifests[@]}" >&2; exit 1; }
-          expected='apostate-152.0.7977.83-'
-          declare -A seen=()
-          for manifest in "${manifests[@]}"; do
-            artifact="${manifest%.manifest.json}"
-            signature="$artifact.sig"
-            canonical="$RUNNER_TEMP/$(basename "$manifest").unsigned.json"
-            [ -f "$artifact" ] || { echo "artifact missing for $manifest" >&2; exit 1; }
-            [ -f "$signature" ] || { echo "signature missing for $artifact" >&2; exit 1; }
-            python3 - "$manifest" "$artifact" "$signature" "$canonical" "$EXPECTED_SOURCE_REVISION" <<'PY'
-          import base64, hashlib, json, pathlib, re, sys
-          manifest, artifact, signature_path, canonical = map(pathlib.Path, sys.argv[1:5])
-          expected_revision = sys.argv[5]
-          required = {
-              "package_version", "chromium_version", "catalogue_version", "platform",
-              "artifact", "sha256", "signature", "source_revision",
-              "patch_series_sha256", "build_manifest_sha256",
-          }
-          data = json.loads(manifest.read_text(encoding="utf-8"))
-          if set(data) != required:
-              raise SystemExit(f"manifest fields do not match release contract: {manifest}")
-          if data["package_version"] != "0.1.0" or data["chromium_version"] != "152.0.7977.83" or data["catalogue_version"] != 1:
-              raise SystemExit(f"manifest version mismatch: {manifest}")
-          if data["artifact"] != artifact.name:
-              raise SystemExit(f"artifact binding mismatch: {manifest}")
-          if data["source_revision"] != expected_revision or not re.fullmatch(r"[0-9a-f]{40}", data["source_revision"]):
-              raise SystemExit(f"source revision mismatch: {manifest}")
-          if data["sha256"] != hashlib.sha256(artifact.read_bytes()).hexdigest():
-              raise SystemExit(f"artifact SHA-256 mismatch: {artifact}")
-          if not re.fullmatch(r"[A-Za-z0-9+/]{86}==", data["signature"]):
-              raise SystemExit(f"manifest signature is not padded base64: {manifest}")
-          raw = base64.b64decode(data["signature"], validate=True)
-          if len(raw) != 64 or signature_path.read_bytes() != raw:
-              raise SystemExit(f"signature sidecar mismatch: {manifest}")
-          unsigned = dict(data)
-          unsigned["signature"] = None
-          canonical.write_bytes((json.dumps(unsigned, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
-          PY
-            python3 scripts/validate-release-contract.py --kind manifest "$manifest"
-            openssl pkeyutl -verify -rawin -pubin -inkey .github/release/public-key.txt -sigfile "$signature" -in "$canonical"
-            case "$(basename "$artifact")" in
-              "$expected"linux-x64.tar.zst) platform=linux-x64 ;;
-              "$expected"linux-arm64.tar.zst) platform=linux-arm64 ;;
-              "$expected"macos-arm64.tar.zst) platform=macos-arm64 ;;
-              "$expected"windows-x64.zip) platform=windows-x64 ;;
-              *) echo "unexpected artifact name: $artifact" >&2; exit 1 ;;
-            esac
-            [ -z "${seen[$platform]:-}" ] || { echo "duplicate platform: $platform" >&2; exit 1; }
-            seen[$platform]=1
-            python3 - "$manifest" "$platform" <<'PY'
-          import json, pathlib, sys
-          manifest, platform = pathlib.Path(sys.argv[1]), sys.argv[2]
-          if json.loads(manifest.read_text(encoding="utf-8"))["platform"] != platform:
-              raise SystemExit(f"manifest platform mismatch: {manifest}")
-          PY
-          done
-          for platform in linux-x64 linux-arm64 macos-arm64 windows-x64; do
-            [ -n "${seen[$platform]:-}" ] || { echo "missing platform: $platform" >&2; exit 1; }
-          done
+          bash scripts/verify-release-inputs.sh release-inputs \
+            "$BUILT_TARGETS" "$EXPECTED_SOURCE_REVISION"
       - name: Publish immutable GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.release-gate.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "$RELEASE_TAG" release-inputs/* --verify-tag --title "Apostate $RELEASE_TAG" --notes "Signed Apostate artifacts for Chromium 152.0.7977.83."
+          version="$(python3 -c 'import json;print(json.load(open(".github/release/artifact-policy.json"))["manifest_contract"]["chromium_version"])')"
+          gh release create "$RELEASE_TAG" release-inputs/* --verify-tag \
+            --title "Apostate $RELEASE_TAG" \
+            --notes "Apostate artifacts for Chromium $version. Verify provenance with: gh attestation verify <artifact> --repo $REPOSITORY"

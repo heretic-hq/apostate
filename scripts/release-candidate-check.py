@@ -281,7 +281,7 @@ def _artifact_specs(root: Path) -> list[CheckSpec]:
         elif manifest is None:
             reason = f"release manifest for {target} is absent or does not name {artifact_name}"
         else:
-            reason = "artifact and manifest present; signature verification is not performed by this checker"
+            reason = "artifact and manifest present; this checker does not verify archive SHA-256 or build-provenance attestations"
         specs.append(CheckSpec(f"artifact-{target}", f"four-target artifact ({target})", reason=reason))
     return specs
 
@@ -305,7 +305,7 @@ def _package_artifact_specs(root: Path) -> list[CheckSpec]:
         if path.is_file() and path.suffix in {".whl", ".gz", ".zip"}
     ]
     if python_candidates:
-        reason = "Python package artifacts present; installation/signature verification is not performed by this checker"
+        reason = "Python package artifacts present; this checker does not exercise installation or verify archive SHA-256 or build-provenance attestations"
     else:
         reason = "Python package release artifacts are absent (expected wheel or source archive under dist/ or python/dist/)"
     specs.append(CheckSpec("python-package-artifacts", "Python package release artifacts", reason=reason))
@@ -318,7 +318,7 @@ def _package_artifact_specs(root: Path) -> list[CheckSpec]:
         if path.is_file() and path.suffix in {".tgz", ".zip"}
     ]
     if node_candidates:
-        reason = "Node package artifacts present; installation/signature verification is not performed by this checker"
+        reason = "Node package artifacts present; this checker does not exercise installation or verify archive SHA-256 or build-provenance attestations"
     else:
         reason = "Node package release artifacts are absent (expected tarball under npm/dist/, node/dist/, or packages/node/dist/)"
     specs.append(CheckSpec("node-package-artifacts", "Node package release artifacts", reason=reason))

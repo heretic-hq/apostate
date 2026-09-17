@@ -166,27 +166,50 @@ Owns: proxy support, TLS/HTTP2/QUIC shape, and proxy-induced observables. This
 is the axis `resources/surfaces.json` almost entirely omits, and it carries most
 of the parity gap against comparable tools.
 
-- `net/socket/socks5_client_socket.h:31` — **verified**. The comment reads
-  `// Currently no SOCKSv5 authentication is supported.` The state machine is
-  `GREET → HANDSHAKE` with no authentication sub-negotiation, and the only
-  command constant is `kTunnelCommand`. RFC 1929 username/password auth means
-  adding states; BIND and UDP ASSOCIATE do not exist at all.
+- `net/socket/socks5_client_socket.h:31` — **verified** pristine. The comment
+  reads `// Currently no SOCKSv5 authentication is supported.` The state
+  machine is `GREET → HANDSHAKE` with no authentication sub-negotiation, and
+  the only command constant is `kTunnelCommand`. RFC 1929 auth is added by
+  patch `0001`; UDP ASSOCIATE gets its own socket in patch `0079` rather than
+  more states here, because a datagram relay is not a stream CONNECT.
 - `net/base/proxy_server.h:33,94` — **verified**. `ProxyServer` is documented as
-  `{type, host, port}` and immutable. **There is no credential field**, so SOCKS
-  credentials have nowhere to live today. HTTP proxies get credentials through
-  the 407 challenge path, which has no SOCKS equivalent.
-- `net/http/http_stream_factory_job_controller.cc:932` — **verified**. QUIC is
-  attempted only when `proxy_info_.is_direct()`.
+  `{type, host, port}` and immutable. **There is no credential field**, and
+  none is added: credentials arrive in the launch envelope and are read at the
+  point of use, so they never reach a session key, pool key, or NetLog.
+- `net/http/http_stream_factory_job.cc:732-736,857-867` — **verified**
+  pristine. Two outright rejections of QUIC through a non-QUIC proxy chain.
+  Patch `0080` relaxes exactly these two, and only for a single-hop
+  `SCHEME_SOCKS5` chain.
+- `net/http/http_stream_factory_job_controller.cc:921-928` — **verified**.
+  H3 discovery from DNS is gated on `proxy_info_.is_direct()`. **Left
+  unchanged**: an HTTPS-RR lookup for the destination is the DNS leak the
+  datagram design exists to avoid, so proxied H3 is reached via `Alt-Svc`
+  on a response that already came through the proxy.
+- `net/quic/quic_session_pool.cc:939-988` — **verified** pristine. Every
+  non-direct session key goes to `ProxyJob`, which is QUIC-proxy-only
+  (`quic_session_pool_proxy_job.h:20-23`). Patch `0080` routes a single-hop
+  SOCKS5 chain to `DirectJob` instead; every other non-direct chain still
+  goes to `ProxyJob`.
 
-Trap, and it is the important one: **that last line means any proxied session
-silently loses HTTP/3.** Real Chrome negotiates QUIC, so a server offering it
-sees an absence that no amount of JavaScript-layer correctness explains. UDP
-ASSOCIATE is therefore not a feature request but a coherence requirement, and
-this subsystem should be scoped accordingly.
+Current contract: **SOCKS5 UDP ASSOCIATE and proxied QUIC/HTTP3 are
+implemented** for a single-hop SOCKS5 chain (patches `0079`, `0080`).
+HTTP, HTTPS, SOCKS4 and multi-proxy chains still refuse QUIC with
+`ERR_NO_SUPPORTED_PROXIES`, because none of them can relay a datagram.
+
+**WebRTC UDP/STUN/TURN remains unsupported** and is not relayed through the
+proxy. The datagram socket is reachable only from `QuicSessionPool`; WebRTC
+constructs its sockets through a different factory and applies its own policy.
+The launcher still adds Chromium's existing `disable_non_proxied_udp` policy
+when a proxy is configured, preventing direct WebRTC UDP fallback; that is
+containment, not proxy routing. WebRTC may fail closed rather than produce
+proxy-exit candidates.
 
 Also owns proxy-induced observables that are not protocol features: DNS,
 connect and SSL timings visible through Resource Timing, `Proxy-Connection`
-leakage, and proxy cache headers.
+leakage, and proxy cache headers. The datagram path's own new observables —
+destination DNS, Resource Timing's DNS phase, fallback timing, reduced MTU,
+absent ECN — are enumerated with their mitigations in the risk register of
+`subsystems/network-proxy.md` §8.
 
 ## 11. Storage, Quota & Permissions
 

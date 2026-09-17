@@ -8,7 +8,6 @@
       "platform",
       "artifact",
       "sha256",
-      "signature",
       "source_revision",
       "patch_series_sha256",
       "build_manifest_sha256"
@@ -16,7 +15,8 @@
     "additional_fields": false,
     "package_version": "0.1.0",
     "chromium_version": "152.0.7977.83",
-    "catalogue_version": 1,
+    "catalogue_version_rule": "Derived, never pinned here. A manifest's catalogue_version must equal the catalogue_version of resources/profiles/catalogue.json at manifest.source_revision. The profile catalogue is versioned independently of this release contract, so a constant in this field would forbid every future catalogue. The publish job reads the catalogue from the tagged revision it is checked out at and requires the manifest to agree.",
+    "platforms_rule": "The platforms this contract recognises, not the set every release must carry. A release publishes exactly the targets it built, resolved by scripts/resolve-build-targets.sh from the APOSTATE_BUILD_TARGETS repository variable, and each of those must appear here. Requiring the full set instead means a repository without a runner for every platform can never publish anything. Every artifact's SHA-256 is verified against its manifest regardless, and every artifact carries a build-provenance attestation, so a subset release is smaller, not weaker.",
     "platforms": [
       "linux-x64",
       "linux-arm64",
@@ -26,19 +26,8 @@
     "canonical_json": {
       "encoding": "UTF-8",
       "serialization": "json.dumps(manifest, ensure_ascii=True, sort_keys=True, separators=(\",\", \":\")) + newline",
-      "signed_manifest": "the exact manifest object with signature set to null",
       "trailing_newline": true
-    },
-    "signature_field": {
-      "algorithm": "Ed25519",
-      "encoding": "RFC4648 padded base64",
-      "decoded_length_bytes": 64,
-      "detached_signature": true
     }
-  },
-  "test_vector": {
-    "manifest_unsigned_json": "{\"artifact\":\"apostate-152.0.7977.83-linux-x64.tar.zst\",\"build_manifest_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"catalogue_version\":1,\"chromium_version\":\"152.0.7977.83\",\"package_version\":\"0.1.0\",\"patch_series_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"platform\":\"linux-x64\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"signature\":null,\"source_revision\":\"1111111111111111111111111111111111111111\"}\n",
-    "signature_base64": "MAeeTMY92S1AUqYkS1QIc9vJeb6WmireK91FoQMaDtTMOewhsnS8BXZ9kEyvukm9waT+4aGEyEePPdw8bSbRCw=="
   },
   "artifacts": {
     "filenames": [
@@ -54,36 +43,25 @@
       "must_match_before_extraction": true
     }
   },
-  "signature_verification": {
-    "required": true,
-    "public_key": ".github/release/public-key.txt",
-    "signature_sidecar": "the raw decoded 64-byte value from manifest.signature, stored as ARTIFACT.sig",
-    "openssl_verification": "openssl pkeyutl -verify -rawin -pubin -inkey .github/release/public-key.txt -sigfile ARTIFACT.sig -in CANONICAL_UNSIGNED_MANIFEST.json",
-    "verify_artifact_hash_before_signature": true,
-    "verify_signature_before_extraction": true,
-    "reject_missing_signature": true,
-    "reject_invalid_signature": true,
-    "reject_sidecar_mismatch": true,
+  "integrity_verification": {
+    "artifact_hash": "SHA-256 of the exact complete archive bytes, in manifest.sha256",
+    "verify_hash_before_extraction": true,
+    "reject_hash_mismatch": true,
+    "provenance": "GitHub artifact attestations, created by actions/attest-build-provenance in the build workflow and verified out of band with: gh attestation verify <artifact> --repo <owner>/<repo>",
+    "provenance_rule": "Keyless. The signing key is minted per workflow run by Sigstore and discarded, so there is no long-lived key to hold, rotate, or lose, and the attestation binds the artifact to the repository, commit and workflow that produced it -- which a detached signature made with a repository secret never did, because anyone who can push a workflow can use that secret.",
     "integrity_is_not_authenticity": true
   },
   "verification_order": [
     "read the manifest before opening or extracting the archive",
     "require exactly the manifest_contract.required_fields and validate artifact binding",
     "hash the complete archive bytes and require an exact match with manifest.sha256",
-    "decode manifest.signature as padded base64 and require 64 raw bytes",
-    "replace manifest.signature with null and serialize canonical JSON",
-    "verify the Ed25519 signature with openssl pkeyutl -rawin",
-    "extract only after the hash and signature checks succeed"
+    "extract only after the hash check succeeds",
+    "for provenance, run gh attestation verify against the repository"
   ],
   "extraction_policy": {
     "reject_absolute_paths": true,
     "reject_parent_traversal": true,
     "reject_symbolic_links": true,
     "require_manifest_binding": true
-  },
-  "key_management": {
-    "private_key_storage": "ci-secret:APOSTATE_RELEASE_PRIVATE_KEY",
-    "private_key_in_repository": false,
-    "private_key_in_artifacts": false
   }
 }

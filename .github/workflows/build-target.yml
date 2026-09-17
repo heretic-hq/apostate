@@ -1,0 +1,250 @@
+name: build target
+
+# Nightly and release use the same fresh build job. Their inputs select the
+# revision, artifact retention, and whether to attest the packaged artifact.
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: "Build target: macos-arm64 | linux-x64 | linux-arm64"
+        required: true
+        type: string
+      runner_labels:
+        description: "JSON array literal of Blacksmith runner labels, e.g. [\"blacksmith-12vcpu-macos-latest\"]"
+        required: true
+        type: string
+      attest:
+        description: "Publish a GitHub build-provenance attestation for the artifact"
+        required: false
+        type: boolean
+        default: false
+      ref:
+        description: "Git ref to build; empty builds the triggering ref"
+        required: false
+        type: string
+        default: ""
+      artifact_prefix:
+        description: "Uploaded artifact name prefix, e.g. nightly or release"
+        required: true
+        type: string
+      retention_days:
+        description: "Artifact retention in days"
+        required: false
+        type: number
+        default: 14
+
+# id-token and attestations are what replace a release signing key: the
+# attestation is signed by a Sigstore-minted keypair that exists only for this
+# run, so there is no long-lived secret to hold, rotate, or leak. A caller
+# cannot be granted less than this and still attest.
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    name: ${{ inputs.artifact_prefix }}-${{ inputs.target }}
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
+    # Blacksmith runners register with GitHub as self-hosted, so the 6-hour
+    # GitHub-hosted job cap does not apply here -- the limit is 5 days. 600
+    # minutes is our own ceiling, chosen so the 12-vCPU macOS build has room
+    # to finish a full fetch plus official build instead of being killed at
+    # 95% after paying for all of it.
+    timeout-minutes: 600
+    env:
+      PYTHONUNBUFFERED: "1"
+      TARGET: ${{ inputs.target }}
+      # The workspace is empty for every hosted job, including nightlies.
+      APOSTATE_FRESH_BUILD: "1"
+      # The 0.75 default leaves headroom on a workstation someone is using; a
+      # hosted runner is doing nothing else. Lower if linking OOMs.
+      APOSTATE_JOBS: ${{ inputs.target == 'macos-arm64' && '12' || '' }}
+    steps:
+      - name: Initialize job workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace="$RUNNER_TEMP/apostate-workspace"
+          mkdir -p "$workspace"
+          printf 'APOSTATE_WORKSPACE=%s\n' "$workspace" >> "$GITHUB_ENV"
+      - name: Report available disk
+        shell: bash
+        run: df -h "$APOSTATE_WORKSPACE"
+      - name: Verify host tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Early, because every tool below is reached by a script that runs
+          # hours into the job. The archive probe is the reason this step
+          # exists: package-artifact.sh is the very last step, so a runner that
+          # cannot write the archive format burns a whole successful build
+          # before anyone finds out.
+          need() {
+            command -v "$1" >/dev/null || {
+              echo "$1 is required by $2 on this runner" >&2
+              exit 1
+            }
+          }
+          need python3 scripts/build.sh
+          need git scripts/fetch-sources.sh
+          probe="$(mktemp -d)"
+          trap 'rm -rf "$probe"' EXIT
+          : > "$probe/member"
+          # windows-x64 packages a .zip; every other target packages .tar.zst.
+          # Probing the wrong one would fail a runner that is actually fine.
+          if [[ "$TARGET" == windows-* ]]; then
+            need 7z scripts/package-artifact.sh
+          else
+            need tar scripts/package-artifact.sh
+            if ! tar --zstd -cf "$probe/probe.tar.zst" -C "$probe" member 2>/dev/null; then
+              echo "tar on this runner cannot write a .tar.zst archive, which" >&2
+              echo "scripts/package-artifact.sh requires. Install zstd, or a tar" >&2
+              echo "built with zstd support (macOS bsdtar needs the zstd library)." >&2
+              command -v zstd >/dev/null && echo "note: a standalone zstd binary IS present" >&2
+              exit 1
+            fi
+          fi
+          if [[ "$TARGET" == windows-* ]]; then
+            # Two files Chromium's Windows build hard-requires that VS Build
+            # Tools alone does not provide. The Blacksmith image excludes the
+            # full Visual Studio IDE and ships Build Tools 2022 instead, so
+            # check both rather than assume the GitHub image's inventory.
+            #
+            # dbghelp.dll: build/vs_toolchain.py marks it NOT optional and
+            # raises unless the SDK's "Debugging Tools for Windows" feature is
+            # installed.
+            sdk_root="${WINDOWSSDKDIR:-/c/Program Files (x86)/Windows Kits/10}"
+            dbghelp="$sdk_root/Debuggers/x64/dbghelp.dll"
+            [ -f "$dbghelp" ] || {
+              echo "missing $dbghelp" >&2
+              echo "build/vs_toolchain.py requires it and treats it as" >&2
+              echo "mandatory. Install the Windows SDK feature 'Debugging" >&2
+              echo "Tools for Windows'." >&2
+              exit 1
+            }
+            # msdia140.dll: comes from the VS install's DIA SDK, located via
+            # vswhere so a Build Tools install is found as readily as an IDE one.
+            vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+            [ -f "$vswhere" ] || { echo "vswhere.exe not found at $vswhere; vs_toolchain.py cannot locate Visual Studio" >&2; exit 1; }
+            vs_path="$("$vswhere" -latest -products '*' -property installationPath | tr -d '\r')"
+            [ -n "$vs_path" ] || { echo "vswhere reported no Visual Studio installation" >&2; exit 1; }
+            echo "visual studio: $vs_path"
+            msdia="$(cygpath -u "$vs_path" 2>/dev/null || printf '%s' "$vs_path")/DIA SDK/bin/amd64/msdia140.dll"
+            [ -f "$msdia" ] || {
+              echo "missing $msdia" >&2
+              echo "build/vs_toolchain.py copies it unconditionally. The DIA" >&2
+              echo "SDK ships with Visual Studio; this install lacks it." >&2
+              exit 1
+            }
+          fi
+          if [[ "$TARGET" == linux-* ]]; then
+            need docker scripts/in-linux-build-container.sh
+            docker info >/dev/null || { echo "the docker daemon is unavailable to this runner" >&2; exit 1; }
+          fi
+          if [[ "$TARGET" == macos-* ]]; then
+            for tool in xcodebuild xcrun plutil; do
+              need "$tool" scripts/prepare-mac-sdk.sh
+            done
+          fi
+          echo "host tooling present"
+      - name: Check out exact revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in \
+            scripts/verify-runner.sh \
+            scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh \
+            scripts/run-chromium-hooks.sh scripts/configure.sh scripts/build.sh \
+            scripts/smoke-binary.sh scripts/package-artifact.sh \
+            scripts/validate-release-baseline.py scripts/test_profile_resolver.py \
+            build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/common.gni \
+            "build/args/$TARGET.gn" patches/series LICENSE \
+            resources/profiles/catalogue.json .github/release/artifact-policy.json; do
+            test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
+          done
+          if [[ "$TARGET" == linux-* ]]; then
+            test -f scripts/prepare-linux-sysroot.sh || { echo "missing build input: scripts/prepare-linux-sysroot.sh" >&2; exit 1; }
+          fi
+          bash scripts/verify-runner.sh "$TARGET"
+      - name: Resolve artifact name from release policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$TARGET" <<'PY' >> "$GITHUB_ENV"
+          import json, pathlib, sys
+          target = sys.argv[1]
+          policy = json.loads(pathlib.Path(".github/release/artifact-policy.json").read_text(encoding="utf-8"))
+          version = pathlib.Path("build/CHROMIUM_VERSION").read_text(encoding="utf-8").strip()
+          if version != policy["manifest_contract"]["chromium_version"]:
+              raise SystemExit(f"build/CHROMIUM_VERSION {version} disagrees with the release policy")
+          prefix = f"apostate-{version}-{target}."
+          names = [name for name in policy["artifacts"]["filenames"] if name.startswith(prefix)]
+          if len(names) != 1:
+              raise SystemExit(f"release policy does not name exactly one artifact for {target}: {names}")
+          print(f"ARCHIVE={names[0]}")
+          PY
+      - name: Bootstrap pinned toolchain
+        shell: bash
+        run: bash scripts/bootstrap.sh
+      - name: Fetch pinned Chromium
+        shell: bash
+        run: bash scripts/fetch-sources.sh
+      - name: Apply patch series without fuzz
+        shell: bash
+        run: bash scripts/apply-patches.sh
+      - name: Run Chromium hooks and install target sysroot
+        if: ${{ startsWith(inputs.target, 'linux-') }}
+        shell: bash
+        run: bash scripts/run-chromium-hooks.sh "$TARGET" && bash scripts/prepare-linux-sysroot.sh "$TARGET"
+      - name: Configure target
+        shell: bash
+        run: bash scripts/configure.sh "$TARGET"
+      - name: Build official binary and manifest
+        shell: bash
+        run: bash scripts/build.sh "$TARGET"
+      - name: Report disk after build
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          # Runs even on failure, because the run that dies out of space is
+          # exactly the one whose numbers we need. Windows has the least
+          # headroom of the four at 130 GB total.
+          df -h "$APOSTATE_WORKSPACE" || true
+          du -sh "$APOSTATE_WORKSPACE" 2>/dev/null || true
+      - name: Run resolver, baseline, and native smoke checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/test_profile_resolver.py
+          python3 scripts/validate-release-baseline.py --root .
+          bash scripts/smoke-binary.sh "$TARGET"
+      - name: Package artifact and manifest
+        shell: bash
+        run: bash scripts/package-artifact.sh "$TARGET" "$ARCHIVE"
+      - name: Upload artifact and manifest
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: ${{ inputs.artifact_prefix }}-${{ inputs.target }}-${{ inputs.ref != '' && inputs.ref || github.sha }}
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention_days }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.manifest.json
+      # After the upload, deliberately. Attestation is the first step in this
+      # job that has never run, and it runs at the end of a build measured in
+      # hours. Attesting first would mean an OIDC or permissions fault discards
+      # a finished artifact and the whole build has to be paid for again;
+      # uploading first leaves the artifact recoverable either way.
+      - name: Attest build provenance
+        if: ${{ inputs.attest }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ env.ARCHIVE }}

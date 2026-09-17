@@ -11,8 +11,9 @@ build tooling are installed:
 ``--kind auto`` (the default) selects the manifest when a manifest field or a
 filename containing ``manifest`` is present, and otherwise selects launch.
 The process exits non-zero when any input is missing, malformed, or fails its
-schema. A manifest passing this structural check still needs cryptographic
-signature verification by the package installer before extraction.
+schema. A manifest passing this structural check still needs its artifact's
+SHA-256 verified against ``sha256`` before extraction; build provenance is a
+separate, keyless check via ``gh attestation verify``.
 """
 
 from __future__ import annotations
@@ -67,7 +68,6 @@ MANIFEST_FIELDS = {
     "platform",
     "artifact",
     "sha256",
-    "signature",
     "source_revision",
     "patch_series_sha256",
     "build_manifest_sha256",

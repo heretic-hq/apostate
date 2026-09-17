@@ -12,7 +12,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-VALID_SIGNATURE = "A" * 86 + "=="
 
 
 def run_validator(kind: str, value: dict[str, object]) -> subprocess.CompletedProcess[str]:
@@ -74,7 +73,7 @@ class ContractValidatorTests(unittest.TestCase):
         }
         self.assertNotEqual(run_validator("launch", value).returncode, 0)
 
-    def test_manifest_requires_padded_ed25519_signature(self) -> None:
+    def test_manifest_requires_exactly_the_release_fields(self) -> None:
         value = {
             "package_version": "0.1.0",
             "chromium_version": "152.0.7977.83",
@@ -82,14 +81,19 @@ class ContractValidatorTests(unittest.TestCase):
             "platform": "linux-x64",
             "artifact": "apostate-152.0.7977.83-linux-x64.tar.zst",
             "sha256": "a" * 64,
-            "signature": VALID_SIGNATURE,
             "source_revision": "b" * 40,
             "patch_series_sha256": "c" * 64,
             "build_manifest_sha256": "d" * 64,
         }
         self.assertEqual(run_validator("manifest", value).returncode, 0)
-        value["signature"] = "ed25519:" + ("a" * 86)
-        self.assertNotEqual(run_validator("manifest", value).returncode, 0)
+        # The detached Ed25519 signature was retired for GitHub artifact
+        # attestations. A manifest still carrying one is a manifest produced by
+        # a tool that predates the cutover, so it must be rejected rather than
+        # tolerated and silently ignored.
+        with_signature = dict(value, signature="A" * 86 + "==")
+        self.assertNotEqual(run_validator("manifest", with_signature).returncode, 0)
+        bad_hash = dict(value, sha256="a" * 63)
+        self.assertNotEqual(run_validator("manifest", bad_hash).returncode, 0)
 
 
     def test_profile_contains_requires_exactly_one_primary_display(self) -> None:

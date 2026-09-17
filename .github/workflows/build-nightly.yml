@@ -4,470 +4,72 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      targets:
+        description: "Comma-separated targets to build; overrides the APOSTATE_BUILD_TARGETS variable"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
+# Not host contention any more -- every leg gets its own ephemeral hosted VM.
+# This is cost control: a full Chromium build per target is expensive, so two
+# overlapping nightly runs must never be in flight at once.
 concurrency:
-  group: apostate-build-host
+  group: apostate-build
   cancel-in-progress: false
 
-env:
-  PYTHONUNBUFFERED: "1"
-
 jobs:
-  build-macos-arm64:
-    name: nightly-macos-arm64
-    runs-on: [self-hosted, apostate-build, apostate-macos-arm64]
-    timeout-minutes: 240
-    env:
-      TARGET: macos-arm64
-      ARCHIVE: apostate-152.0.7977.83-macos-arm64.tar.zst
+  setup:
+    name: resolve available build targets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      targets: ${{ steps.resolve.outputs.targets }}
     steps:
-      - name: Initialize persistent workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          workspace="$HOME/.cache/apostate/$TARGET/.workspace"
-          mkdir -p "$workspace"
-          printf 'APOSTATE_WORKSPACE=%s\n' "$workspace" >> "$GITHUB_ENV"
-      - name: Check out exact revision
+      - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
-      - name: Verify build inputs
+      - name: Resolve target matrix
+        id: resolve
+        env:
+          REQUESTED_TARGETS: ${{ inputs.targets }}
+          CONFIGURED_TARGETS: ${{ vars.APOSTATE_BUILD_TARGETS }}
         shell: bash
-        run: |
-          set -euo pipefail
-          for path in scripts/verify-runner.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
-            test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
-          done
-          test -f scripts/verify-workspace.sh || { echo "missing build input: scripts/verify-workspace.sh" >&2; exit 1; }
-          test -f scripts/run-chromium-hooks.sh || { echo "missing build input: scripts/run-chromium-hooks.sh" >&2; exit 1; }
-          test -f scripts/lock-workspace.sh || { echo "missing build input: scripts/lock-workspace.sh" >&2; exit 1; }
-          if [[ "$TARGET" == linux-* ]]; then
-            test -f scripts/prepare-linux-sysroot.sh || { echo "missing build input: scripts/prepare-linux-sysroot.sh" >&2; exit 1; }
-          fi
-          bash scripts/verify-runner.sh "$TARGET"
-          bash scripts/verify-workspace.sh "$TARGET"
-      - name: Acquire persistent workspace lock
+        run: bash scripts/resolve-build-targets.sh >> "$GITHUB_OUTPUT"
+      - name: Report resolved targets
+        env:
+          RESOLVED_TARGETS: ${{ steps.resolve.outputs.targets }}
         shell: bash
-        run: bash scripts/lock-workspace.sh acquire "$TARGET"
-      - name: Bootstrap pinned toolchain
-        shell: bash
-        run: bash scripts/bootstrap.sh
-      - name: Fetch pinned Chromium
-        shell: bash
-        run: bash scripts/fetch-sources.sh
-      - name: Apply patch series without fuzz
-        shell: bash
-        run: bash scripts/apply-patches.sh --check && bash scripts/apply-patches.sh
-      - name: Configure target
-        shell: bash
-        run: bash scripts/configure.sh "$TARGET"
-      - name: Build official binary and manifest
-        shell: bash
-        run: bash scripts/build.sh "$TARGET"
-      - name: Run resolver, baseline, and native smoke checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/test_profile_resolver.py
-          python3 scripts/validate-release-baseline.py --root .
-          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/Chromium.app/Contents/MacOS/Chromium"
-          test -x "$smoke"
-          "$smoke" --version
-      - name: Package unsigned nightly artifact and manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
-          stage="nightly-stage-$TARGET"
-          rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.manifest.json"
-          mkdir -p "$stage/resources/profiles"
-          cp -R "$out/Chromium.app" "$stage/"
-          cp LICENSE "$stage/"
-          if [ -f NOTICE ]; then cp NOTICE "$stage/"; fi
-          cp build/MANIFEST.lock "$stage/build-MANIFEST.lock"
-          cp -R resources/profiles/. "$stage/resources/profiles/"
-          tar --zstd -cf "$ARCHIVE" "$stage"
-          python3 - "$ARCHIVE" "$ARCHIVE.manifest.json" "$TARGET" <<'PY'
-          import hashlib, json, pathlib, subprocess, sys
-          artifact, manifest, target = map(pathlib.Path, sys.argv[1:])
-          catalogue = json.loads(pathlib.Path("resources/profiles/catalogue.json").read_text(encoding="utf-8"))
-          data = {
-              "package_version": "0.1.0",
-              "chromium_version": pathlib.Path("build/CHROMIUM_VERSION").read_text(encoding="utf-8").strip(),
-              "catalogue_version": catalogue["catalogue_version"],
-              "platform": target,
-              "artifact": artifact.name,
-              "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
-              "signature": None,
-              "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-              "patch_series_sha256": hashlib.sha256(pathlib.Path("patches/series").read_bytes()).hexdigest(),
-              "build_manifest_sha256": hashlib.sha256(pathlib.Path("build/MANIFEST.lock").read_bytes()).hexdigest(),
-          }
-          manifest.write_bytes((json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
-          PY
-      - name: Upload nightly artifact and manifest
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with:
-          name: nightly-${{ env.TARGET }}-${{ github.sha }}
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            ${{ env.ARCHIVE }}
-            ${{ env.ARCHIVE }}.manifest.json
+        run: printf 'building %s\n' "$RESOLVED_TARGETS"
 
-      - name: Release persistent workspace lock
-        if: ${{ always() && env.APOSTATE_WORKSPACE_LOCK_ACQUIRED == '1' }}
-        shell: bash
-        run: bash scripts/lock-workspace.sh release "$TARGET"
-  build-linux-arm64:
-    name: nightly-linux-arm64
-    needs: build-linux-x64
-    if: ${{ needs.build-linux-x64.result == 'success' }}
-    runs-on: [self-hosted, apostate-build, apostate-linux-x64]
-    timeout-minutes: 240
-    env:
-      TARGET: linux-arm64
-      ARCHIVE: apostate-152.0.7977.83-linux-arm64.tar.zst
-    steps:
-      - name: Initialize persistent workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          workspace="$HOME/.cache/apostate/$TARGET/.workspace"
-          mkdir -p "$workspace"
-          printf 'APOSTATE_WORKSPACE=%s\n' "$workspace" >> "$GITHUB_ENV"
-      - name: Check out exact revision
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify build inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          for path in scripts/verify-runner.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
-            test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
-          done
-          test -f scripts/verify-workspace.sh || { echo "missing build input: scripts/verify-workspace.sh" >&2; exit 1; }
-          test -f scripts/run-chromium-hooks.sh || { echo "missing build input: scripts/run-chromium-hooks.sh" >&2; exit 1; }
-          test -f scripts/lock-workspace.sh || { echo "missing build input: scripts/lock-workspace.sh" >&2; exit 1; }
-          if [[ "$TARGET" == linux-* ]]; then
-            test -f scripts/prepare-linux-sysroot.sh || { echo "missing build input: scripts/prepare-linux-sysroot.sh" >&2; exit 1; }
-          fi
-          bash scripts/verify-runner.sh "$TARGET"
-          bash scripts/verify-workspace.sh "$TARGET"
-      - name: Acquire persistent workspace lock
-        shell: bash
-        run: bash scripts/lock-workspace.sh acquire "$TARGET"
-      - name: Bootstrap pinned toolchain
-        shell: bash
-        run: bash scripts/bootstrap.sh
-      - name: Fetch pinned Chromium
-        shell: bash
-        run: bash scripts/fetch-sources.sh
-      - name: Apply patch series without fuzz
-        shell: bash
-        run: bash scripts/apply-patches.sh --check && bash scripts/apply-patches.sh
-      - name: Run Chromium hooks and install target sysroot
-        if: ${{ startsWith(env.TARGET, 'linux-') }}
-        shell: bash
-        run: bash scripts/run-chromium-hooks.sh "$TARGET" && bash scripts/prepare-linux-sysroot.sh "$TARGET"
-      - name: Configure target
-        shell: bash
-        run: bash scripts/configure.sh "$TARGET"
-      - name: Build official binary and manifest
-        shell: bash
-        run: bash scripts/build.sh "$TARGET"
-      - name: Run resolver, baseline, and native smoke checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/test_profile_resolver.py
-          python3 scripts/validate-release-baseline.py --root .
-          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/chrome"
-          test -x "$smoke"
-          if [ "$TARGET" = linux-arm64 ]; then
-            format="$(file -b "$smoke")"
-            case "$format" in *aarch64*|*ARM64*) : ;; *) echo "unexpected ARM64 binary format: $format" >&2; exit 1 ;; esac
-          else
-            "$smoke" --version
-          fi
-      - name: Package unsigned nightly artifact and manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
-          stage="nightly-stage-$TARGET"
-          rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.manifest.json"
-          mkdir -p "$stage/resources/profiles"
-          cp "$out/chrome" "$stage/"
-          for file in chrome_crashpad_handler libEGL.so libGLESv2.so; do
-            if [ -e "$out/$file" ]; then cp "$out/$file" "$stage/"; fi
-          done
-          cp LICENSE "$stage/"
-          if [ -f NOTICE ]; then cp NOTICE "$stage/"; fi
-          cp build/MANIFEST.lock "$stage/build-MANIFEST.lock"
-          cp -R resources/profiles/. "$stage/resources/profiles/"
-          tar --zstd -cf "$ARCHIVE" "$stage"
-          python3 - "$ARCHIVE" "$ARCHIVE.manifest.json" "$TARGET" <<'PY'
-          import hashlib, json, pathlib, subprocess, sys
-          artifact, manifest, target = map(pathlib.Path, sys.argv[1:])
-          catalogue = json.loads(pathlib.Path("resources/profiles/catalogue.json").read_text(encoding="utf-8"))
-          data = {
-              "package_version": "0.1.0",
-              "chromium_version": pathlib.Path("build/CHROMIUM_VERSION").read_text(encoding="utf-8").strip(),
-              "catalogue_version": catalogue["catalogue_version"],
-              "platform": target,
-              "artifact": artifact.name,
-              "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
-              "signature": None,
-              "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-              "patch_series_sha256": hashlib.sha256(pathlib.Path("patches/series").read_bytes()).hexdigest(),
-              "build_manifest_sha256": hashlib.sha256(pathlib.Path("build/MANIFEST.lock").read_bytes()).hexdigest(),
-          }
-          manifest.write_bytes((json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
-          PY
-      - name: Upload nightly artifact and manifest
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with:
-          name: nightly-${{ env.TARGET }}-${{ github.sha }}
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            ${{ env.ARCHIVE }}
-            ${{ env.ARCHIVE }}.manifest.json
-
-      - name: Release persistent workspace lock
-        if: ${{ always() && env.APOSTATE_WORKSPACE_LOCK_ACQUIRED == '1' }}
-        shell: bash
-        run: bash scripts/lock-workspace.sh release "$TARGET"
-  build-linux-x64:
-    name: nightly-linux-x64
-    runs-on: [self-hosted, apostate-build, apostate-linux-x64]
-    timeout-minutes: 240
-    env:
-      TARGET: linux-x64
-      ARCHIVE: apostate-152.0.7977.83-linux-x64.tar.zst
-    steps:
-      - name: Initialize persistent workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          workspace="$HOME/.cache/apostate/$TARGET/.workspace"
-          mkdir -p "$workspace"
-          printf 'APOSTATE_WORKSPACE=%s\n' "$workspace" >> "$GITHUB_ENV"
-      - name: Check out exact revision
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify build inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          for path in scripts/verify-runner.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
-            test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
-          done
-          test -f scripts/verify-workspace.sh || { echo "missing build input: scripts/verify-workspace.sh" >&2; exit 1; }
-          test -f scripts/run-chromium-hooks.sh || { echo "missing build input: scripts/run-chromium-hooks.sh" >&2; exit 1; }
-          test -f scripts/lock-workspace.sh || { echo "missing build input: scripts/lock-workspace.sh" >&2; exit 1; }
-          if [[ "$TARGET" == linux-* ]]; then
-            test -f scripts/prepare-linux-sysroot.sh || { echo "missing build input: scripts/prepare-linux-sysroot.sh" >&2; exit 1; }
-          fi
-          bash scripts/verify-runner.sh "$TARGET"
-          bash scripts/verify-workspace.sh "$TARGET"
-      - name: Acquire persistent workspace lock
-        shell: bash
-        run: bash scripts/lock-workspace.sh acquire "$TARGET"
-      - name: Bootstrap pinned toolchain
-        shell: bash
-        run: bash scripts/bootstrap.sh
-      - name: Fetch pinned Chromium
-        shell: bash
-        run: bash scripts/fetch-sources.sh
-      - name: Apply patch series without fuzz
-        shell: bash
-        run: bash scripts/apply-patches.sh --check && bash scripts/apply-patches.sh
-      - name: Run Chromium hooks and install target sysroot
-        if: ${{ startsWith(env.TARGET, 'linux-') }}
-        shell: bash
-        run: bash scripts/run-chromium-hooks.sh "$TARGET" && bash scripts/prepare-linux-sysroot.sh "$TARGET"
-      - name: Configure target
-        shell: bash
-        run: bash scripts/configure.sh "$TARGET"
-      - name: Build official binary and manifest
-        shell: bash
-        run: bash scripts/build.sh "$TARGET"
-      - name: Run resolver, baseline, and native smoke checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/test_profile_resolver.py
-          python3 scripts/validate-release-baseline.py --root .
-          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/chrome"
-          test -x "$smoke"
-          "$smoke" --version
-      - name: Package unsigned nightly artifact and manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
-          stage="nightly-stage-$TARGET"
-          rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.manifest.json"
-          mkdir -p "$stage/resources/profiles"
-          cp "$out/chrome" "$stage/"
-          for file in chrome_crashpad_handler libEGL.so libGLESv2.so; do
-            if [ -e "$out/$file" ]; then cp "$out/$file" "$stage/"; fi
-          done
-          cp LICENSE "$stage/"
-          if [ -f NOTICE ]; then cp NOTICE "$stage/"; fi
-          cp build/MANIFEST.lock "$stage/build-MANIFEST.lock"
-          cp -R resources/profiles/. "$stage/resources/profiles/"
-          tar --zstd -cf "$ARCHIVE" "$stage"
-          python3 - "$ARCHIVE" "$ARCHIVE.manifest.json" "$TARGET" <<'PY'
-          import hashlib, json, pathlib, subprocess, sys
-          artifact, manifest, target = map(pathlib.Path, sys.argv[1:])
-          catalogue = json.loads(pathlib.Path("resources/profiles/catalogue.json").read_text(encoding="utf-8"))
-          data = {
-              "package_version": "0.1.0",
-              "chromium_version": pathlib.Path("build/CHROMIUM_VERSION").read_text(encoding="utf-8").strip(),
-              "catalogue_version": catalogue["catalogue_version"],
-              "platform": target,
-              "artifact": artifact.name,
-              "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
-              "signature": None,
-              "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-              "patch_series_sha256": hashlib.sha256(pathlib.Path("patches/series").read_bytes()).hexdigest(),
-              "build_manifest_sha256": hashlib.sha256(pathlib.Path("build/MANIFEST.lock").read_bytes()).hexdigest(),
-          }
-          manifest.write_bytes((json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
-          PY
-      - name: Upload nightly artifact and manifest
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with:
-          name: nightly-${{ env.TARGET }}-${{ github.sha }}
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            ${{ env.ARCHIVE }}
-            ${{ env.ARCHIVE }}.manifest.json
-
-      - name: Release persistent workspace lock
-        if: ${{ always() && env.APOSTATE_WORKSPACE_LOCK_ACQUIRED == '1' }}
-        shell: bash
-        run: bash scripts/lock-workspace.sh release "$TARGET"
-  build-windows-x64:
-    name: nightly-windows-x64
-    needs: build-linux-arm64
-    if: ${{ needs.build-linux-arm64.result == 'success' }}
-    runs-on: [self-hosted, apostate-build, apostate-windows-x64]
-    timeout-minutes: 240
-    env:
-      TARGET: windows-x64
-      ARCHIVE: apostate-152.0.7977.83-windows-x64.zip
-    steps:
-      - name: Initialize persistent workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          workspace="$HOME/.cache/apostate/$TARGET/.workspace"
-          mkdir -p "$workspace"
-          printf 'APOSTATE_WORKSPACE=%s\n' "$workspace" >> "$GITHUB_ENV"
-      - name: Check out exact revision
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify build inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          for path in scripts/verify-runner.sh scripts/verify-workspace.sh scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh scripts/configure.sh scripts/build.sh scripts/validate-release-baseline.py scripts/test_profile_resolver.py build/CHROMIUM_VERSION build/DEPOT_TOOLS_REVISION build/args/$TARGET.gn patches/series LICENSE resources/profiles/catalogue.json; do
-            test -f "$path" || { echo "missing build input: $path" >&2; exit 1; }
-          done
-          test -f scripts/verify-workspace.sh || { echo "missing build input: scripts/verify-workspace.sh" >&2; exit 1; }
-          test -f scripts/run-chromium-hooks.sh || { echo "missing build input: scripts/run-chromium-hooks.sh" >&2; exit 1; }
-          test -f scripts/lock-workspace.sh || { echo "missing build input: scripts/lock-workspace.sh" >&2; exit 1; }
-          if [[ "$TARGET" == linux-* ]]; then
-            test -f scripts/prepare-linux-sysroot.sh || { echo "missing build input: scripts/prepare-linux-sysroot.sh" >&2; exit 1; }
-          fi
-          bash scripts/verify-runner.sh "$TARGET"
-          bash scripts/verify-workspace.sh "$TARGET"
-      - name: Acquire persistent workspace lock
-        shell: bash
-        run: bash scripts/lock-workspace.sh acquire "$TARGET"
-      - name: Bootstrap pinned toolchain
-        shell: bash
-        run: bash scripts/bootstrap.sh
-      - name: Fetch pinned Chromium
-        shell: bash
-        run: bash scripts/fetch-sources.sh
-      - name: Apply patch series without fuzz
-        shell: bash
-        run: bash scripts/apply-patches.sh --check && bash scripts/apply-patches.sh
-      - name: Configure target
-        shell: bash
-        run: bash scripts/configure.sh "$TARGET"
-      - name: Build official binary and manifest
-        shell: bash
-        run: bash scripts/build.sh "$TARGET"
-      - name: Run resolver, baseline, and native smoke checks
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/test_profile_resolver.py
-          python3 scripts/validate-release-baseline.py --root .
-          smoke="$APOSTATE_WORKSPACE/src/out/$TARGET/chrome.exe"
-          test -f "$smoke"
-          "$smoke" --version
-      - name: Package unsigned nightly artifact and manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-          out="$APOSTATE_WORKSPACE/src/out/$TARGET"
-          stage="nightly-stage-$TARGET"
-          rm -rf "$stage" "$ARCHIVE" "$ARCHIVE.manifest.json"
-          mkdir -p "$stage/resources/profiles"
-          cp "$out/chrome.exe" "$stage/"
-          cp LICENSE "$stage/"
-          if [ -f NOTICE ]; then cp NOTICE "$stage/"; fi
-          cp build/MANIFEST.lock "$stage/build-MANIFEST.lock"
-          cp -R resources/profiles/. "$stage/resources/profiles/"
-          command -v 7z >/dev/null
-          7z a -tzip "$ARCHIVE" "$stage" >/dev/null
-          python3 - "$ARCHIVE" "$ARCHIVE.manifest.json" "$TARGET" <<'PY'
-          import hashlib, json, pathlib, subprocess, sys
-          artifact, manifest, target = map(pathlib.Path, sys.argv[1:])
-          catalogue = json.loads(pathlib.Path("resources/profiles/catalogue.json").read_text(encoding="utf-8"))
-          data = {
-              "package_version": "0.1.0",
-              "chromium_version": pathlib.Path("build/CHROMIUM_VERSION").read_text(encoding="utf-8").strip(),
-              "catalogue_version": catalogue["catalogue_version"],
-              "platform": target,
-              "artifact": artifact.name,
-              "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
-              "signature": None,
-              "source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-              "patch_series_sha256": hashlib.sha256(pathlib.Path("patches/series").read_bytes()).hexdigest(),
-              "build_manifest_sha256": hashlib.sha256(pathlib.Path("build/MANIFEST.lock").read_bytes()).hexdigest(),
-          }
-          manifest.write_bytes((json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
-          PY
-      - name: Upload nightly artifact and manifest
-        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
-        with:
-          name: nightly-${{ env.TARGET }}-${{ github.sha }}
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            ${{ env.ARCHIVE }}
-            ${{ env.ARCHIVE }}.manifest.json
-      - name: Release persistent workspace lock
-        if: ${{ always() && env.APOSTATE_WORKSPACE_LOCK_ACQUIRED == '1' }}
-        shell: bash
-        run: bash scripts/lock-workspace.sh release "$TARGET"
+  build:
+    name: nightly
+    needs: setup
+    # The reusable workflow declares id-token/attestations because the release
+    # path attests. A caller grants at most its own ceiling, so a nightly that
+    # withheld them would fail permission validation before running, even
+    # though attest is false here and the step is skipped.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    # All targets concurrently: each leg is its own ephemeral VM and Blacksmith
+    # imposes no concurrency limit. fail-fast stays off here because a nightly
+    # exists to report the state of every target, so one failing platform must
+    # not hide the others.
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    uses: ./.github/workflows/build-target.yml
+    with:
+      target: ${{ matrix.target }}
+      runner_labels: ${{ matrix.runner_labels }}
+      attest: false
+      artifact_prefix: nightly
+      retention_days: 14

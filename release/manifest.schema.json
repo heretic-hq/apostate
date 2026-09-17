@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/apostate/apostate/release/manifest.schema.json",
   "title": "Apostate immutable release manifest",
-  "description": "Machine-readable identity and integrity metadata for one immutable Apostate release artifact. SHA-256 fields provide integrity; consumers must independently verify the detached signature and reject a missing or invalid signature before extracting an artifact. This manifest contains no credentials or private signing material.",
+  "description": "Machine-readable identity and integrity metadata for one immutable Apostate release artifact. The SHA-256 fields provide integrity: a consumer must hash the complete archive and require an exact match with sha256 before extracting it. Build provenance is attested separately and keylessly by GitHub artifact attestations, verified with `gh attestation verify <artifact> --repo <owner>/<repo>`; there is no detached signature and no long-lived signing key. This manifest contains no credentials or private signing material.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -12,7 +12,6 @@
     "platform",
     "artifact",
     "sha256",
-    "signature",
     "source_revision",
     "patch_series_sha256",
     "build_manifest_sha256"
@@ -27,8 +26,9 @@
       "description": "Chromium version embedded in the artifact."
     },
     "catalogue_version": {
-      "const": 1,
-      "description": "Version of the Apostate-owned profile catalogue required by the resolver."
+      "type": "integer",
+      "minimum": 1,
+      "description": "Version of the Apostate-owned profile catalogue the signed source revision actually shipped. The contract pins the rule, not the number: the manifest must state the catalogue present in resources/profiles/catalogue.json at the tagged revision."
     },
     "platform": {
       "enum": [
@@ -50,13 +50,6 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$",
       "description": "Lowercase SHA-256 digest of the complete artifact bytes."
-    },
-    "signature": {
-      "type": "string",
-      "minLength": 88,
-      "maxLength": 88,
-      "pattern": "^[A-Za-z0-9+/]{86}==$",
-      "description": "RFC 4648 padded base64 encoding of the 64-byte detached Ed25519 signature over the canonical artifact metadata. Package installers must verify it against the committed verification policy before extraction."
     },
     "source_revision": {
       "type": "string",

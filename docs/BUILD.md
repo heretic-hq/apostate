@@ -371,7 +371,10 @@ consumption ends up in its log. The Windows checkout's own size is measured by
 the `measure-windows-checkout` job in
 `.github/workflows/probe-runners.yml`, which syncs Chromium on a 2 vCPU runner
 rather than inferring it from the macOS figure — macOS fetches
-`third_party/swift-toolchain`, 3.9 GB that Windows never sees.
+`third_party/swift-toolchain`, 3.9 GB that Windows never sees. That job and
+`census-windows-build-class` share one `measure_windows_disk` dispatch input,
+because neither number decides anything alone and the 32 vCPU class is the
+most expensive runner here — the weekly probe must not spin it for a `df`.
 
 Each job sets `APOSTATE_WORKSPACE` to the generated directory
 `$RUNNER_TEMP/apostate-workspace`. Chromium, depot_tools, caches, output and

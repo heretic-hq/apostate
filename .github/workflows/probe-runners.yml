@@ -18,8 +18,8 @@ name: probe runners
 on:
   workflow_dispatch:
     inputs:
-      measure_windows_checkout:
-        description: "Also sync Chromium on a 2 vCPU Windows runner and measure what it occupies"
+      measure_windows_disk:
+        description: "Measure whether a Windows build fits: checkout size on 2 vCPU, free space on the 32 vCPU build class"
         required: false
         type: boolean
         default: false
@@ -130,7 +130,7 @@ jobs:
   # build would cost hours of the most expensive runner we use.
   measure-windows-checkout:
     name: measure-windows-checkout
-    if: ${{ inputs.measure_windows_checkout }}
+    if: ${{ inputs.measure_windows_disk }}
     runs-on: blacksmith-2vcpu-windows-2025
     timeout-minutes: 120
     env:
@@ -179,6 +179,10 @@ jobs:
   # nothing else -- two or three minutes, no sync, no build.
   census-windows-build-class:
     name: census-windows-build-class
+    # Gated: this is the most expensive runner class we use, and the weekly
+    # probe exists to be cheap. Paired with the checkout measurement because
+    # neither number decides anything on its own.
+    if: ${{ inputs.measure_windows_disk }}
     runs-on: blacksmith-32vcpu-windows-2025
     timeout-minutes: 20
     steps:

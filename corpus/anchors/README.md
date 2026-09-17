@@ -20,12 +20,25 @@ byte for byte.
 
 | anchor id | platform / backend | member cards | webgl1 caps | webgl2 caps | webgl render | webgpu | tier | capture sha256 |
 |---|---|---|---|---|---|---|---|---|
+| `linux-swiftshader-google-6922d61bab83` | Linux / ANGLE/SwiftShader | SwiftShader Device (Subzero) | `6087e24b280c` | `9b8362e1bb54` | `918f09f66eeb` | 1 cluster | T0 | `70fd8f09c6f1` |
 | `linux-vulkan-nvidia-adf287b8f0ee` | Linux / ANGLE/Vulkan | NVIDIA GeForce RTX 4070 Ti SUPER<br>NVIDIA GeForce RTX 4080 SUPER<br>NVIDIA GeForce RTX 3090<br>NVIDIA RTX PRO 4000 Blackwell | `2327f6ae5fcb` | `c7aa8b52c012` | `7e8e3b73e747` | 2 clusters | T0 | `05f2ea0310b1`<br>`ce0df3706e29`<br>`e35bd495533e`<br>`2c04db1bebc7` |
 | `macos-metal-apple-850a91233555` | macOS / ANGLE/Metal | Apple M4 Max | `53ec118e9c72` | `102f6613b44a` | `918f09f66eeb` | 1 cluster | T0 | `e9ea539d46d6` |
 | `windows-d3d11-intel-79dfeb5b4f99` | Windows / ANGLE/D3D11 | Intel(R) UHD Graphics 630 | `be8acf335bdc` | `e695c2da65d4` | `918f09f66eeb` | 1 cluster | T0 | `f3065892dd65` |
 | `windows-d3d11-nvidia-0947761dfbe9` | Windows / ANGLE/D3D11 | NVIDIA GeForce RTX 3070 Ti<br>NVIDIA RTX A4500 | `ff87541425e2` | `a34893d0a4a3` | `a895ab2a1a0a` | 1 cluster | T0 | `3d48d64898a4`<br>`9ada97c27fef` |
 
 Full digests, and the equality that defines each group:
+
+### `linux-swiftshader-google-6922d61bab83`
+
+- `webgl1_caps_sha256` `6087e24b280ce3092f30ff349c91d43c4565c5cf57f4890939783ecf96a0ed48`
+- `webgl2_caps_sha256` `9b8362e1bb54529054317d260277f6df25340590fc176a135b74a72d89ad0e20`
+- `webgl1_pixels_sha256` `918f09f66eeb4cf809d0ea2bf69bd2fefa62f31f12c4d32fd2ac4b4e3f3b1e2b`
+- `webgl2_pixels_sha256` `918f09f66eeb4cf809d0ea2bf69bd2fefa62f31f12c4d32fd2ac4b4e3f3b1e2b`
+- `webgpu_cluster_sha256` `3c49079fb36cec22b03b70a2d5c2e9e1027204859f53fbc53a3e2dda6759d1d2` — no adapter (stock-linux-20260907T150627Z.json)
+- browser build 152.0.7977.82 (same-major), release pin 152.0.7977.83
+- Measured on Chromium 152.0.7977.82 against release pin 152.0.7977.83: same major, different patch. Version-bearing fields will differ from a pinned-build reference and a V3 run must report that separately.
+- The collector's WebGL scene is an analytic mediump gradient, so implementations that agree on it to 8 bits produce one digest. This render digest is shared with macos-metal-apple-850a91233555, windows-d3d11-intel-79dfeb5b4f99, whose capability tables differ, so the render digest alone does not separate these anchors: the WebGL capability digests do.
+- grouping digests matched across all 1 member(s): yes
 
 ### `linux-vulkan-nvidia-adf287b8f0ee`
 
@@ -49,7 +62,7 @@ Full digests, and the equality that defines each group:
 - `webgl2_pixels_sha256` `918f09f66eeb4cf809d0ea2bf69bd2fefa62f31f12c4d32fd2ac4b4e3f3b1e2b`
 - `webgpu_cluster_sha256` `5bec955818712cdd430aa0bafa071b315369644c2cdb2e055dfa8534dfa0f1cf` — apple / metal-3, 23 features, 36 limits (m4-max-chrome-20260908T163229Z.json)
 - browser build 152.0.7977.83 (release), release pin 152.0.7977.83
-- The collector's WebGL scene is an analytic mediump gradient, so implementations that agree on it to 8 bits produce one digest. This render digest is shared with windows-d3d11-intel-79dfeb5b4f99, whose capability tables differ, so the render digest alone does not separate these anchors: the WebGL capability digests do.
+- The collector's WebGL scene is an analytic mediump gradient, so implementations that agree on it to 8 bits produce one digest. This render digest is shared with linux-swiftshader-google-6922d61bab83, windows-d3d11-intel-79dfeb5b4f99, whose capability tables differ, so the render digest alone does not separate these anchors: the WebGL capability digests do.
 - grouping digests matched across all 1 member(s): yes
 
 ### `windows-d3d11-intel-79dfeb5b4f99`
@@ -60,7 +73,7 @@ Full digests, and the equality that defines each group:
 - `webgl2_pixels_sha256` `918f09f66eeb4cf809d0ea2bf69bd2fefa62f31f12c4d32fd2ac4b4e3f3b1e2b`
 - `webgpu_cluster_sha256` `6a1735a4ebd88b988984b2217bd8f5e291ee42967803f4fc0d51b834441d329a` — intel / gen-9, 18 features, 36 limits (windows-chrome-20260910T140813Z.json)
 - browser build 152.0.7977.83 (release), release pin 152.0.7977.83
-- The collector's WebGL scene is an analytic mediump gradient, so implementations that agree on it to 8 bits produce one digest. This render digest is shared with macos-metal-apple-850a91233555, whose capability tables differ, so the render digest alone does not separate these anchors: the WebGL capability digests do.
+- The collector's WebGL scene is an analytic mediump gradient, so implementations that agree on it to 8 bits produce one digest. This render digest is shared with linux-swiftshader-google-6922d61bab83, macos-metal-apple-850a91233555, whose capability tables differ, so the render digest alone does not separate these anchors: the WebGL capability digests do.
 - grouping digests matched across all 1 member(s): yes
 
 ### `windows-d3d11-nvidia-0947761dfbe9`
@@ -93,15 +106,23 @@ cause is not isolated to the graphics backend, and that is stated per pair.
 
 | from | to | webgl1 caps | webgl2 caps | webgl render | status | build confound |
 |---|---|---|---|---|---|---|
+| `linux-swiftshader-google-6922d61bab83` | `linux-vulkan-nvidia-adf287b8f0ee` | `6087e24b280c` vs `2327f6ae5fcb` | `9b8362e1bb54` vs `c7aa8b52c012` | `918f09f66eeb` vs `7e8e3b73e747` | `asserted_not_measured` | no |
+| `linux-swiftshader-google-6922d61bab83` | `macos-metal-apple-850a91233555` | `6087e24b280c` vs `53ec118e9c72` | `9b8362e1bb54` vs `102f6613b44a` | equal | `asserted_not_measured` | patch |
+| `linux-swiftshader-google-6922d61bab83` | `windows-d3d11-intel-79dfeb5b4f99` | `6087e24b280c` vs `be8acf335bdc` | `9b8362e1bb54` vs `e695c2da65d4` | equal | `asserted_not_measured` | patch |
+| `linux-swiftshader-google-6922d61bab83` | `windows-d3d11-nvidia-0947761dfbe9` | `6087e24b280c` vs `ff87541425e2` | `9b8362e1bb54` vs `a34893d0a4a3` | `918f09f66eeb` vs `a895ab2a1a0a` | `asserted_not_measured` | major |
+| `linux-vulkan-nvidia-adf287b8f0ee` | `linux-swiftshader-google-6922d61bab83` | `2327f6ae5fcb` vs `6087e24b280c` | `c7aa8b52c012` vs `9b8362e1bb54` | `7e8e3b73e747` vs `918f09f66eeb` | `asserted_not_measured` | no |
 | `linux-vulkan-nvidia-adf287b8f0ee` | `macos-metal-apple-850a91233555` | `2327f6ae5fcb` vs `53ec118e9c72` | `c7aa8b52c012` vs `102f6613b44a` | `7e8e3b73e747` vs `918f09f66eeb` | `asserted_not_measured` | patch |
 | `linux-vulkan-nvidia-adf287b8f0ee` | `windows-d3d11-intel-79dfeb5b4f99` | `2327f6ae5fcb` vs `be8acf335bdc` | `c7aa8b52c012` vs `e695c2da65d4` | `7e8e3b73e747` vs `918f09f66eeb` | `asserted_not_measured` | patch |
 | `linux-vulkan-nvidia-adf287b8f0ee` | `windows-d3d11-nvidia-0947761dfbe9` | `2327f6ae5fcb` vs `ff87541425e2` | `c7aa8b52c012` vs `a34893d0a4a3` | `7e8e3b73e747` vs `a895ab2a1a0a` | `asserted_not_measured` | major |
+| `macos-metal-apple-850a91233555` | `linux-swiftshader-google-6922d61bab83` | `53ec118e9c72` vs `6087e24b280c` | `102f6613b44a` vs `9b8362e1bb54` | equal | `asserted_not_measured` | patch |
 | `macos-metal-apple-850a91233555` | `linux-vulkan-nvidia-adf287b8f0ee` | `53ec118e9c72` vs `2327f6ae5fcb` | `102f6613b44a` vs `c7aa8b52c012` | `918f09f66eeb` vs `7e8e3b73e747` | `asserted_not_measured` | patch |
 | `macos-metal-apple-850a91233555` | `windows-d3d11-intel-79dfeb5b4f99` | `53ec118e9c72` vs `be8acf335bdc` | `102f6613b44a` vs `e695c2da65d4` | equal | `asserted_not_measured` | no |
 | `macos-metal-apple-850a91233555` | `windows-d3d11-nvidia-0947761dfbe9` | `53ec118e9c72` vs `ff87541425e2` | `102f6613b44a` vs `a34893d0a4a3` | `918f09f66eeb` vs `a895ab2a1a0a` | `asserted_not_measured` | major |
+| `windows-d3d11-intel-79dfeb5b4f99` | `linux-swiftshader-google-6922d61bab83` | `be8acf335bdc` vs `6087e24b280c` | `e695c2da65d4` vs `9b8362e1bb54` | equal | `asserted_not_measured` | patch |
 | `windows-d3d11-intel-79dfeb5b4f99` | `linux-vulkan-nvidia-adf287b8f0ee` | `be8acf335bdc` vs `2327f6ae5fcb` | `e695c2da65d4` vs `c7aa8b52c012` | `918f09f66eeb` vs `7e8e3b73e747` | `asserted_not_measured` | patch |
 | `windows-d3d11-intel-79dfeb5b4f99` | `macos-metal-apple-850a91233555` | `be8acf335bdc` vs `53ec118e9c72` | `e695c2da65d4` vs `102f6613b44a` | equal | `asserted_not_measured` | no |
 | `windows-d3d11-intel-79dfeb5b4f99` | `windows-d3d11-nvidia-0947761dfbe9` | `be8acf335bdc` vs `ff87541425e2` | `e695c2da65d4` vs `a34893d0a4a3` | `918f09f66eeb` vs `a895ab2a1a0a` | `asserted_not_measured` | major |
+| `windows-d3d11-nvidia-0947761dfbe9` | `linux-swiftshader-google-6922d61bab83` | `ff87541425e2` vs `6087e24b280c` | `a34893d0a4a3` vs `9b8362e1bb54` | `a895ab2a1a0a` vs `918f09f66eeb` | `asserted_not_measured` | major |
 | `windows-d3d11-nvidia-0947761dfbe9` | `linux-vulkan-nvidia-adf287b8f0ee` | `ff87541425e2` vs `2327f6ae5fcb` | `a34893d0a4a3` vs `c7aa8b52c012` | `a895ab2a1a0a` vs `7e8e3b73e747` | `asserted_not_measured` | major |
 | `windows-d3d11-nvidia-0947761dfbe9` | `macos-metal-apple-850a91233555` | `ff87541425e2` vs `53ec118e9c72` | `a34893d0a4a3` vs `102f6613b44a` | `a895ab2a1a0a` vs `918f09f66eeb` | `asserted_not_measured` | major |
 | `windows-d3d11-nvidia-0947761dfbe9` | `windows-d3d11-intel-79dfeb5b4f99` | `ff87541425e2` vs `be8acf335bdc` | `a34893d0a4a3` vs `e695c2da65d4` | `a895ab2a1a0a` vs `918f09f66eeb` | `asserted_not_measured` | major |
@@ -119,12 +140,45 @@ Table `resources/profiles/dispersion/gpu_identity.json`, conditioned on `anchor`
 
 | anchor id | options offered | every offered string measured | measured members not offered |
 |---|---|---|---|
-| `linux-vulkan-nvidia-adf287b8f0ee` | 4: NVIDIA GeForce RTX 3090, NVIDIA GeForce RTX 4070 Ti SUPER, NVIDIA GeForce RTX 4080 SUPER, NVIDIA RTX PRO 4000 Blackwell | yes | none |
-| `macos-metal-apple-850a91233555` | 1: Apple M4 Max | yes | none |
-| `windows-d3d11-intel-79dfeb5b4f99` | 1: Intel(R) UHD Graphics 630 | yes | none |
-| `windows-d3d11-nvidia-0947761dfbe9` | 2: NVIDIA GeForce RTX 3070 Ti, NVIDIA RTX A4500 | yes | none |
+| `linux-swiftshader-google-6922d61bab83` | 1: SwiftShader Device (Subzero) | yes | none |
+| `linux-vulkan-nvidia-adf287b8f0ee` | 11: NVIDIA GeForce RTX 3090, NVIDIA GeForce RTX 4070 Ti SUPER, NVIDIA GeForce RTX 4080 SUPER, NVIDIA RTX PRO 4000 Blackwell | **no: vulkan-nvidia-geforce-rtx-4060, vulkan-nvidia-geforce-rtx-4060-ti, vulkan-nvidia-geforce-rtx-4070, vulkan-nvidia-geforce-rtx-4070-super, vulkan-nvidia-geforce-rtx-4070-ti, vulkan-nvidia-geforce-rtx-4080, vulkan-nvidia-geforce-rtx-4090** | none |
+| `macos-metal-apple-850a91233555` | 12: Apple M4 Max | **no: metal-apple-m1, metal-apple-m1-max, metal-apple-m1-pro, metal-apple-m2, metal-apple-m2-max, metal-apple-m2-pro, metal-apple-m3, metal-apple-m3-max, metal-apple-m3-pro, metal-apple-m4, metal-apple-m4-pro** | none |
+| `windows-d3d11-intel-79dfeb5b4f99` | 6: Intel(R) UHD Graphics 630 | **no: d3d11-intel-uhd-graphics-630-3e91, d3d11-intel-uhd-graphics-630-3e92, d3d11-intel-uhd-graphics-630-3e98, d3d11-intel-uhd-graphics-630-3e9b, d3d11-intel-uhd-graphics-630-9bc5** | none |
+| `windows-d3d11-nvidia-0947761dfbe9` | 9: NVIDIA GeForce RTX 3070 Ti, NVIDIA RTX A4500 | **no: d3d11-nvidia-geforce-rtx-3060-ti, d3d11-nvidia-geforce-rtx-3070, d3d11-nvidia-geforce-rtx-3080, d3d11-nvidia-geforce-rtx-3080-ti, d3d11-nvidia-geforce-rtx-3090, d3d11-nvidia-rtx-a2000, d3d11-nvidia-rtx-a4000** | none |
 
-No offer in the table names an identity string these anchors did not measure.
+**Unbacked offers:**
+
+- anchor linux-vulkan-nvidia-adf287b8f0ee offers unmeasured identity 'vulkan-nvidia-geforce-rtx-4060'
+- anchor linux-vulkan-nvidia-adf287b8f0ee offers unmeasured identity 'vulkan-nvidia-geforce-rtx-4060-ti'
+- anchor linux-vulkan-nvidia-adf287b8f0ee offers unmeasured identity 'vulkan-nvidia-geforce-rtx-4070'
+- anchor linux-vulkan-nvidia-adf287b8f0ee offers unmeasured identity 'vulkan-nvidia-geforce-rtx-4070-super'
+- anchor linux-vulkan-nvidia-adf287b8f0ee offers unmeasured identity 'vulkan-nvidia-geforce-rtx-4070-ti'
+- anchor linux-vulkan-nvidia-adf287b8f0ee offers unmeasured identity 'vulkan-nvidia-geforce-rtx-4080'
+- anchor linux-vulkan-nvidia-adf287b8f0ee offers unmeasured identity 'vulkan-nvidia-geforce-rtx-4090'
+- anchor macos-metal-apple-850a91233555 offers unmeasured identity 'metal-apple-m1'
+- anchor macos-metal-apple-850a91233555 offers unmeasured identity 'metal-apple-m1-pro'
+- anchor macos-metal-apple-850a91233555 offers unmeasured identity 'metal-apple-m1-max'
+- anchor macos-metal-apple-850a91233555 offers unmeasured identity 'metal-apple-m2'
+- anchor macos-metal-apple-850a91233555 offers unmeasured identity 'metal-apple-m2-pro'
+- anchor macos-metal-apple-850a91233555 offers unmeasured identity 'metal-apple-m2-max'
+- anchor macos-metal-apple-850a91233555 offers unmeasured identity 'metal-apple-m3'
+- anchor macos-metal-apple-850a91233555 offers unmeasured identity 'metal-apple-m3-pro'
+- anchor macos-metal-apple-850a91233555 offers unmeasured identity 'metal-apple-m3-max'
+- anchor macos-metal-apple-850a91233555 offers unmeasured identity 'metal-apple-m4'
+- anchor macos-metal-apple-850a91233555 offers unmeasured identity 'metal-apple-m4-pro'
+- anchor windows-d3d11-intel-79dfeb5b4f99 offers unmeasured identity 'd3d11-intel-uhd-graphics-630-9bc5'
+- anchor windows-d3d11-intel-79dfeb5b4f99 offers unmeasured identity 'd3d11-intel-uhd-graphics-630-3e98'
+- anchor windows-d3d11-intel-79dfeb5b4f99 offers unmeasured identity 'd3d11-intel-uhd-graphics-630-3e92'
+- anchor windows-d3d11-intel-79dfeb5b4f99 offers unmeasured identity 'd3d11-intel-uhd-graphics-630-3e91'
+- anchor windows-d3d11-intel-79dfeb5b4f99 offers unmeasured identity 'd3d11-intel-uhd-graphics-630-3e9b'
+- anchor windows-d3d11-nvidia-0947761dfbe9 offers unmeasured identity 'd3d11-nvidia-geforce-rtx-3060-ti'
+- anchor windows-d3d11-nvidia-0947761dfbe9 offers unmeasured identity 'd3d11-nvidia-geforce-rtx-3070'
+- anchor windows-d3d11-nvidia-0947761dfbe9 offers unmeasured identity 'd3d11-nvidia-geforce-rtx-3080'
+- anchor windows-d3d11-nvidia-0947761dfbe9 offers unmeasured identity 'd3d11-nvidia-geforce-rtx-3080-ti'
+- anchor windows-d3d11-nvidia-0947761dfbe9 offers unmeasured identity 'd3d11-nvidia-geforce-rtx-3090'
+- anchor windows-d3d11-nvidia-0947761dfbe9 offers unmeasured identity 'd3d11-nvidia-rtx-a2000'
+- anchor windows-d3d11-nvidia-0947761dfbe9 offers unmeasured identity 'd3d11-nvidia-rtx-a4000'
+
 
 ### The retired family catalogue
 

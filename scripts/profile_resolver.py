@@ -55,12 +55,15 @@ _PLATFORM_ALIASES = {
 AXES = (
     "os_release",
     "gpu_identity",
+    "machine_class",
     "cpu",
     "memory",
     "panel",
     "furniture",
     "font_packs",
     "media_topology",
+    "network",
+    "battery",
     "voices",
 )
 SELECTIONS = {"single", "core-plus-subset"}
@@ -96,6 +99,10 @@ _PROFILE_TOP_LEVEL = {
     "media",
     "keyboard",
     "fonts",
+    # navigator.connection and navigator.getBattery, served by patches 0088 and
+    # 0089. config/profile.schema.json defines both.
+    "network",
+    "battery",
 }
 _UNION_PATHS = frozenset({("fonts", "enumeration_allowlist")})
 _BUILD_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)\.(\d+)$")
@@ -1083,8 +1090,9 @@ def _resolve_internal(config: Mapping[str, Any] | None = None, **overrides: Any)
         warnings.append(f"anchor {anchor['id']}: {anchor['build_caveat']}")
     if anchor["rotation_status"] == "single-member":
         warnings.append(
-            f"anchor {anchor['id']} has one measured member, so no identity rotation is "
-            "offered on its capability cluster"
+            f"anchor {anchor['id']} has one measured member, so every identity offered on its "
+            "capability cluster beyond that one is a registered catalogue value rather than a "
+            "measurement; each such option states in its note what is measured and what is derived"
         )
 
     parents: dict[str, Any] = {"platform": platform, "anchor": anchor["id"]}
@@ -1122,16 +1130,35 @@ def _resolve_internal(config: Mapping[str, Any] | None = None, **overrides: Any)
             "evidence": sorted({option["evidence"] for option in picked}),
             "offered": len(options),
         }
-        if axis in ("os_release", "panel"):
+        # Every single-selection axis becomes a parent, exactly as `Compose`
+        # writes `resolved[axis.axis]` for each of them. A child axis keyed on
+        # one of these (machine_class on gpu_identity, panel on machine_class)
+        # would otherwise miss.
+        if table["selection"] == "single":
             parents[axis] = picked[0]["id"]
 
         if axis == "gpu_identity":
             # An anchor is atomic. Merge its capability cluster now that the
             # member is known, so the identity strings are backed by the tables
             # that silicon actually produced instead of the host's own.
+            identity_renderer = (picked[0]["value"].get("gpu") or {}).get("unmasked_renderer")
+            block = picked[0].get("member")
+            if isinstance(block, Mapping):
+                # A registered identity is not a measured member. Its `member`
+                # block names the measured member whose adapter it carries,
+                # which is what scripts/generate-dispersion-tables.py folds into
+                # the compiled member table. With no donor named, WebGPU stays
+                # host-inherited rather than borrowing a sibling's.
+                donor = block.get("webgpu_measured_on")
+                identity_renderer = None
+                for member in anchor_records[anchor["id"]]["record"].get("members", []):
+                    if donor and member.get("device") == donor:
+                        identity_renderer = (
+                            (member.get("identity") or {}).get("webgl1") or {}
+                        ).get("unmaskedRenderer")
+                        break
             layer = _anchor_capability_layer(
-                anchor_records[anchor["id"]]["record"],
-                (picked[0]["value"].get("gpu") or {}).get("unmasked_renderer"),
+                anchor_records[anchor["id"]]["record"], identity_renderer,
             )
             profile = _merge(profile, layer)
             chosen["anchor"] = {

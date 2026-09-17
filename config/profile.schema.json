@@ -703,7 +703,7 @@
         },
         "enumeration_allowlist": {
           "type": "array",
-          "description": "The exact family set the claimed machine enumerates. Subtractive and always servable: the emitter removes families this host has and the claimed device does not. Addition needs the font files, so a family the host lacks is served only when it is provisioned through provisioned_directory and is otherwise reported as a limitation rather than enumerated as present. Installed fonts arrive in bundles, so this list is composed from whole packs and never from individually drawn families, which would be synthesis and a tell. Evidence class: physical-ground-truth for a measured platform core set, catalogue-value for a published software bundle.",
+          "description": "The exact family set the claimed machine enumerates. Subtractive: the emitter removes families this host has and the claimed device does not, and never adds one. A family the host genuinely lacks therefore cannot be made to measure, whatever this list says. Gating an absent family on a provisioned font directory is superseded and that field is gone: the browser assumes the families in an optional pack are installed, and tells the user to install them when they are not. That is the opposite of the memory rule and consistently so. Memory is clamped to the host because a user cannot install RAM to make a claim true, so an unbacked claim is falsifiable by allocation; fonts are assumed because a user can install them, so the honest move is to tell them to. The distinguishing factor is whether the user can change the host, not how loud the tell is. Assuming provisioning means we stop checking, not that we start claiming absent faces. Installed fonts arrive in bundles, so this list is composed from whole packs and never from individually drawn families, which would be synthesis and a tell. Evidence class: physical-ground-truth for a measured platform core set, catalogue-value for a published software bundle.",
           "items": {
             "type": "string",
             "minLength": 1,
@@ -711,12 +711,6 @@
           },
           "uniqueItems": true,
           "maxItems": 4096
-        },
-        "provisioned_directory": {
-          "type": "string",
-          "description": "Directory of font files provisioned into the profile, which the loader points the platform font backend at. The mechanism is measured on Linux: running the browser with FONTCONFIG_FILE set to a config naming one directory made it enumerate exactly the families in that directory, and a config whose font path excluded the system directories made it enumerate none. This is what makes addition possible at all; without it enumeration_allowlist can only remove. Evidence class: host-inherited when absent.",
-          "minLength": 1,
-          "maxLength": 4096
         }
       }
     },

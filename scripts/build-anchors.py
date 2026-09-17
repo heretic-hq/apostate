@@ -81,7 +81,8 @@ PARAMETER_IDENTITY = {"RENDERER": "renderer",
 GROUPING_DIGESTS = ("webgl1_caps_sha256", "webgl2_caps_sha256",
                     "webgl1_pixels_sha256", "webgl2_pixels_sha256")
 
-BACKENDS = (("Vulkan", "ANGLE/Vulkan", "vulkan"),
+BACKENDS = (("SwiftShader", "ANGLE/SwiftShader", "swiftshader"),
+            ("Vulkan", "ANGLE/Vulkan", "vulkan"),
             ("Direct3D11", "ANGLE/D3D11", "d3d11"),
             ("D3D11", "ANGLE/D3D11", "d3d11"),
             ("Metal Renderer", "ANGLE/Metal", "metal"),
@@ -112,7 +113,7 @@ def load_import_helpers():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     for name in ("classify_build", "full_version", "software_marker",
-                 "SOFTWARE_RENDERERS"):
+                 "SOFTWARE_RENDERERS", "SOFTWARE_ADMISSION_NOTE"):
         if not hasattr(module, name):
             die("%s does not export %s" % (IMPORT_SCRIPT.name, name))
     return module
@@ -261,9 +262,18 @@ def measure(path, helpers, pin):
     canvas = probe(capture, "canvas.2d") or {}
     renderer = webgl1.get("unmaskedRenderer")
     marker = helpers.software_marker(renderer)
-    if marker:
-        die("%s is admitted but its renderer %r is the software rasteriser %r; "
-            "an anchor may never be built from it" % (path.name, renderer, marker))
+    # The admission door already decided this. A software capture admitted with
+    # --allow-software-renderer carries SOFTWARE_ADMISSION_NOTE in its reason,
+    # which means its identity strings are the rasteriser's own and there is no
+    # hardware claim to misattribute; anything else still refuses, because that
+    # is the llvmpipe-named-as-a-Tesla case the refusal exists for. Reading the
+    # decision rather than re-deriving it keeps one owner for the policy.
+    software = bool(marker)
+    if software and helpers.SOFTWARE_ADMISSION_NOTE not in (record.get("reason") or ""):
+        die("%s is admitted but its renderer %r is the software rasteriser %r and "
+            "its admission record does not carry the self-consistent-software "
+            "allowance; an anchor may not be built from it"
+            % (path.name, renderer, marker))
 
     high = (probe(capture, "navigator.userAgentData") or {}).get("high") or {}
     version = helpers.full_version(capture)
@@ -297,6 +307,7 @@ def measure(path, helpers, pin):
         "platform": high.get("platform"),
         "backend": backend,
         "backend_slug": backend_slug,
+        "software": software,
         "vendor": vendor,
         "vendor_slug": vendor_slug,
         "device": device_of(renderer),
@@ -355,6 +366,48 @@ CANVAS_NOTE = (
 )
 
 
+SOFTWARE_ANCHOR_POLICY = {
+    "why_this_anchor_exists": (
+        "A host with no usable GPU device renders through a software rasteriser. "
+        "Without a software-backend anchor the compositor finds no servable "
+        "cluster and the launch inherits the host entirely, losing timezone, "
+        "screen, locale and font composition as well as the GPU. This anchor is "
+        "the coherent alternative: its identity strings are the rasteriser's own, "
+        "so identity and capability agree."
+    ),
+    "why_the_refusal_exists_and_why_it_does_not_apply": (
+        "import-capture.py refuses a software-rasteriser capture by default, and "
+        "so does this script, because a capture that NAMES a discrete GPU while "
+        "MEASURING a rasteriser would become evidence for that GPU. The two "
+        "llvmpipe Tesla captures in probe-host-survey.json are exactly that. A "
+        "capture whose identity strings are the rasteriser's own has nothing to "
+        "misattribute, so it is admissible with --allow-software-renderer, which "
+        "records the allowance in the admission reason. This script reads that "
+        "decision instead of re-deriving it."
+    ),
+    "identity_agrees_with_capability": (
+        "The unmasked renderer string names the rasteriser and the capability "
+        "cluster is the one that string measured. Nothing about this anchor "
+        "claims hardware, and its evidence_class is compatibility-capture rather "
+        "than physical-ground-truth for that reason."
+    ),
+    "not_rotatable": (
+        "A software rasteriser's renderer string is the only identity its "
+        "capability cluster ever produced. No other identity may be registered "
+        "on it in resources/profiles/dispersion/gpu_identity.json."
+    ),
+    "closes_a_fork_specific_tell": (
+        "Patches 0027 and 0038 raise this fork's own SwiftShader limits above "
+        "stock's so that a profile's claim can pass the 0026 clamp, and no stock "
+        "Chromium build reports those raised values. Serving this anchor claims "
+        "the stock figures, and the clamp only ever reduces, so the stock figures "
+        "reach the page. Claiming this cluster therefore makes the fork's "
+        "software renderer indistinguishable from stock's instead of uniquely "
+        "identifiable."
+    ),
+}
+
+
 def build_anchor(members, pin):
     members = sorted(members, key=lambda m: m["capture_name"])
     first = members[0]
@@ -363,6 +416,11 @@ def build_anchor(members, pin):
     anchor_id = "%s-%s-%s-%s" % (
         PLATFORM_SLUGS.get(first["platform"], (first["platform"] or "unknown").lower()),
         first["backend_slug"], first["vendor_slug"], anchor_key[:12])
+
+    software = any(m["software"] for m in members)
+    if software and not all(m["software"] for m in members):
+        die("anchor %s mixes software and hardware captures; a rasteriser and a "
+            "GPU are not one capability cluster" % anchor_id)
 
     backends = sorted({m["backend"] for m in members})
     platforms = sorted({m["platform"] for m in members})
@@ -406,7 +464,11 @@ def build_anchor(members, pin):
         "backend": first["backend"],
         "vendor": first["vendor"],
         "evidence_tier": "T0",
-        "evidence_class": "physical-ground-truth",
+        # A software anchor is a real measurement of a real machine, but it is a
+        # machine only a GPU-less host is, so it is not ground truth for any
+        # hardware claim. compatibility-capture says exactly that.
+        "evidence_class": ("compatibility-capture" if software
+                           else "physical-ground-truth"),
         "generated_by": "scripts/build-anchors.py",
         "release_pin": pin,
         "browser_versions": versions,
@@ -468,6 +530,8 @@ def build_anchor(members, pin):
             "different patch. Version-bearing fields will differ from a "
             "pinned-build reference and a V3 run must report that separately."
             % ("/".join(versions), pin))
+    if software:
+        anchor["software_anchor_policy"] = dict(SOFTWARE_ANCHOR_POLICY)
     return anchor
 
 

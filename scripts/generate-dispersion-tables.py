@@ -361,6 +361,14 @@ def parse_axis(path: Path) -> dict:
             if not isinstance(value, dict):
                 die(path, f"option {option_id!r}: `value` must be a profile-fragment object")
 
+            # A GPU identity that is not a measured anchor member registers
+            # itself here. `register_identities` validates the block and folds
+            # it into the anchor's member table; every other axis must not
+            # carry one.
+            member = option.get("member")
+            if member is not None and not isinstance(member, dict):
+                die(path, f"option {option_id!r}: `member` must be an object")
+
             options.append(
                 {
                     "id": option_id,
@@ -370,6 +378,7 @@ def parse_axis(path: Path) -> dict:
                     "pack_kind": pack_kind,
                     "requires": parse_requires(path, option_id, option.get("requires")),
                     "value": value,
+                    "member": member,
                 }
             )
 
@@ -615,6 +624,12 @@ def parse_anchor(path: Path) -> dict | None:
         members.append(
             {
                 "label": member.get("label", "") if isinstance(member.get("label"), str) else "",
+                # The corpus card name. Not emitted to C++; it is what a
+                # registered identity names in `member.webgpu_measured_on`,
+                # because a capture label like "REAL-nvidia-4070ti-linux" is
+                # not something a catalogue author should have to know.
+                "device": member.get("device", "") if isinstance(member.get("device"), str) else "",
+                "measured": True,
                 "vendor": vendor,
                 "renderer": renderer,
                 # Per member, not per anchor: WebGPU is not uniform inside an
@@ -650,6 +665,215 @@ def parse_anchor(path: Path) -> dict | None:
         "members": members,
         "value": anchor_gl_layer(path, anchor_id, cluster),
     }
+
+def register_identities(axes: list[dict], anchors: list[dict]) -> int:
+    """Fold catalogue-registered GPU identities into their anchor's members.
+
+    `Compose` checks after the draw that the identity it drew really is a member
+    of the resolved anchor, and `LOG(FATAL)`s when it is not. The member is also
+    where WebGPU comes from. So the offered identity list and the compiled member
+    table cannot be two separate things: `corpus/anchors/*.json` is what was
+    measured, and this is what the catalogue offers on top of it.
+
+    An option whose `(unmasked_vendor, unmasked_renderer)` pair is a measured
+    member needs nothing. Any other option must register itself with a `member`
+    block carrying the label the runtime reports and, when it carries a sibling's
+    measured WebGPU adapter, `webgpu_measured_on` naming that member's device.
+    Anything else is a build failure here instead of a crash at launch.
+
+    Returns the number of identities registered.
+    """
+    by_id = {anchor["id"]: anchor for anchor in anchors}
+    registered = 0
+
+    for axis in axes:
+        if axis["axis"] != "gpu_identity":
+            for option_set in axis["option_sets"]:
+                for option in option_set["options"]:
+                    if option["member"] is not None:
+                        raise GeneratorError(
+                            f"axis {axis['axis']!r} option {option['id']!r} carries a "
+                            "`member` block; only gpu_identity registers anchor members"
+                        )
+            continue
+
+        for option_set in axis["option_sets"]:
+            for option in option_set["options"]:
+                requires = option["requires"] or {}
+                anchor_id = requires.get("anchor")
+                if not anchor_id:
+                    raise GeneratorError(
+                        f"gpu_identity option {option['id']!r} has no `requires.anchor`; "
+                        "the runtime servability filter keeps an identity only when its "
+                        "requirement names the resolved anchor, so an option without one "
+                        "is never servable"
+                    )
+                anchor = by_id.get(anchor_id)
+                if anchor is None:
+                    raise GeneratorError(
+                        f"gpu_identity option {option['id']!r} requires anchor "
+                        f"{anchor_id!r}, which is not in the corpus"
+                    )
+
+                gpu = option["value"].get("gpu")
+                if not isinstance(gpu, dict):
+                    raise GeneratorError(
+                        f"gpu_identity option {option['id']!r} has no `gpu` fragment"
+                    )
+                vendor = gpu.get("unmasked_vendor")
+                renderer = gpu.get("unmasked_renderer")
+                if not isinstance(vendor, str) or not isinstance(renderer, str):
+                    raise GeneratorError(
+                        f"gpu_identity option {option['id']!r} must carry both "
+                        "`gpu.unmasked_vendor` and `gpu.unmasked_renderer`"
+                    )
+
+                measured = next(
+                    (
+                        member
+                        for member in anchor["members"]
+                        if member["measured"]
+                        and member["vendor"] == vendor
+                        and member["renderer"] == renderer
+                    ),
+                    None,
+                )
+                block = option["member"]
+
+                if measured is not None:
+                    if block is not None:
+                        raise GeneratorError(
+                            f"gpu_identity option {option['id']!r} is a measured member of "
+                            f"{anchor_id!r} and must not also register one"
+                        )
+                    # The anchor's own class, not a fixed one: the software
+                    # anchor is a real measurement of a machine that claims no
+                    # hardware, so it is compatibility-capture, and an identity
+                    # drawn on it must not claim more than the cluster it sits on.
+                    if option["evidence"] != anchor["evidence"]:
+                        raise GeneratorError(
+                            f"gpu_identity option {option['id']!r} names a measured member "
+                            f"of {anchor_id!r} but claims evidence {option['evidence']!r} "
+                            f"where the anchor is {anchor['evidence']!r}"
+                        )
+                    continue
+
+                if block is None:
+                    raise GeneratorError(
+                        f"gpu_identity option {option['id']!r} offers a renderer string that "
+                        f"anchor {anchor_id!r} did not measure and does not register it. The "
+                        "runtime would LOG(FATAL) on this draw. Add a `member` block, or "
+                        "remove the option"
+                    )
+                if option["evidence"] == "physical-ground-truth":
+                    raise GeneratorError(
+                        f"gpu_identity option {option['id']!r} registers an unmeasured "
+                        "identity and may not claim physical-ground-truth"
+                    )
+                label = block.get("label")
+                if not isinstance(label, str) or not label:
+                    raise GeneratorError(
+                        f"gpu_identity option {option['id']!r}: `member.label` must be a "
+                        "non-empty string; it is what --fingerprint-explain reports as the "
+                        "WebGPU source"
+                    )
+                unknown = sorted(set(block) - {"label", "webgpu_measured_on"})
+                if unknown:
+                    raise GeneratorError(
+                        f"gpu_identity option {option['id']!r}: unrecognised `member` keys "
+                        f"{unknown}"
+                    )
+
+                webgpu: dict = {}
+                source = block.get("webgpu_measured_on")
+                if source is not None:
+                    if not isinstance(source, str) or not source:
+                        raise GeneratorError(
+                            f"gpu_identity option {option['id']!r}: "
+                            "`member.webgpu_measured_on` must be a non-empty string"
+                        )
+                    donor = next(
+                        (
+                            member
+                            for member in anchor["members"]
+                            if member["measured"] and member["device"] == source
+                        ),
+                        None,
+                    )
+                    if donor is None:
+                        raise GeneratorError(
+                            f"gpu_identity option {option['id']!r}: "
+                            f"`member.webgpu_measured_on` names {source!r}, which is not a "
+                            f"measured member of {anchor_id!r}"
+                        )
+                    if not donor["webgpu"]:
+                        raise GeneratorError(
+                            f"gpu_identity option {option['id']!r}: "
+                            f"`member.webgpu_measured_on` names {source!r}, which measured no "
+                            "WebGPU adapter. Omit the field: WebGPU then stays host-inherited "
+                            "instead of claiming a cluster nothing measured"
+                        )
+                    webgpu = donor["webgpu"]
+
+                anchor["members"].append(
+                    {
+                        "label": label,
+                        "device": label,
+                        "measured": False,
+                        "vendor": vendor,
+                        "renderer": renderer,
+                        "webgpu": webgpu,
+                    }
+                )
+                registered += 1
+
+    for anchor in anchors:
+        anchor["members"].sort(key=lambda m: (m["vendor"], m["renderer"], m["label"]))
+
+    return registered
+
+
+def check_conditioning(axes: list[dict]) -> None:
+    """Every conditioned key must name an option its parent axis can resolve.
+
+    `FindOptionSet` matching is exact and total, and a miss is `LOG(FATAL)`. So a
+    key value that no parent option produces is dead data, and a parent option
+    with no matching set is a crash waiting for the seed that draws it. Both are
+    build failures.
+
+    Only parents that are themselves dispersion axes can be checked here:
+    `platform`, `anchor` and `languages` are resolved by the compositor from the
+    host, the corpus and the locale policy.
+    """
+    option_ids = {
+        axis["axis"]: {
+            option["id"]
+            for option_set in axis["option_sets"]
+            for option in option_set["options"]
+        }
+        for axis in axes
+    }
+
+    for axis in axes:
+        for parent in axis["conditioned_on"]:
+            if parent not in option_ids:
+                continue
+            used = {
+                option_set["key"][parent] for option_set in axis["option_sets"]
+            }
+            unknown = sorted(used - option_ids[parent])
+            if unknown:
+                raise GeneratorError(
+                    f"axis {axis['axis']!r} is conditioned on {parent!r} and has option "
+                    f"sets keyed on {unknown}, which {parent!r} cannot resolve"
+                )
+            missing = sorted(option_ids[parent] - used)
+            if missing:
+                raise GeneratorError(
+                    f"axis {axis['axis']!r} is conditioned on {parent!r} but has no option "
+                    f"set for {missing}. Matching is exact and total, so the compositor "
+                    "would abort on any seed that draws one of those"
+                )
 
 
 # --------------------------------------------------------------------------
@@ -1182,6 +1406,11 @@ def main(argv: list[str] | None = None) -> int:
 
         # Axis order in the generated table is the §5 resolution order, and an
         # axis the order does not name is a table the compositor cannot place.
+        #
+        # `machine_class` sits directly after `gpu_identity` because it turns one
+        # chip into one machine, and `cpu`, `memory`, `panel`, `media_topology`
+        # and `battery` all hang off that decision. `network` is unconditioned
+        # and only has to land before the profile is serialised.
         order = {
             name: index
             for index, name in enumerate(
@@ -1189,12 +1418,15 @@ def main(argv: list[str] | None = None) -> int:
                     "os_release",
                     "anchor",
                     "gpu_identity",
+                    "machine_class",
                     "cpu",
                     "memory",
                     "panel",
                     "furniture",
                     "font_packs",
                     "media_topology",
+                    "network",
+                    "battery",
                     "voices",
                     "locale",
                 ]
@@ -1213,6 +1445,9 @@ def main(argv: list[str] | None = None) -> int:
                 "would couple two axes to the same substream"
             )
         axes.sort(key=lambda axis: order[axis["axis"]])
+
+        registered = register_identities(axes, anchors)
+        check_conditioning(axes)
 
         meta["catalogue_digest"] = catalogue_digest(inputs)
         header = emit_header(meta)
@@ -1235,8 +1470,12 @@ def main(argv: list[str] | None = None) -> int:
         deps = " ".join(str(path).replace(" ", "\\ ") for path in sorted(set(read_paths)))
         args.depfile.write_text(f"{args.out_cc}: {deps}\n", encoding="utf-8")
 
+    measured = sum(
+        1 for anchor in anchors for member in anchor["members"] if member["measured"]
+    )
     print(
         f"generate-dispersion-tables: {len(axes)} axes, {len(anchors)} anchors, "
+        f"{measured} measured members, {registered} registered identities, "
         f"catalogue v{meta['catalogue_version']} schema v{meta['profile_schema_version']} "
         f"digest {meta['catalogue_digest'][:12]}",
         file=sys.stderr,

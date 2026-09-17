@@ -56,6 +56,12 @@ SERIES = ROOT / "patches" / "series"
 # cleanly but have never been compiled, so a row implemented by one of them can
 # record V0 and no more. Move this line when a build lands, not when a patch
 # lands: series membership is not a build.
+#
+# V1 sits between the two and is per-patch rather than per-prefix: a row may
+# record V1 once EVERY translation unit its patch touches has compiled against
+# the pinned build dir (scripts/checkfile.sh). A partially compiled patch is
+# still V0 — one green file does not establish that the patch builds — so V1 is
+# recorded from the compile gate's per-patch result, not inferred from a count.
 BUILT_THROUGH = "0083-loader-composes-when-no-profile-given.patch"
 
 
@@ -345,8 +351,10 @@ def reconcile(root: pathlib.Path, full: bool):
     for c in bad_status:
         print(f"    - {c}")
 
-    print(f"  {len(unclaimed)} of {len(series)} patch(es) in patches/series implement no ledger row"
+    print(f"  {len(unclaimed)} of {len(series)} patch(es) in patches/series are named by no row's patch_id"
           + (f", {len(unclaimed_unbuilt)} of them after the built prefix:" if unclaimed_unbuilt else ":"))
+    print("    (patch_id holds one entry while the relation is many-to-many, so a patch that amends a row "
+          "already pointing at an earlier patch, or that deliberately has no observable, counts here)")
     for p in (unclaimed if full else unclaimed_unbuilt):
         print(f"    - {p}")
     if not full and len(unclaimed) > len(unclaimed_unbuilt):

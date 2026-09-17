@@ -94,6 +94,29 @@ SOFTWARE_RENDERERS = (
     "Microsoft Remote Display", "Mesa OffScreen",
 )
 
+# The one case in which a software-rasteriser capture is admissible.
+#
+# The refusal below exists to stop a capture that NAMES a discrete GPU while
+# MEASURING a rasteriser from becoming evidence for that GPU: the two llvmpipe
+# Tesla captures in corpus/anchors/probe-host-survey.json are exactly that, and
+# every WebGL digest they produced belongs to llvmpipe, not to a P100 or a T4.
+#
+# It is the wrong answer for a capture whose identity strings are the software
+# renderer's OWN. There is no misattribution to prevent there, and a host with
+# no usable GPU device really does render through SwiftShader, so that machine
+# is claimable -- by exactly the host that is one. Without such a capture a
+# GPU-less host has no servable anchor at all and inherits every surface, which
+# is worse for the user than a coherent software identity.
+#
+# The allowance is recorded in the admission reason rather than inferred later,
+# so scripts/build-anchors.py can tell the two cases apart by reading the
+# decision instead of re-litigating it.
+SOFTWARE_ADMISSION_NOTE = (
+    "admitted as a self-consistent software capture: the renderer string names "
+    "the software rasteriser itself, so identity and capability agree and there "
+    "is no hardware claim to misattribute"
+)
+
 BINDINGS = ("release", "same-major", "off-major")
 
 
@@ -292,7 +315,9 @@ def admit(raw, name, *, gate, pin, collector_sha256, allow_off_major,
     if marker and require_hardware_renderer:
         raise ImportRefused(
             "webgl1 renderer %r is the software or virtual rasteriser %r; this "
-            "is a real measurement of a machine no profile may claim"
+            "is a real measurement of a machine no profile may claim. Pass "
+            "--allow-software-renderer only when the renderer string names the "
+            "rasteriser itself, which is the SOFTWARE_ADMISSION_NOTE case"
             % (renderer, marker))
 
     taken = basic_utc(context.get("taken_at"))
@@ -306,6 +331,8 @@ def admit(raw, name, *, gate, pin, collector_sha256, allow_off_major,
             % (name, match.group(1), context.get("taken_at"), taken))
 
     reason = "capture passed admission checks"
+    if marker:
+        reason += "; " + SOFTWARE_ADMISSION_NOTE + (" (%s)" % marker)
     if binding != "release":
         reason += ("; browser build %s differs from release pin %s (%s) and is "
                    "not a valid V3 target for the pinned build"
@@ -345,7 +372,10 @@ def import_one(entry, args, gate, pin, collector_sha256):
 
     capture, raw_sha256, binding, reason = admit(
         raw, name, gate=gate, pin=pin, collector_sha256=collector_sha256,
-        allow_off_major=bool(entry.get("allow_off_major_build")) or args.allow_off_major_build)
+        allow_off_major=bool(entry.get("allow_off_major_build")) or args.allow_off_major_build,
+        require_hardware_renderer=not (
+            bool(entry.get("allow_software_renderer"))
+            or args.allow_software_renderer))
 
     stem = pathlib.PurePosixPath(source).stem
     if re.fullmatch(r"[0-9a-f]{64}", stem) and stem != raw_sha256:
@@ -415,6 +445,9 @@ def main():
                     help="capture directory on the probe host")
     ap.add_argument("--allow-off-major-build", action="store_true",
                     help="admit a capture from a different Chromium major")
+    ap.add_argument("--allow-software-renderer", action="store_true",
+                    help="admit a capture whose renderer string names the "
+                         "software rasteriser itself; see SOFTWARE_ADMISSION_NOTE")
     ap.add_argument("--no-remote-admission", action="store_true",
                     help="skip the receiver's corroborating decision")
     args = ap.parse_args()

@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       target:
-        description: "Build target: macos-arm64 | linux-x64 | linux-arm64"
+        description: "Build target: macos-arm64 | linux-x64 | linux-arm64 | windows-x64"
         required: true
         type: string
       runner_labels:

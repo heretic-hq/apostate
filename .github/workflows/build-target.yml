@@ -78,6 +78,14 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
           persist-credentials: false
+      # The runner image carries the Windows SDK without its Debugging Tools
+      # feature, which vs_toolchain.py treats as mandatory. Installs it from a
+      # pinned 10.0.26100 installer and asserts no other SDK version appeared.
+      # Idempotent, so it costs nothing once the image ships the feature.
+      - name: Provision Windows debugging tools
+        if: ${{ startsWith(inputs.target, 'windows-') }}
+        shell: bash
+        run: bash scripts/provision-windows-debuggers.sh
       # Still the first thing after checkout, which costs seconds. The tools it
       # checks are reached by scripts that run hours in, so a gap found here is
       # the difference between a 30-second failure and a wasted build. Shared

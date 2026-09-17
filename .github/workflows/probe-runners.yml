@@ -56,6 +56,13 @@ jobs:
       - name: Report available disk
         shell: bash
         run: df -h .
+      # Runs the same provisioning the build does, so this probe rehearses the
+      # real Windows setup path rather than only reporting what the bare image
+      # has. A pass here means the build's first minutes will pass too.
+      - name: Provision Windows debugging tools
+        if: ${{ matrix.target == 'windows-x64' }}
+        shell: bash
+        run: bash scripts/provision-windows-debuggers.sh
       - name: Verify host tooling
         env:
           PROBE_TARGET: ${{ matrix.target }}

@@ -18,6 +18,8 @@ CI build alone does not establish it.
 | `build/args/windows-x64.gn` | Windows x64 GN settings |
 | `build/MAC_SDK_VERSION` | Exact macOS SDK version, `26.5` |
 | `build/MAC_SDK_BUILD` | SDK `ProductBuildVersion`, `25F70` |
+| `build/WINDOWS_SDK_INSTALLER_URL` | Pinned 10.0.26100 SDK installer, for the Debuggers feature |
+| `build/WINDOWS_SDK_INSTALLER_VERSION` | Which SDK release that URL serves, `10.0.26100.4654` |
 | `build/linux/Dockerfile` | Linux base image digest and build environment |
 | `patches/series` | Patch names and application order |
 | `build/MANIFEST.lock` | Generated record of resolved build inputs and outputs |
@@ -53,6 +55,8 @@ The build scripts share workspace and tool paths through `scripts/lib.sh`.
 | --- | --- |
 | `scripts/resolve-build-targets.sh` | Resolve the CI target list and hosted runner labels |
 | `scripts/verify-runner.sh` | Check the target against the runner OS and architecture |
+| `scripts/verify-host-tooling.sh` | Report every tool or SDK component the target's build will need and this host lacks |
+| `scripts/provision-windows-debuggers.sh` | Install the pinned SDK's Debugging Tools feature when the image lacks it |
 | `scripts/bootstrap.sh` | Fetch pinned depot_tools and check host prerequisites |
 | `scripts/fetch-sources.sh` | Fetch and sync the pinned Chromium revision |
 | `scripts/apply-patches.sh` | Apply the patch series without fuzz |
@@ -288,15 +292,27 @@ minute, and `.github/workflows/probe-runners.yml` runs that check on the
 smallest instance of each family — instance size changes compute, not image
 contents or the storage figure, so the cheapest runner is equivalent evidence.
 
-If that feature is ever installed by the build rather than supplied by the
-image, pin it. `winsdksetup.exe` behind a "latest SDK" link installs a second
-SDK version under `Windows Kits\10`, and `vs_toolchain.py` autodetection may
-then select it over `win_sdk_version`. That is the same silent-input drift the
-macOS SDK pin exists to prevent, arriving by a different door. Such a step has
-to name the 10.0.26100 installer specifically, record that URL in `build/`
-beside the other pins, and afterwards assert both that
-`Debuggers/x64/dbghelp.dll` exists and that no SDK version other than the
-pinned one appeared under `Windows Kits\10\bin`.
+Measured on the image, `msdia140.dll` and the DIA SDK ARE present, and Build
+Tools sits at `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`
+— under `Program Files (x86)`, not `Program Files`. Only the Debuggers feature
+is missing, which is why the toolchain paths are autodetected rather than
+written down.
+
+`scripts/provision-windows-debuggers.sh` installs that one feature, and both
+the build and the probe run it. It is idempotent, so it costs nothing once the
+image ships the feature. Two rules keep it from becoming the drift it is
+preventing:
+
+- The installer is pinned in `build/WINDOWS_SDK_INSTALLER_URL` to the
+  10.0.26100 release (`build/WINDOWS_SDK_INSTALLER_VERSION` records which),
+  and only `OptionId.WindowsDesktopDebuggers` is requested. A "latest SDK"
+  link would install a second SDK version under `Windows Kits\10`, and
+  `vs_toolchain.py` autodetection may then prefer it over `win_sdk_version` —
+  the same silent-input drift the macOS SDK pin exists to prevent, arriving by
+  a different door.
+- Afterwards it asserts both that `Debuggers/x64/dbghelp.dll` exists and that
+  no SDK version directory appeared under `Windows Kits\10\bin` that was not
+  there before.
 
 Windows has 130 GB of storage at every instance size, the least of the four
 targets. A complete `macos-arm64` build measures 66 GB — 49 GB checkout, 16 GB

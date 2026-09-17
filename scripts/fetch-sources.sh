@@ -5,7 +5,10 @@ source "$(dirname "$0")/lib.sh"
 MODE="${1:-sync}"
 case "$MODE" in sync|--fetch-only) ;; *) die "usage: fetch-sources.sh [--fetch-only]" ;; esac
 
-[ -x "$DEPOT_TOOLS/gclient" ] || die "run scripts/bootstrap.sh first"
+# Resolution, not existence: this script invokes `gclient` through PATH, so
+# that is what has to be checked. bootstrap.sh asserts the same thing with a
+# fuller diagnostic; this is the guard for running the step on its own.
+command -v gclient >/dev/null || die "gclient is not on PATH; run scripts/bootstrap.sh first"
 mkdir -p "$WORKSPACE"
 cd "$WORKSPACE"
 

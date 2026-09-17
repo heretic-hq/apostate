@@ -40,6 +40,25 @@ git -C "$DEPOT_TOOLS" checkout -q --detach "$DEPOT_TOOLS_REVISION"
 actual="$(git -C "$DEPOT_TOOLS" rev-parse HEAD)"
 [ "$actual" = "$DEPOT_TOOLS_REVISION" ] || die "depot_tools is at $actual, expected $DEPOT_TOOLS_REVISION"
 
+# Assert that PATH resolves gclient, not merely that the file exists. A broken
+# PATH entry is invisible to an existence check: the Windows measurement had a
+# perfectly good $DEPOT_TOOLS/gclient on disk and still died 25 minutes into
+# the sync with "gclient: command not found", because PATH is colon-separated
+# and the drive letter had split the entry in two. Bootstrap owns "depot_tools
+# is usable", so the check belongs here, where it costs milliseconds.
+#
+# Both sides are resolved through `cd && pwd -P` so the comparison is between
+# physical directories rather than spellings -- on Windows `command -v` reports
+# /c/... while $DEPOT_TOOLS is C:/..., and both forms print identically after
+# cd, which also collapses symlinks such as macOS's /tmp.
+gclient_bin="$(command -v gclient || true)"
+[ -n "$gclient_bin" ] ||
+  die "gclient is not on PATH. depot_tools is pinned at $DEPOT_TOOLS but PATH does not resolve it: $PATH"
+gclient_dir="$(cd "$(dirname "$gclient_bin")" && pwd -P)"
+depot_dir="$(cd "$DEPOT_TOOLS" && pwd -P)"
+[ "$gclient_dir" = "$depot_dir" ] ||
+  die "PATH resolves gclient to $gclient_dir, but this build is pinned to the depot_tools at $depot_dir. Remove the other depot_tools from PATH."
+
 # Measured on a complete macos-arm64 build: 66GB total -- 50GB checkout, 16GB
 # output, 0.7GB depot_tools. Two tiers, because one number cannot do both jobs.
 #

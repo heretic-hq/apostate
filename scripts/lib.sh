@@ -85,6 +85,10 @@ target_default() {
   case "$(uname -s)-$(uname -m)" in
     Darwin-arm64) echo "macos-arm64" ;;
     Linux-x86_64) echo "linux-x64" ;;
+    # Git Bash reports MINGW64_NT-10.0-26100. Windows became a build target
+    # without this branch being added, so every script that resolves its
+    # target from the host died there with "unsupported host" instead.
+    MINGW*-x86_64|MSYS*-x86_64|CYGWIN*-x86_64) echo "windows-x64" ;;
     *) die "unsupported host $(uname -s)-$(uname -m)" ;;
   esac
 }

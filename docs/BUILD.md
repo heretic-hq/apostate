@@ -291,8 +291,15 @@ hours later:
 Measured on the image: `dbghelp.dll` is absent, so the Debugging Tools feature
 is not installed. `scripts/verify-host-tooling.sh` reports it in about a
 minute, and `.github/workflows/probe-runners.yml` runs that check on the
-smallest instance of each family — instance size changes compute, not image
-contents or the storage figure, so the cheapest runner is equivalent evidence.
+smallest instance of each family, because *presence* of a tool is a property of
+the image and the cheapest runner answers it identically.
+
+*Free space* is not. Measured: a 2 vCPU Windows runner reported 70.8 GB free
+while a 32 vCPU Windows runner reported 55 GB, a 14 GB difference on the class
+that actually builds — and in the dangerous direction, because the cheap runner
+looks roomier. Anything sized in bytes has to be measured on the instance class
+it will run on, which is what the `census-windows-build-class` job exists for.
+Checkout size is safe to take from the cheap runner: the sync is identical.
 
 Measured on the image, `msdia140.dll` and the DIA SDK ARE present, and Build
 Tools sits at `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`

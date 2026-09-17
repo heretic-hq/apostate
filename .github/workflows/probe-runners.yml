@@ -133,6 +133,10 @@ jobs:
     if: ${{ inputs.measure_windows_checkout }}
     runs-on: blacksmith-2vcpu-windows-2025
     timeout-minutes: 120
+    env:
+      # Named rather than left to target_default(), so this job says what it is
+      # measuring instead of inheriting it from whatever host it lands on.
+      APOSTATE_TARGET: windows-x64
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -167,3 +171,28 @@ jobs:
           echo "--- largest subtrees (MB)"
           du -sm "$APOSTATE_WORKSPACE/src"/* "$APOSTATE_WORKSPACE/src/third_party"/* 2>/dev/null |
             sort -rn | head -15
+
+  # Free space is not instance-size-invariant: a 2 vCPU Windows runner measured
+  # 70.8GB free and a 32 vCPU one 55GB. The cheap runner looks roomier, so a
+  # verdict taken from it errs in the dangerous direction. This job reports free
+  # space on the class that actually builds, before and after reclaiming, and
+  # nothing else -- two or three minutes, no sync, no build.
+  census-windows-build-class:
+    name: census-windows-build-class
+    runs-on: blacksmith-32vcpu-windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Report free space before reclaiming
+        shell: bash
+        run: df -h /c
+      - name: Reclaim Windows disk
+        shell: bash
+        run: bash scripts/reclaim-windows-disk.sh
+      - name: Report free space after reclaiming
+        shell: bash
+        run: df -h /c

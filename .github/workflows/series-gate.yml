@@ -1,0 +1,307 @@
+name: series compile gate
+
+# Compile every translation unit the patch series touches, on the platforms a
+# macOS workstation cannot reach. Nothing is linked and no binary is produced.
+#
+# WHY IT EXISTS
+#
+# scripts/checkfile.sh gates one file against one configured build directory,
+# and the only configured directory on the development machine is macOS. So
+# the series' Linux-only and Windows-only files had never been compiled
+# anywhere: `scripts/checkseries.sh --list` on macOS classifies 20 of the 130
+# translation units the series touches as absent from that build graph,
+# including third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc,
+# which carries a cross-patch call into base/apostate/profile.cc. The cost of
+# not having this gate is already on record: base/apostate/explain.cc called
+# base::WriteFileDescriptor(STDOUT_FILENO, ...) -- POSIX-only, in a file
+# base/BUILD.gn compiles on every platform -- and that survived because no
+# Windows compile had ever run. It was found by reading.
+#
+# WHAT IT COSTS
+#
+# Blacksmith bills per vCPU-minute: an x64 2 vCPU minute is $0.004 and a
+# Windows 2 vCPU minute bills as two x64 ones, scaling proportionally with
+# vCPU count, so blacksmith-32vcpu-ubuntu-2404 is ~$0.064/min and
+# blacksmith-32vcpu-windows-2025 ~$0.128/min. That model reproduces this
+# project's own "over $100" figure for a four-target build: 180 min x $0.064
+# twice for Linux, 240 x $0.128 for Windows, 300 x $0.16 for the 12 vCPU
+# macOS runner is $102.
+#
+#   linux-x64     ~80 min   ~$5
+#   windows-x64  ~120 min  ~$15
+#
+# Compiling is not the expensive part; producing what the compiles depend on
+# is. Measured on the macos-arm64 graph at 152.0.7977.83, the static
+# prerequisite closure of the series' 123 objects is 15,586 other objects and
+# 20,804 generated files -- about 20% of that graph's 76,403 objects and
+# 106,212 generated files -- because Chromium cannot produce a v8, net or
+# blink header without first linking the host tool that generates it. So a
+# cold gate run is roughly a fifth of a build's codegen and compile work, plus
+# a ~25 minute sync, and it never links a browser. Against building the same
+# two platforms outright (180 x $0.064 + 240 x $0.128 = $42) the saving is
+# about half the money and most of the wall time, and the real gain is that
+# these two platforms get compiled at all.
+#
+# One exception, and it is why macos-arm64 is not in the default pair. The
+# series touches chrome/app/chrome_main_delegate.cc, which on macOS compiles
+# into //chrome/app:test_support as well as chrome_dll. That target's GN hard
+# deps include phony/chrome/chrome_framework, so ninja builds the framework
+# bundle before it will compile that one object: 112,086 prerequisites instead
+# of 53,670, which is most of a build. Measured: `ninja -n` for that object
+# alone plans 277 edges ending in SOLINK 'Chromium Framework' on a fully built
+# tree, against 63 codegen edges for the chrome_dll object of the same source
+# file. Gate macOS locally, where that tree already exists.
+#
+# WHY NO CACHE
+#
+# Nothing here is cached, and the checkout cannot be. It measures 28.1 GB on
+# Windows and about 50 GB on macOS, against a 10 GB GitHub Actions cache
+# ceiling; docs/BUILD.md records the same decision for the build workflows
+# ("the workflow restores no build cache and adopts no existing output
+# directory"). Trimming the checkout with gclient custom_deps to fit would be
+# worse than paying for it: this gate's answers are statements about the build
+# graph, and a graph missing DEPS would report a file as absent because its
+# dependency was never fetched. The scripts do exploit a warm workspace
+# wherever one exists -- bootstrap.sh and fetch-sources.sh are idempotent and
+# resume, apply-patches.sh short-circuits on its series stamp -- which is what
+# makes the gate cheap on a workstation and unavoidably cold here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "Comma-separated targets to gate; the default pair is the platforms no local checkout compiles"
+        required: false
+        type: string
+        default: "linux-x64,windows-x64"
+  # Weekly. Per pull request would be the ideal cadence and costs roughly $16 a
+  # run, which is not defensible on a repository whose pull requests are mostly
+  # patch edits. Weekly bounds the time a platform-specific break can sit
+  # undetected to one week, and it runs on Monday so a break is known at the
+  # start of a week rather than found by a release build at the end of one.
+  # Clear of the nightly window (03:17) and the runner probe (Wednesday 06:41).
+  schedule:
+    - cron: "23 5 * * 1"
+
+permissions:
+  contents: read
+
+# Two gate runs syncing Chromium at once would double the bill for no new
+# information. Cancelling in progress is safe: the gate writes nothing outside
+# its own VM.
+concurrency:
+  group: apostate-series-gate
+  cancel-in-progress: true
+
+jobs:
+  setup:
+    name: resolve gate targets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      targets: ${{ steps.resolve.outputs.targets }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      # Same resolver the build workflows use, so the runner labels and the
+      # "unknown target" check live in one place. A target named here without a
+      # registered runner label would otherwise queue until GitHub gave up.
+      - name: Resolve target matrix
+        id: resolve
+        env:
+          REQUESTED_TARGETS: ${{ inputs.targets || 'linux-x64,windows-x64' }}
+        shell: bash
+        run: bash scripts/resolve-build-targets.sh >> "$GITHUB_OUTPUT"
+      - name: Report resolved targets
+        env:
+          RESOLVED_TARGETS: ${{ steps.resolve.outputs.targets }}
+        shell: bash
+        run: printf 'gating %s\n' "$RESOLVED_TARGETS"
+
+  gate:
+    name: gate-${{ matrix.target }}
+    needs: setup
+    runs-on: ${{ fromJSON(matrix.runner_labels) }}
+    # Sized from measurements, not optimism. Windows `gclient sync` was still
+    # running at 25 minutes on a 2 vCPU probe and its own measurement job
+    # budgeted 120 minutes for bootstrap plus sync; the prerequisite closure
+    # measured on macOS is 15,586 objects and 20,804 generated files, about a
+    # fifth of that graph, and one blink translation unit alone pulls 9,857
+    # generated inputs. The compiles themselves are minutes. Estimates are 80
+    # minutes for Linux and 120 for Windows, so 180 absorbs a slow sync
+    # without letting a hung job run to the 6-hour default.
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    env:
+      PYTHONUNBUFFERED: "1"
+      APOSTATE_TARGET: ${{ matrix.target }}
+      # The workspace is empty for every hosted job, so configure.sh has
+      # nothing to reuse and the manifest semantics match the build workflows.
+      APOSTATE_FRESH_BUILD: "1"
+    steps:
+      - name: Initialize job workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # RUNNER_TEMP is a native Windows path; cygpath -m gives the one
+          # separator form that cmd.exe, bash and depot_tools' batch wrappers
+          # all accept. Same reasoning as build-target.yml.
+          root="$RUNNER_TEMP"
+          if command -v cygpath >/dev/null 2>&1; then
+            root="$(cygpath -m "$RUNNER_TEMP")"
+          fi
+          workspace="$root/apostate-workspace"
+          mkdir -p "$workspace"
+          printf 'APOSTATE_WORKSPACE=%s\n' "$workspace" >> "$GITHUB_ENV"
+          # The report lives inside the workspace deliberately. On Linux the
+          # gate runs inside the pinned container, which bind-mounts the
+          # repository and the workspace and nothing else, so a report written
+          # to $RUNNER_TEMP directly would have nowhere to land.
+          printf 'APOSTATE_REPORT=%s/series-gate-%s.json\n' \
+            "$workspace" "$APOSTATE_TARGET" >> "$GITHUB_ENV"
+      - name: Report available disk
+        shell: bash
+        run: df -h "$APOSTATE_WORKSPACE"
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      # gn gen runs vs_toolchain.py, which treats the SDK's Debugging Tools
+      # feature as mandatory and the runner image does not carry it. This gate
+      # cannot configure Windows without it. Idempotent.
+      - name: Provision Windows debugging tools
+        if: ${{ startsWith(matrix.target, 'windows-') }}
+        shell: bash
+        run: bash scripts/provision-windows-debuggers.sh
+      # bootstrap.sh refuses to start below 46 GB free for windows-x64, which
+      # is the measured full checkout plus output; the 32 vCPU image has 55 GB
+      # free. The gate does not produce 16 GB of output, but the floor is the
+      # build's and this keeps the reclaim identical to the build's.
+      - name: Reclaim Windows disk
+        if: ${{ startsWith(matrix.target, 'windows-') }}
+        shell: bash
+        run: bash scripts/reclaim-windows-disk.sh
+      - name: Verify host tooling
+        shell: bash
+        run: bash scripts/verify-host-tooling.sh "$APOSTATE_TARGET"
+      - name: Verify runner pairing
+        shell: bash
+        run: bash scripts/verify-runner.sh "$APOSTATE_TARGET"
+      - name: Verify gate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in \
+            scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh \
+            scripts/configure.sh scripts/checkseries.sh \
+            scripts/series-translation-units.py \
+            patches/series "build/args/$APOSTATE_TARGET.gn"; do
+            test -f "$path" || { echo "missing gate input: $path" >&2; exit 1; }
+          done
+          # The derived list is the gate's coverage. Printing it before any
+          # money is spent makes a silent shrink visible in the log.
+          python3 scripts/series-translation-units.py --with-patches
+      - name: Bootstrap pinned toolchain
+        shell: bash
+        run: bash scripts/bootstrap.sh
+      - name: Fetch pinned Chromium
+        shell: bash
+        run: bash scripts/fetch-sources.sh
+      - name: Apply patch series without fuzz
+        shell: bash
+        run: bash scripts/apply-patches.sh
+      - name: Run Chromium hooks and install target sysroot
+        if: ${{ startsWith(matrix.target, 'linux-') }}
+        shell: bash
+        run: bash scripts/run-chromium-hooks.sh "$APOSTATE_TARGET" && bash scripts/prepare-linux-sysroot.sh "$APOSTATE_TARGET"
+      - name: Configure target
+        shell: bash
+        run: bash scripts/configure.sh "$APOSTATE_TARGET"
+      - name: Compile every translation unit the series touches
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The log goes beside the report in the workspace, which the
+          # initialize step already normalized with cygpath, rather than in
+          # $RUNNER_TEMP, which on Windows is a backslash path.
+          log="$APOSTATE_WORKSPACE/series-gate.log"
+          status=0
+          set +e
+          bash scripts/checkseries.sh "$APOSTATE_TARGET" --report "$APOSTATE_REPORT" 2>&1 | tee "$log"
+          status="${PIPESTATUS[0]}"
+          set -e
+          # The script's own summary block, not the whole compile log: the
+          # counts and any failure are what a reader needs on the run page.
+          {
+            printf '### %s\n\n```text\n' "$APOSTATE_TARGET"
+            sed -n '/^==> V1 series gate/,$p' "$log"
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      # Always: the run whose report matters most is the one that failed, and
+      # the cross-platform merge needs a report from every leg to tell a
+      # platform-specific file from one nothing compiles.
+      - name: Upload classification report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: series-gate-${{ matrix.target }}
+          path: ${{ env.APOSTATE_REPORT }}
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Report disk after the gate
+        if: ${{ always() }}
+        shell: bash
+        run: df -h "$APOSTATE_WORKSPACE" || true
+
+  merge:
+    name: cross-platform coverage
+    needs:
+      - setup
+      - gate
+    # Runs even when a leg failed to compile: the coverage question ("does any
+    # platform compile this file at all") is independent of whether one
+    # platform is currently broken, and a failed leg still uploads its report.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Download every classification report
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          pattern: series-gate-*
+          path: series-gate-reports
+          merge-multiple: true
+      - name: Merge per-platform classifications
+        env:
+          GATED_TARGETS: ${{ needs.setup.outputs.targets }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'gated targets: %s\n' "$GATED_TARGETS"
+          reports=(series-gate-reports/*.json)
+          if [ "${#reports[@]}" -lt 2 ]; then
+            echo "only ${#reports[@]} report(s); nothing to compare across platforms"
+            exit 0
+          fi
+          status=0
+          bash scripts/checkseries.sh --merge "${reports[@]}" > merged.txt || status=$?
+          {
+            printf '### cross-platform coverage\n\n```text\n'
+            cat merged.txt
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat merged.txt
+          exit "$status"

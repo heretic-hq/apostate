@@ -98,23 +98,37 @@ depot_dir="$(cd "$DEPOT_TOOLS" && pwd -P)"
 [ "$gclient_dir" = "$depot_dir" ] ||
   die "PATH resolves gclient to $gclient_dir, but this build is pinned to the depot_tools at $depot_dir. Remove the other depot_tools from PATH."
 
-# Measured on a complete macos-arm64 build: 66GB total -- 50GB checkout, 16GB
-# output, 0.7GB depot_tools. Two tiers, because one number cannot do both jobs.
+# Two tiers, because one number cannot do both jobs.
 #
-# The 100GB warning is comfort: a target that needs more than macOS still has
-# room. The old 200GB figure was roughly three times actual consumption, so it
-# fired on the one runner with the least headroom and nowhere else, which is
-# how a warning gets ignored.
+# The floor is arithmetic: a build that starts with less space than it is going
+# to consume will spend hours on an expensive runner before dying of ENOSPC
+# inside ninja. Failing here costs seconds and says why.
 #
-# The 45GB floor is arithmetic. Windows never fetches
-# third_party/swift-toolchain, so its checkout cannot be smaller than about
-# 46GB, and a build that starts below the size of its own source tree will
-# spend hours on the most expensive runner we use before dying of ENOSPC
-# somewhere inside ninja. Failing here costs seconds and says why.
+# The floors are measured totals -- checkout plus output plus depot_tools --
+# and they differ between targets by more than a factor of two, so they are
+# per-target. The Windows figure used to be extrapolated from macOS, as "the
+# checkout alone measures 46GB"; a completed Windows sync measured 28.1GB. The
+# extrapolation was wrong because macOS additionally fetches
+# third_party/swift-toolchain at 3.9GB and carries a much larger third_party
+# overall. Sizing one target from another's measurement is the error, so each
+# number below names the run it came from.
+case "${APOSTATE_TARGET:-}" in
+  # 66.6GB measured on a complete build: 50 checkout, 16 output, 0.7 depot_tools.
+  macos-arm64) need_gb=68 ;;
+  # 44.8GB measured: 28.1 checkout (run 35262879677), 16 output, 0.7 depot_tools.
+  windows-x64) need_gb=46 ;;
+  # Linux is unmeasured -- both Linux targets have only ever run on runners with
+  # over 1TB free, so no run has produced a figure. Use the largest known.
+  *) need_gb=68 ;;
+esac
+
 avail_kb="$(df -Pk "$WORKSPACE" | awk 'NR==2{print $4}')"
 say "workspace has $((avail_kb / 1048576))GB free at $WORKSPACE"
-[ "$avail_kb" -gt 47185920 ] ||
-  die "only $((avail_kb / 1048576))GB free at $WORKSPACE; the checkout alone measures 46GB before any output. Free space or use a larger runner."
-[ "$avail_kb" -gt 104857600 ] || warn "under 100GB free; a measured checkout plus build needs 66GB on macOS"
+[ "$avail_kb" -gt $((need_gb * 1048576)) ] ||
+  die "only $((avail_kb / 1048576))GB free at $WORKSPACE; a complete ${APOSTATE_TARGET:-build} measures ${need_gb}GB of checkout and output. Free space or use a larger runner."
+# Comfort, not arithmetic: the old 200GB warning was roughly three times actual
+# consumption, so it fired on the one runner with the least headroom and nowhere
+# else, which is how a warning gets ignored.
+[ "$avail_kb" -gt 104857600 ] || warn "under 100GB free; a complete ${APOSTATE_TARGET:-build} needs ${need_gb}GB"
 
 say "bootstrap ok  chromium=$CHROMIUM_VERSION  workspace=$WORKSPACE"

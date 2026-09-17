@@ -1,0 +1,18 @@
+{
+  "capture_path": "resources/fingerprints/raw/windows-nvidia-ampere-a4500-20260915T191219Z.json",
+  "context": {
+    "automation_signals": [],
+    "automation_suspected": false,
+    "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5",
+    "device_pixel_ratio": 1.75,
+    "headed": true,
+    "label": "REAL-shadowpc-nvdia",
+    "secure_context": true,
+    "taken_at": "2026-09-15T19:12:19.235Z",
+    "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+  },
+  "decision": "accepted",
+  "raw_sha256": "9ada97c27fef11fb176ecf5755495f2e87e09d31d4e89ff84f43178e68f978a1",
+  "reason": "capture passed admission checks; browser build 153.0.8010.37 differs from release pin 152.0.7977.83 (off-major) and is not a valid V3 target for the pinned build",
+  "recorded_utc": "2026-09-15T21:44:16.770933+00:00"
+}

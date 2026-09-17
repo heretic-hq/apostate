@@ -1,0 +1,18 @@
+{
+  "capture_path": "resources/fingerprints/raw/linux-nvidia-ada-4070tisuper-20260914T082759Z.json",
+  "context": {
+    "automation_signals": [],
+    "automation_suspected": false,
+    "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5",
+    "device_pixel_ratio": 1,
+    "headed": true,
+    "label": "REAL-nvidia-4070ti-linux",
+    "secure_context": true,
+    "taken_at": "2026-09-14T08:27:59.319Z",
+    "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+  },
+  "decision": "accepted",
+  "raw_sha256": "05f2ea0310b169d28e6c6e62a52dc4f28cf9ed1285ffa93dd9f07760ec4368ce",
+  "reason": "capture passed admission checks; browser build 152.0.7977.82 differs from release pin 152.0.7977.83 (same-major) and is not a valid V3 target for the pinned build",
+  "recorded_utc": "2026-09-15T21:43:37.648222+00:00"
+}

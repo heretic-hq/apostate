@@ -1,0 +1,18 @@
+{
+  "capture_path": "resources/fingerprints/raw/linux-nvidia-ada-4080super-20260914T101137Z.json",
+  "context": {
+    "automation_signals": [],
+    "automation_suspected": false,
+    "collector_sha256": "a19ad58d618bd22ddc3a7a35fee021be31e2915e59500d002b56b56a331bf3a5",
+    "device_pixel_ratio": 1,
+    "headed": true,
+    "label": "REAL-nvidia-4080-super",
+    "secure_context": true,
+    "taken_at": "2026-09-14T10:11:37.640Z",
+    "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+  },
+  "decision": "accepted",
+  "raw_sha256": "ce0df3706e29bdc7b63da2eda7eb852a703970ce52611a2d3a95bd3fd645b1ea",
+  "reason": "capture passed admission checks; browser build 152.0.7977.82 differs from release pin 152.0.7977.83 (same-major) and is not a valid V3 target for the pinned build",
+  "recorded_utc": "2026-09-15T21:43:45.628303+00:00"
+}

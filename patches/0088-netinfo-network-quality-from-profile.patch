@@ -1,0 +1,377 @@
+Subject: blink: serve the Network Information API from the profile
+
+navigator.connection.effectiveType, rtt, downlink and saveData report the
+host's real link. On the shipped macos-arm64 binary they read 4g / 1.6 Mbps /
+100 ms, which is this machine's actual broadband estimate and has nothing to do
+with the device the profile claims or with the proxy the traffic leaves by. A
+detector does not need to compare that against anything external to use it: the
+four values are stable per network, which is what makes them a fingerprint axis
+in the first place, and a profile that rotates every other surface while
+leaving these fixed hands the detector a constant.
+
+The values are served into NetworkStateNotifier's stored NetworkState rather
+than at the JS accessor. That struct is the single upstream source for four
+separate emitters: NetworkInformation's four attributes, the deprecated rtt,
+downlink and ect client hints that FrameFetchContext sends when a site opts in
+with Accept-CH, the Save-Data request header, and the prefers-reduced-data
+media feature in MediaValues. Overriding NetworkInformation alone would leave
+the request headers describing the host's link next to a JS answer describing
+someone else's, which is a worse position than not overriding anything.
+
+The state is written, not the emitted value. NetworkStateNotifier::RoundRtt
+multiplies the round trip by a per-host salted 0.90 to 1.10, rounds to the
+nearest 50 ms and caps at 3 s; RoundMbps does the same with 50 kbps buckets and
+a 10 Mbps cap. Those are the numbers in this build, not the 25 ms and 25 kbps
+the Network Information spec text describes. Feeding the estimate into that
+path rather than bypassing it means the observable value is produced by
+Chromium's own arithmetic, so its granularity cannot be got wrong by a profile
+and the per-origin noise a real Chrome applies is still applied.
+
+Two halves of the profile's network section pin each other. HttpRttBandFor
+reads the inclusive round-trip band for a named effective connection type
+straight off net::kHttpRttEffectiveConnectionTypeThresholds, the same table
+SetNetworkConnectionInfoOverride already uses, and the round trip is clamped
+into it: 4g is under 272 ms, 3g is 272 to 1419, 2g is 1420 to 2009, slow-2g is
+2010 and above. A round trip supplied without a type instead selects the type
+Chromium would have derived from it. Downlink is floored at the claimed type's
+own typical throughput from kTypicalDownlinkMbpsEffectiveConnectionType, so 4g
+cannot ship a 2G figure. A profile written by hand with 4g and a 700 ms round
+trip therefore presents 4g at 250 ms, not a contradiction.
+
+ApplyProfileNetworkQuality runs on the stored state at construction and again
+at the end of SetNetworkQuality and SetSaveDataEnabled. Construction matters
+because a renderer that never receives a network-quality update would otherwise
+keep the defaults, and the defaults are observable: an uninitialised state
+reports 4g with rtt 0 and downlink 10. Re-applying after the setters matters
+because a page that installs a change listener stops reading the accessors and
+starts reading the values ConnectionChange delivers, which come from the same
+struct. Both readers are covered by writing the struct once.
+
+The DevTools and web-test override path is untouched: has_override_ still wins
+over the stored state, so network emulation keeps working and keeps reporting
+what the operator asked for. transport_rtt is also left alone. Nothing outside
+this class's own unit tests reads it in this build, so serving it would be a
+change with no observable to verify against.
+
+What remains open: the served link is a property of the composed device, not a
+measurement of the proxy the traffic actually leaves by. A residential exit in
+another country has a round trip this patch does not know, and closing that gap
+needs a measurement the browser does not currently take. The section is also
+absent from a profile unless the dispersion catalogue supplies it, and an
+absent section still means host inheritance, so the surface is only fixed for
+launches whose catalogue carries a network option set.
+
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -396,6 +396,38 @@
+     return accept_languages_;
+   }
+ 
++  // The network the claimed device is on, as the Network Information API
++  // reports it.
++  //
++  // effective_type is spelled the way the JS enum spells it: "slow-2g", "2g",
++  // "3g" or "4g". http_rtt_ms and downlink_mbps are the raw estimates and not
++  // the numbers a page reads. NetworkStateNotifier::RoundRtt and RoundMbps
++  // multiply by a per-host salted 0.90-1.10 and then quantise to 50 ms and
++  // 50 kbps, capping at 3 s and 10 Mbps, so the observable value is always
++  // produced by Chromium's own arithmetic. Storing the estimate rather than
++  // the rounded answer is what keeps that true.
++  //
++  // A named type and a round trip pin each other: the emitter holds the round
++  // trip to the band Chromium's own thresholds give that type, and derives the
++  // type from the round trip when only one of the two is present. So a profile
++  // cannot present "4g" with a 700 ms round trip however it was written.
++  const std::optional<std::string>& network_effective_type() const {
++    return network_effective_type_;
++  }
++  std::optional<int> network_http_rtt_ms() const {
++    return network_http_rtt_ms_;
++  }
++  std::optional<double> network_downlink_mbps() const {
++    return network_downlink_mbps_;
++  }
++
++  // Whether the user has data saver on. One value with four emitters:
++  // navigator.connection.saveData, the Save-Data request header, the
++  // prefers-reduced-data media feature, and Blink's own loading heuristics.
++  // Desktop Chrome has no UI that turns this on, so a desktop profile that
++  // sets it true is claiming something desktop Chrome cannot produce.
++  std::optional<bool> network_save_data() const { return network_save_data_; }
++
+   // Pointing device capability: "fine", "coarse" or "none".
+   //
+   // Headless has no input device at all, so it reports none — and a desktop
+@@ -477,6 +509,10 @@
+   std::optional<std::string> timezone_;
+   std::optional<bool> prefers_dark_;
+   std::optional<std::string> accept_languages_;
++  std::optional<std::string> network_effective_type_;
++  std::optional<int> network_http_rtt_ms_;
++  std::optional<double> network_downlink_mbps_;
++  std::optional<bool> network_save_data_;
+   std::optional<std::string> pointer_type_;
+   std::optional<bool> has_hover_;
+   std::optional<uint32_t> css_highlight_argb_;
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -619,6 +619,34 @@
+     }
+   }
+ 
++  if (const DictValue* network = dict->FindDict("network")) {
++    if (const std::string* v = network->FindString("effective_type")) {
++      if (*v == "slow-2g" || *v == "2g" || *v == "3g" || *v == "4g") {
++        profile->network_effective_type_ = *v;
++      } else {
++        LOG(ERROR) << "apostate: network.effective_type must be slow-2g, 2g, "
++                      "3g or 4g; ignoring";
++      }
++    }
++    if (std::optional<int> v = network->FindInt("http_rtt_ms")) {
++      if (*v >= 0 && *v <= 3000) {
++        profile->network_http_rtt_ms_ = *v;
++      } else {
++        LOG(ERROR) << "apostate: network.http_rtt_ms must be 0-3000; ignoring";
++      }
++    }
++    if (std::optional<double> v = network->FindDouble("downlink_mbps")) {
++      if (std::isfinite(*v) && *v >= 0 && *v <= 10) {
++        profile->network_downlink_mbps_ = *v;
++      } else {
++        LOG(ERROR) << "apostate: network.downlink_mbps must be 0-10; ignoring";
++      }
++    }
++    if (std::optional<bool> v = network->FindBool("save_data")) {
++      profile->network_save_data_ = *v;
++    }
++  }
++
+   return profile.release();
+ }
+ 
+--- a/third_party/blink/renderer/platform/network/network_state_notifier.h
++++ b/third_party/blink/renderer/platform/network/network_state_notifier.h
+@@ -121,7 +121,9 @@
+     scoped_refptr<base::SingleThreadTaskRunner> task_runner_;
+   };
+ 
+-  NetworkStateNotifier() : has_override_(false) {}
++  NetworkStateNotifier() : has_override_(false) {
++    ApplyProfileNetworkQuality(state_);
++  }
+   NetworkStateNotifier(const NetworkStateNotifier&) = delete;
+   NetworkStateNotifier& operator=(const NetworkStateNotifier&) = delete;
+ 
+@@ -352,6 +354,18 @@
+   // Adding this noise reduces the chances of cross-origin fingerprinting.
+   double GetRandomMultiplier(const String& host) const;
+ 
++  // Rewrites the network-quality fields of |state| from the device profile.
++  // Does nothing when this process has no profile or the profile carries no
++  // network section, which leaves the host's own estimate in place.
++  //
++  // Applied to the stored state at construction and after each setter that
++  // touches those fields, rather than inside the accessors, because the
++  // observer notification path reads the same struct: a page that installs a
++  // change listener takes its values from ConnectionChange, and a page that
++  // does not takes them from the accessors. Overriding one and not the other
++  // would make the two disagree.
++  static void ApplyProfileNetworkQuality(NetworkState& state);
++
+   mutable base::Lock lock_;
+   NetworkState state_ GUARDED_BY(lock_);
+   bool has_override_ GUARDED_BY(lock_);
+--- a/third_party/blink/renderer/platform/network/network_state_notifier.cc
++++ b/third_party/blink/renderer/platform/network/network_state_notifier.cc
+@@ -25,9 +25,13 @@
+ 
+ #include "third_party/blink/renderer/platform/network/network_state_notifier.h"
+ 
++#include <algorithm>
+ #include <array>
+ #include <memory>
++#include <optional>
++#include <utility>
+ 
++#include "base/apostate/profile.h"
+ #include "base/synchronization/lock.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "net/nqe/effective_connection_type.h"
+@@ -69,6 +73,82 @@
+     kTypicalDownlinkMbpsEffectiveConnectionType = {0,     0,     0.040,
+                                                    0.075, 0.400, 1.600};
+ 
++base::TimeDelta HttpRttThresholdFor(EffectiveConnectionType type) {
++  return net::kHttpRttEffectiveConnectionTypeThresholds[static_cast<size_t>(
++      type)];
++}
++
++// The effective connection type Chromium itself would report for a given HTTP
++// round trip, using the same thresholds SetNetworkConnectionInfoOverride uses.
++WebEffectiveConnectionType EffectiveTypeForHttpRtt(base::TimeDelta http_rtt) {
++  if (http_rtt >= HttpRttThresholdFor(
++                      EffectiveConnectionType::kEffectiveConnectionSlow2GType)) {
++    return WebEffectiveConnectionType::kTypeSlow2G;
++  }
++  if (http_rtt >=
++      HttpRttThresholdFor(EffectiveConnectionType::kEffectiveConnection2GType)) {
++    return WebEffectiveConnectionType::kType2G;
++  }
++  if (http_rtt >=
++      HttpRttThresholdFor(EffectiveConnectionType::kEffectiveConnection3GType)) {
++    return WebEffectiveConnectionType::kType3G;
++  }
++  return WebEffectiveConnectionType::kType4G;
++}
++
++// The inclusive HTTP round-trip band that implies a given effective connection
++// type, read off the same threshold table. The 4G band has no lower bound and
++// the slow-2G band's upper bound is RoundRtt's own 3 s ceiling, above which
++// nothing is observable.
++std::pair<base::TimeDelta, base::TimeDelta> HttpRttBandFor(
++    WebEffectiveConnectionType type) {
++  constexpr base::TimeDelta kOneMs = base::Milliseconds(1);
++  switch (type) {
++    case WebEffectiveConnectionType::kTypeSlow2G:
++      return {HttpRttThresholdFor(
++                  EffectiveConnectionType::kEffectiveConnectionSlow2GType),
++              base::Seconds(3)};
++    case WebEffectiveConnectionType::kType2G:
++      return {HttpRttThresholdFor(
++                  EffectiveConnectionType::kEffectiveConnection2GType),
++              HttpRttThresholdFor(
++                  EffectiveConnectionType::kEffectiveConnectionSlow2GType) -
++                  kOneMs};
++    case WebEffectiveConnectionType::kType3G:
++      return {HttpRttThresholdFor(
++                  EffectiveConnectionType::kEffectiveConnection3GType),
++              HttpRttThresholdFor(
++                  EffectiveConnectionType::kEffectiveConnection2GType) -
++                  kOneMs};
++    case WebEffectiveConnectionType::kType4G:
++    case WebEffectiveConnectionType::kTypeUnknown:
++    case WebEffectiveConnectionType::kTypeOffline:
++      return {base::TimeDelta(),
++              HttpRttThresholdFor(
++                  EffectiveConnectionType::kEffectiveConnection3GType) -
++                  kOneMs};
++  }
++  NOTREACHED();
++}
++
++// The profile spells the effective connection type the way the JS enum does.
++std::optional<WebEffectiveConnectionType> ParseProfileEffectiveType(
++    const std::string& name) {
++  if (name == "slow-2g") {
++    return WebEffectiveConnectionType::kTypeSlow2G;
++  }
++  if (name == "2g") {
++    return WebEffectiveConnectionType::kType2G;
++  }
++  if (name == "3g") {
++    return WebEffectiveConnectionType::kType3G;
++  }
++  if (name == "4g") {
++    return WebEffectiveConnectionType::kType4G;
++  }
++  return std::nullopt;
++}
++
+ }  // namespace
+ 
+ NetworkStateNotifier& GetNetworkStateNotifier() {
+@@ -166,6 +246,8 @@
+       state_.downlink_throughput_mbps =
+           static_cast<double>(downlink_throughput_kbps) / 1000;
+     }
++
++    ApplyProfileNetworkQuality(state_);
+   }
+ }
+ 
+@@ -197,6 +279,7 @@
+   {
+     base::AutoLock locker(lock_);
+     state_.save_data = enabled;
++    ApplyProfileNetworkQuality(state_);
+   }
+ }
+ 
+@@ -367,6 +450,76 @@
+       static_cast<size_t>(type));
+ }
+ 
++// static
++void NetworkStateNotifier::ApplyProfileNetworkQuality(NetworkState& state) {
++  const base::apostate::Profile* profile = base::apostate::Profile::Get();
++  if (!profile) {
++    return;
++  }
++
++  if (std::optional<bool> save_data = profile->network_save_data()) {
++    state.save_data = *save_data;
++  }
++
++  const std::optional<std::string>& type_name =
++      profile->network_effective_type();
++  const std::optional<int> profile_rtt_ms = profile->network_http_rtt_ms();
++  const std::optional<double> profile_downlink_mbps =
++      profile->network_downlink_mbps();
++  if (!type_name && !profile_rtt_ms && !profile_downlink_mbps) {
++    return;
++  }
++
++  std::optional<WebEffectiveConnectionType> effective_type;
++  if (type_name) {
++    effective_type = ParseProfileEffectiveType(*type_name);
++  }
++  std::optional<base::TimeDelta> http_rtt;
++  if (profile_rtt_ms) {
++    http_rtt = base::Milliseconds(*profile_rtt_ms);
++  }
++
++  // Each half of the pair pins the other, so the two cannot end up saying
++  // different things whatever the profile was written to say. A named type
++  // holds the round trip inside that type's band; a round trip on its own
++  // selects the type Chromium would have derived from it.
++  if (effective_type && http_rtt) {
++    const std::pair<base::TimeDelta, base::TimeDelta> band =
++        HttpRttBandFor(*effective_type);
++    http_rtt = std::clamp(*http_rtt, band.first, band.second);
++  } else if (effective_type) {
++    http_rtt = kTypicalHttpRttEffectiveConnectionType[static_cast<size_t>(
++        *effective_type)];
++  } else if (http_rtt) {
++    effective_type = EffectiveTypeForHttpRtt(*http_rtt);
++  }
++
++  if (effective_type) {
++    state.effective_type = *effective_type;
++    // Throughput under the claimed type's own typical value is the same
++    // contradiction seen from the other side, so the floor comes from
++    // Chromium's table rather than from a number of ours. Nothing caps the
++    // value here: RoundMbps stops at 10 Mbps, so a larger estimate is not
++    // observable and the stored figure stays the one the profile stated.
++    const double typical_downlink_mbps =
++        kTypicalDownlinkMbpsEffectiveConnectionType[static_cast<size_t>(
++            *effective_type)];
++    state.downlink_throughput_mbps =
++        std::max(profile_downlink_mbps.value_or(typical_downlink_mbps),
++                 typical_downlink_mbps);
++  } else if (profile_downlink_mbps) {
++    state.downlink_throughput_mbps = *profile_downlink_mbps;
++  }
++
++  if (http_rtt) {
++    state.http_rtt = *http_rtt;
++  }
++
++  // transport_rtt is deliberately left on the host's value. Nothing outside
++  // this class's own tests reads it in this build, so serving it would be a
++  // change with no observable and no way to check it stayed right.
++}
++
+ double NetworkStateNotifier::GetRandomMultiplier(const String& host) const {
+   // The random number should be a function of the hostname to reduce
+   // cross-origin fingerprinting. The random number should also be a function

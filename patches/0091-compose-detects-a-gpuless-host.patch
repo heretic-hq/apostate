@@ -1,0 +1,326 @@
+Subject: [PATCH] compose: stop assuming a GPU exists
+
+PlatformDefaultBackend() returns "vulkan" on Linux, and the anchor draw filters
+the catalogue by that token. So on a Linux host the compositor selects
+linux-vulkan-nvidia-adf287b8f0ee, a capability cluster measured on a real
+GeForce, and hands its limits, extension list and shader precision to a page.
+Nothing checked whether the host has a GPU. On a server that does not, ANGLE
+falls back to SwiftShader and the page gets an NVIDIA capability table in front
+of a software rasteriser.
+
+That is the one contradiction in this area a fork can actually close, and it is
+not subtle. Measured on this machine, through the shipped binary, the same
+fragment-shader workload runs at 2516 giga-iterations per second on ANGLE/Metal
+and 9.5 on SwiftShader; small draw calls run at 2.4 million per second against
+65 thousand. A detector does not need a table of reference devices for that, and
+dividing by a CPU baseline does not wash it out, because the CPU baseline was
+identical in both runs. Readback separates them too: the same WebGL scene and
+the same 2D canvas hash differently on the two paths.
+
+Nothing here touches render timing, and nothing should. The only ways to close a
+timing gap are to make software rendering fast or to slow hardware down, and a
+deliberate timing adjustment is a new observable in its own right. What can be
+fixed is the claim, and the fix is to stop making one the host cannot back.
+
+ProbeHostCapability is the right place because it is the only thing that
+establishes the backend, and every consumer reads its answer: the anchor
+servability filter, the explain report, and the limitations the report prints.
+Fixing the caller would leave the next caller wrong.
+
+Three cases, in order of how much they know:
+
+--disable-gpu rules out every hardware backend, so the launch has stated the
+software rasteriser. It outranks --use-angle, because naming a hardware backend
+does not bring hardware back.
+
+Failing that, the host is asked whether it has a graphics device at all. On
+Linux that is a DRM render node: /dev/dri/renderD128 and up. A cloud instance
+or container without GPU passthrough has no /dev/dri, and a server with nothing
+but an EFI framebuffer has /dev/dri/card0 and no render node, which is why the
+render node and not the directory is the fact that decides it. One access() on
+the directory answers the common case; a host that has the directory costs at
+most eight more.
+
+The answer is one-way and is meant to be. Absence means ANGLE will fall back to
+software. Presence means only that it probably will not: a render node with no
+usable driver behind it still ends in software. Being wrong in the presence
+direction leaves the behaviour that exists today, while being wrong in the
+absence direction is exactly what puts a discrete GPU claim in front of a
+software rasteriser -- so the check only ever moves the answer towards software,
+and --use-angle remains the way to state the backend by hand. Windows and macOS
+keep the platform default, because there is no equivalent single syscall there;
+answering it would take a D3D11 or Metal device creation, which is the GPU
+process's job.
+
+access() rather than PathExists() because ProbeHostCapability's header promises
+no blocking I/O and runs on the startup path. access() carries no blocking-call
+assertion. R_OK|W_OK because the GPU process opens the node read-write, so a
+node it cannot open is not a device it can use.
+
+What happens next is patch 0081's existing policy, unchanged: no anchor in the
+compiled catalogue was captured through SwiftShader, so the draw finds nothing
+servable, says so, and inherits the host. That is honest but not yet coherent --
+the fallback is absent rather than modest -- and it is a catalogue gap, not a
+code one. A swiftshader-backend anchor is constructible from T0 evidence already
+in the tree: resources/fingerprints/raw/stock-linux-20260907T150627Z.json is a
+stock Chromium 152 Linux capture through SwiftShader, with the full parameter
+tables, extension lists and precision values. With that anchor present this
+change selects it and the GPU-less host gets a coherent software identity.
+
+The three fields the report prints now say which inference was made rather than
+asserting the platform default, because after this change the platform default
+is no longer the only one. The explain line reads "swiftshader (no DRM render
+node on this host, not probed)" where it used to read "vulkan (platform
+default, not probed)" on the same machine.
+
+No new switch, no new page-visible value, no change on a host with a GPU: this
+machine still composes macos-metal-apple-850a91233555 headed and headless, and
+the probe confirms the renderer string, the limits and all four readback digests
+are identical before and after.
+
+Ledger: headless.gpu-stack, gpuinfo.gl-renderer, gpu.angle-backend.
+--- a/base/apostate/host_capability.h
++++ b/base/apostate/host_capability.h
+@@ -38,16 +38,26 @@
+   // "vulkan", "gl" or "swiftshader".
+   std::string graphics_backend;
+ 
+-  // True when `graphics_backend` is the platform's default rather than an
+-  // observed fact. It always is, unless --use-angle named one explicitly.
++  // True when `graphics_backend` was reasoned about rather than stated. It is
++  // false only when the launch named the backend itself -- --use-angle picking
++  // one, or --disable-gpu ruling every hardware backend out.
+   //
+   // A real backend probe requires the GPU process, and the GPU process is a
+   // child: A3 requires the profile to be fully materialised before the first
+-  // renderer starts, so no child exists yet when this runs. The platform
+-  // default is therefore the best available fact at composition time, and the
+-  // explain report says so rather than implying a measurement happened.
++  // renderer starts, so no child exists yet when this runs. An inference from
++  // host facts is therefore the best available answer at composition time, and
++  // the explain report says which inference it was rather than implying a
++  // measurement happened.
+   bool graphics_backend_is_inferred = true;
+ 
++  // How `graphics_backend` was established, as a short phrase for the explain
++  // report and the composition's limitations: "the platform default",
++  // "--use-angle", "--disable-gpu" or "no DRM render node on this host".
++  //
++  // Carried rather than recomputed at the point of display because only the
++  // probe knows which branch it took.
++  std::string graphics_backend_basis;
++
+   // The host OS, as a fingerprint platform token: "windows", "macos" or
+   // "linux". Empty on a platform the model has no persona for.
+   std::string platform;
+--- a/base/apostate/host_capability.cc
++++ b/base/apostate/host_capability.cc
+@@ -9,25 +9,36 @@
+ #include <vector>
+ 
+ #include "base/command_line.h"
++#include "base/strings/strcat.h"
+ #include "base/strings/string_number_conversions.h"
+ #include "base/strings/string_split.h"
+ #include "base/system/sys_info.h"
+ #include "build/build_config.h"
+ 
++#if BUILDFLAG(IS_LINUX)
++#include <unistd.h>
++#endif
++
+ namespace base::apostate {
+ 
+ namespace {
+ 
+-// Switch names spelled as literals because base/ cannot include ui/gl or
+-// chrome/common. Both are stable, both are cited, and neither is readable by
+-// web content.
++// Switch names spelled as literals because base/ cannot include ui/gl,
++// content/public or chrome/common. All three are stable, all three are cited,
++// and none is readable by web content.
+ //
+ // "use-angle": ui/gl/gl_switches.cc kUseANGLE, with the backend value names
+ // from kANGLEImplementation*Name in the same file.
++// "disable-gpu": content/public/common/content_switches.cc kDisableGpu.
+ // "window-size": chrome/common/chrome_switches.cc kWindowSize, "w,h" in DIP.
+ constexpr char kUseANGLESwitch[] = "use-angle";
++constexpr char kDisableGpuSwitch[] = "disable-gpu";
+ constexpr char kWindowSizeSwitch[] = "window-size";
+ 
++// The Anchor::backend token for the software rasteriser. No anchor captured
++// through hardware can be served on it, which is the whole point of naming it.
++constexpr char kSoftwareBackend[] = "swiftshader";
++
+ // The backend ANGLE selects when nothing overrides it.
+ //
+ // Grounded in this project's own T0 captures rather than asserted: the corpus
+@@ -82,12 +93,61 @@
+       value == "gles-egl") {
+     return "gl";
+   }
+-  if (value == "swiftshader" || value == "swiftshader-webgl") {
+-    return "swiftshader";
++  if (value == kSoftwareBackend || value == "swiftshader-webgl") {
++    return kSoftwareBackend;
+   }
+   return std::string_view();
+ }
+ 
++// True when this host has no hardware graphics device for ANGLE to use, so
++// every backend above it resolves to the software rasteriser whatever the
++// platform default says.
++//
++// Implemented for Linux because that is where the case is real: a cloud
++// instance or a container without GPU passthrough has no /dev/dri at all, and
++// a server with nothing but an EFI framebuffer has /dev/dri/card0 and no
++// render node. ANGLE's Vulkan and GL backends both reach hardware through a
++// render node, so the render node rather than the directory is the fact that
++// decides it.
++//
++// The answer is one-way on purpose. Absence means ANGLE will fall back to
++// software. Presence means only that it probably will not: a render node with
++// no usable driver behind it still ends in software, and --use-angle states
++// that by hand. Being wrong in the presence direction leaves today's
++// behaviour; being wrong in the absence direction is what produces a discrete
++// GPU claim on a host that renders in software, so the check only ever moves
++// the answer towards software.
++//
++// access() rather than base::PathExists() because this is a devfs syscall on
++// the startup path and ProbeHostCapability's header promises no blocking I/O:
++// access() carries no blocking-call assertion, and a host with no /dev/dri
++// costs exactly one of them. R_OK|W_OK because the GPU process opens the node
++// read-write, so a node it could not open is not a device it can use.
++bool HostHasNoGpuDevice() {
++#if BUILDFLAG(IS_LINUX)
++  if (access("/dev/dri", X_OK) != 0) {
++    return true;
++  }
++  // DRM render nodes are minor numbers from 128 upward, assigned densely, one
++  // per device. Eight covers eight GPUs; past that the answer is the same.
++  // Not named `minor`: glibc has a history of defining that as a macro in
++  // sys/sysmacros.h, which <unistd.h> can reach.
++  for (int node_minor = 128; node_minor < 136; ++node_minor) {
++    const std::string node =
++        StrCat({"/dev/dri/renderD", NumberToString(node_minor)});
++    if (access(node.c_str(), R_OK | W_OK) == 0) {
++      return false;
++    }
++  }
++  return true;
++#else
++  // Windows and macOS have no equivalent one-syscall answer -- it would take
++  // a D3D11 or Metal device creation, which is the GPU process's job -- so the
++  // backend stays the platform default there and --use-angle states it.
++  return false;
++#endif
++}
++
+ }  // namespace
+ 
+ HostCapability ProbeHostCapability(const CommandLine& command_line) {
+@@ -98,6 +158,7 @@
+   host.platform = HostPlatformToken();
+ 
+   host.graphics_backend = PlatformDefaultBackend();
++  host.graphics_backend_basis = "the platform default";
+   if (command_line.HasSwitch(kUseANGLESwitch)) {
+     const std::string requested =
+         command_line.GetSwitchValueASCII(kUseANGLESwitch);
+@@ -105,9 +166,30 @@
+     if (!mapped.empty()) {
+       host.graphics_backend = std::string(mapped);
+       host.graphics_backend_is_inferred = false;
++      host.graphics_backend_basis = "--use-angle";
+     }
+   }
+ 
++  // --disable-gpu turns every hardware backend off, so the launch has named
++  // the software rasteriser as surely as --use-angle=swiftshader would have.
++  // It outranks --use-angle rather than yielding to it: naming a hardware
++  // backend does not bring the hardware back, so --use-angle=vulkan with the
++  // GPU disabled still renders in software.
++  if (command_line.HasSwitch(kDisableGpuSwitch)) {
++    host.graphics_backend = kSoftwareBackend;
++    host.graphics_backend_is_inferred = false;
++    host.graphics_backend_basis = "--disable-gpu";
++  }
++
++  // Nothing named a backend, so the platform default stands only if the host
++  // has a device to serve it. Without one the default is a claim about
++  // hardware that is not there, and the anchor drawn from it would be a
++  // capability cluster measured on a GPU this launch will never touch.
++  if (host.graphics_backend_is_inferred && HostHasNoGpuDevice()) {
++    host.graphics_backend = kSoftwareBackend;
++    host.graphics_backend_basis = "no DRM render node on this host";
++  }
++
+   if (command_line.HasSwitch(kWindowSizeSwitch)) {
+     const std::string value = command_line.GetSwitchValueASCII(kWindowSizeSwitch);
+     const std::vector<std::string_view> parts =
+--- a/base/apostate/compose.cc
++++ b/base/apostate/compose.cc
+@@ -529,8 +529,9 @@
+   }
+   if (request.host.graphics_backend_is_inferred) {
+     composition.limitations.push_back(
+-        "the host graphics backend was taken to be the platform default (" +
+-        request.host.graphics_backend +
++        "the host graphics backend was inferred to be " +
++        request.host.graphics_backend + " (" +
++        request.host.graphics_backend_basis +
+         ") because the GPU process does not exist yet at composition time; "
+         "pass --use-angle to state it");
+   }
+--- a/base/apostate/explain.cc
++++ b/base/apostate/explain.cc
+@@ -93,10 +93,8 @@
+   AppendField(out, "host memory",
+               NumberToString(host.total_memory_bytes) + " bytes");
+   AppendField(out, "host backend",
+-              host.graphics_backend +
+-                  (host.graphics_backend_is_inferred
+-                       ? " (platform default, not probed)"
+-                       : " (from --use-angle)"));
++              host.graphics_backend + " (" + host.graphics_backend_basis +
++                  (host.graphics_backend_is_inferred ? ", not probed)" : ")"));
+   if (host.window_width > 0 && host.window_height > 0) {
+     AppendField(out, "window bounds",
+                 NumberToString(host.window_width) + "x" +
+--- a/base/apostate/host_capability_unittest.cc
++++ b/base/apostate/host_capability_unittest.cc
+@@ -72,6 +72,34 @@
+   EXPECT_TRUE(null_backend.graphics_backend_is_inferred);
+ }
+ 
++// The anchor filter selects a measured capability cluster by backend, so a
++// backend that says "hardware" on a launch that has no hardware is how a
++// discrete-GPU claim ends up in front of a software rasteriser. These are the
++// two cases the launch itself settles.
++TEST(ApostateHostCapabilityTest, ADisabledGpuNamesTheSoftwareRasteriser) {
++  // Only presence matters, so the value Launch() synthesises is irrelevant.
++  const HostCapability disabled = ProbeHostCapability(Launch({"disable-gpu"}));
++  EXPECT_EQ("swiftshader", disabled.graphics_backend);
++  EXPECT_FALSE(disabled.graphics_backend_is_inferred);
++  EXPECT_EQ("--disable-gpu", disabled.graphics_backend_basis);
++
++  // Naming a hardware backend does not bring the hardware back.
++  const HostCapability both =
++      ProbeHostCapability(Launch({"use-angle=vulkan", "disable-gpu"}));
++  EXPECT_EQ("swiftshader", both.graphics_backend);
++  EXPECT_FALSE(both.graphics_backend_is_inferred);
++}
++
++// The basis is what the explain report and the composition's limitations print
++// to say how the backend was arrived at. An unset one would render as an empty
++// pair of brackets and tell a reader nothing.
++TEST(ApostateHostCapabilityTest, EveryBackendCarriesItsBasis) {
++  EXPECT_FALSE(ProbeHostCapability(Launch({})).graphics_backend_basis.empty());
++  EXPECT_EQ("--use-angle",
++            ProbeHostCapability(Launch({"use-angle=metal"}))
++                .graphics_backend_basis);
++}
++
+ TEST(ApostateHostCapabilityTest, WindowBoundsComeFromTheLaunch) {
+   const HostCapability sized =
+       ProbeHostCapability(Launch({"window-size=1280,720"}));

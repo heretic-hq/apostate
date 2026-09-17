@@ -1,0 +1,487 @@
+Subject: devtools: remove the protocol-level tells of an attached CDP client
+
+Almost everyone who runs this browser drives it with Playwright or Puppeteer
+over the DevTools protocol, so the differences between an idle Apostate and an
+automated one are not an edge case, they are the normal case. Patch 0003 removed
+the launch switches that set navigator.webdriver, which was the loud half. The
+quiet half is that attaching a client changes how expensive page script is, and
+that a remote debugging port answers a page that asks.
+
+Measured on the shipped macos-arm64 build of this series, four launch modes:
+no client at all; a client attached with Runtime.enable, which is what both
+drivers send; a client attached without it; and a client over
+--remote-debugging-pipe. Each number below is a ratio taken inside one page in
+one launch, so a detector needs no baseline for the machine it is running on and
+no second visit to compare against.
+
+    try { throw 1 } catch {}, cost at call depth 240 over cost at depth 2
+        no client                  1.0
+        session, no Runtime.enable 1.0
+        Runtime.enable            26.5
+
+    console.log(''), same depth ratio
+        no client                  1.0
+        session, no Runtime.enable 1.0
+        Runtime.enable            10.8
+
+    console.trace('') over console.log(''), both at depth 60
+        no client                  8.0
+        session, no Runtime.enable 6.4
+        Runtime.enable             1.009
+
+Two causes, both in V8Debugger. Runtime.enable calls
+setMaxCallStackSizeToCapture, which asked the isolate to capture stack traces
+for uncaught exceptions; V8 then walks the live JS stack on the throwing thread,
+so a throw costs more the deeper the page's own call stack is. Separately
+captureStackTrace widened the console capture from one frame to two hundred
+whenever any session had the Runtime domain enabled, and the walk again happens
+in the page's own call. console.trace and console.timeEnd are pinned - always
+full, always one frame - which is what makes the ratios self-calibrating: the
+page compares a console call whose cost it cannot change against one whose cost
+depends on us.
+
+Both now depend on whether a debug delegate is installed, which is Debugger.
+enable. DevTools enables that domain when it attaches, so a human debugging
+keeps full console stacks and exception stack traces. Neither Playwright nor
+Puppeteer enables it in normal operation, so ordinary automation now costs what
+an idle browser costs. The point is not that the numbers get smaller, it is that
+every state this browser can be in is a state stock Chrome can also be in: with
+no delegate it behaves exactly like Chrome with nothing attached, and with one
+exactly like Chrome with DevTools open. Upstream's own precondition is kept, so
+the uncaught-exception request only ever narrows.
+
+The console serialisation half was mostly folklore and is worth stating plainly,
+because the probe everyone cites does not work. Arguments are stringified
+unconditionally, with or without a client, so counting getter invocations
+measures nothing; a Proxy is short-circuited to the literal "[object Proxy]"
+without touching a trap, in every mode; and value-mirror already declines to
+read a property whose own descriptor carries a non-builtin getter, which defeats
+the canonical "define a getter on an Error's stack and console.debug it" probe
+upstream. Measured, all three are identical attached and unattached, as are
+Error.prepareStackTrace, Error.captureStackTrace, Error.stackTraceLimit, stack
+line counts and Function.prototype.toString.
+
+What did survive is one step past that guard. When there was no own descriptor,
+getErrorProperty fell through to a plain Get, and a plain Get walks the
+prototype chain. With stack deleted from an instance and an accessor installed
+on Error.prototype, the accessor fired once per console.debug with Runtime
+enabled and never without. An accessor on a prototype name went from one read to
+three. getErrorProperty now reads the own property or nothing. Every caller
+already handles a missing property, and for name the fallback is
+GetConstructorName, the value that code prefers anyway, so an error built
+normally still serialises the same way.
+
+The remote debugging port is a live tell and does not need a timing channel. A
+document in the local address space fetching its own host with mode 'no-cors'
+sees the request resolve when --remote-debugging-port is set and reject with
+TypeError when it is not, four times out of four. The ledger recorded the
+unresolved question as whether Local Network Access blocks the probe before or
+after the TCP connect: forcing the document into the public address space with
+--ip-address-space-overrides, the probe is blocked and open and closed ports
+become indistinguishable by outcome, with no timing separation above the noise
+after the first warm-up request. So the answer is that LNA does defend a
+public-origin detector at this revision, and the reach that remains is documents
+in the local and private address spaces and any configuration with those checks
+turned off. That is enough to fix, because it is reachable and because the fix
+is cheap.
+
+The endpoint now declines anything a document sent, and declines it by closing
+the connection rather than answering. Answering at all is the leak: any HTTP
+response, including an error, resolves a no-cors fetch. A closed connection
+reaches the page as the same generic failure a refused connection produces. The
+discriminators are Origin and Sec-Fetch-Site, both forbidden header names that
+page script cannot set or clear, and the rule is built so that every client that
+is not a document still works: Puppeteer and Playwright send neither header, the
+front-end this endpoint serves sends this endpoint's own origin, and a
+chrome:// or devtools:// front-end sends a scheme no page can have. What remains
+is that the kernel still completes the TCP handshake before we hang up, so an
+open port and a refused one differ by one loopback round trip. Measured, that
+difference sits inside the spread of repeated probes to a port that was never
+open, and performance.now is clamped to a coarser resolution than the difference
+in a page that is not cross-origin isolated, but it is not zero and is reported
+rather than claimed away.
+
+Last, performance.memory and console.memory had no emitter. Both read V8's heap
+statistics through the same MemoryInfo, and V8 sizes its heap from installed
+memory: the old generation is that figure halved and then clamped to 4 GiB. On a
+host with 8 GiB or more the result saturates, which is why a 36 GiB host reports
+the same jsHeapSizeLimit for every profile in the current pool - 4395630592
+bytes read precisely, which is what a site-locked page gets, and 3760000000
+after Blink's bucketing elsewhere - and why the problem looks like it is not
+there. It is not there on this host. It is there on the machines this browser
+actually runs on: a 2 or 4 GiB VM emits a limit no device with the claimed
+memory would emit, contradicting navigator.deviceMemory, and nothing in the tree
+owned that readout.
+
+gin now hands V8 the profile's figure instead of the host's, clamped to the
+host, so the arithmetic stays V8's own and capacity is only ever reduced,
+matching the clamp in patches 0004 and 0006. The reported limit is therefore one
+the heap genuinely honours, which is why this is a configuration change rather
+than an accessor override. A profile that claims less memory than the host now
+really gets that device's heap ceiling. That is the intended consequence and not
+a side effect, and it is the reason the value is worth changing at all.
+
+Measured across all three attach states, the limit does not move, before or
+after this patch. usedJSHeapSize and totalJSHeapSize do rise when a client
+attaches, because the inspector really does allocate in the renderer's heap.
+Bucketing hides it - read bucketized, all three states report the first bucket
+for both - but a site-locked page reads precisely, and there the growth is
+visible. That cannot be removed without lying about the heap, and unlike the
+ratios above it needs an absolute expectation for a page whose own content sets
+the baseline, so it is reported rather than patched.
+
+One thing was investigated and deliberately left alone. Runtime.enable also sets
+ForceMainWorldInitialization, which gives a script context to frames that would
+not otherwise get one. Across forty sandboxed iframes this moved window.length
+not at all, left contentDocument unreadable as expected, and changed the
+used-heap delta by about five per cent, which is inside the spread of the
+measurement and needs --enable-precise-memory-info to see at all, a switch a
+page cannot set. Removing the setting would cost a driver the ability to
+evaluate in those frames, which is a real feature, for no measured gain.
+
+Ledger: automation.remote-debugging-port-open, cdp.session-attach-presence,
+cdp.console-argument-serialization, cdp.runtime-enable-force-main-world,
+introspection.console-memory.
+
+--- a/content/browser/devtools/devtools_http_handler.cc
++++ b/content/browser/devtools/devtools_http_handler.cc
+@@ -126,6 +126,65 @@
+   return url.HostIsIPAddress() || net::IsLocalHostname(url.GetHost());
+ }
+ 
++// Apostate: true when this request was issued by a web page rather than by a
++// DevTools client.
++//
++// A page cannot reach the protocol itself - there is no CORS header here and
++// the WebSocket paths carry unguessable ids - but it does not need to. It only
++// needs to learn that something answered, and `fetch(url, {mode: 'no-cors'})`
++// resolving rather than rejecting tells it that. Measured on this build from a
++// document in the local address space: the fetch resolves with
++// --remote-debugging-port and rejects with TypeError without it, four times out
++// of four, in well under a millisecond. That is a boolean "this browser is
++// being automated over TCP", and it is the default transport for Puppeteer.
++// Local Network Access does block the same probe from a document in the public
++// address space at this revision, so the surviving reach is documents in the
++// local and private address spaces, plus any configuration where those checks
++// are off.
++//
++// The discriminators are headers the network stack adds on the document's
++// behalf. Both are forbidden header names, so page script can neither set nor
++// clear them.
++//
++// Origin comes first because it is the one a WebSocket handshake carries; the
++// handshake has no Fetch Metadata at all. A page's origin is always http,
++// https, or the opaque "null" a sandboxed frame sends. So a non-http scheme is
++// not a page - that is the chrome:// and devtools:// front-ends, including the
++// one chrome://inspect opens against a remote target - and the single http
++// origin that belongs here is this endpoint's own, which is what the front-end
++// it serves sends back.
++//
++// Sec-Fetch-Site covers the rest: it is present on every subresource fetch,
++// image load, script load and frame navigation, confirmed against a capture of
++// this build's own requests. Its value is `none` only for a navigation the user
++// started, which is how a human reaches the discovery page, and `same-origin`
++// only for the bundled front-end loading its own files. Everything a page can
++// cause is `same-site` or `cross-site`.
++//
++// Clients that are not browsers - curl, and the Node HTTP and WebSocket stacks
++// Puppeteer and Playwright are built on - send neither header and are
++// unaffected. A client that does send Origin, as the Python websocket-client
++// library does, sends the endpoint's own and is unaffected too.
++bool RequestIsFromWebPage(const net::HttpServerRequestInfo& info) {
++  const std::string origin = info.GetHeaderValue("origin");
++  if (!origin.empty()) {
++    if (origin == "null")
++      return true;
++    const GURL origin_url(origin);
++    if (!origin_url.is_valid() || !origin_url.SchemeIsHTTPOrHTTPS())
++      return false;
++    // Compare against the authority the request was addressed to rather than a
++    // fixed port, because the port is chosen at launch.
++    const std::string host = info.GetHeaderValue("host");
++    return host.empty() || origin_url != GURL("http://" + host);
++  }
++
++  const std::string fetch_site = info.GetHeaderValue("sec-fetch-site");
++  if (fetch_site.empty())
++    return false;
++  return fetch_site != "none" && fetch_site != "same-origin";
++}
++
+ // Returns the (incorrectly named, for historical reasons) WebKit version, in
+ // the form "major.minor (@chromium_git_revision)".
+ std::string GetWebKitVersion() {
+@@ -460,6 +519,16 @@
+ 
+ void ServerWrapper::OnHttpRequest(int connection_id,
+                                   const net::HttpServerRequestInfo& info) {
++  // Apostate: a page gets nothing back, not even an error. Any HTTP response
++  // at all resolves a no-cors fetch and tells the page the port is open, so
++  // the connection is closed instead. What remains is one loopback accept
++  // followed by a FIN, which fetch, Image and script all surface as the same
++  // generic failure a refused connection produces.
++  if (RequestIsFromWebPage(info)) {
++    Close(connection_id);
++    return;
++  }
++
+   if (!RequestIsSafeToServe(info)) {
+     Send500(connection_id,
+             "Host header is specified and is not an IP address or localhost.");
+@@ -515,6 +584,14 @@
+ void ServerWrapper::OnWebSocketRequest(
+     int connection_id,
+     const net::HttpServerRequestInfo& request) {
++  // Apostate: same reasoning as OnHttpRequest. A handshake that gets a 404 and
++  // one that never connects both arrive at the page as a bare error event, but
++  // only if we decline to speak.
++  if (RequestIsFromWebPage(request)) {
++    Close(connection_id);
++    return;
++  }
++
+   if (!RequestIsSafeToServe(request)) {
+     Send500(connection_id,
+             "Host header is specified and is not an IP address or localhost.");
+--- a/gin/isolate_holder.cc
++++ b/gin/isolate_holder.cc
+@@ -8,10 +8,12 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++#include <algorithm>
+ #include <memory>
+ #include <optional>
+ #include <utility>
+ 
++#include "base/apostate/profile.h"
+ #include "base/byte_size.h"
+ #include "base/check_op.h"
+ #include "base/system/sys_info.h"
+@@ -189,8 +191,37 @@
+   std::unique_ptr<v8::Isolate::CreateParams> params =
+       std::make_unique<v8::Isolate::CreateParams>();
+   params->code_event_handler = DebugImpl::GetJitCodeEventHandler();
++  // Apostate: V8 sizes its heap from installed memory, and the resulting
++  // ceiling is readable from JavaScript as performance.memory.jsHeapSizeLimit
++  // and console.memory.jsHeapSizeLimit. Left on the host's figure it is a
++  // second, unspoofed readout of the fact navigator.deviceMemory reports, and
++  // the two can contradict each other: V8's old generation is the installed
++  // memory halved and then clamped to 4 GiB, so a host under 8 GiB emits a
++  // limit no device with the claimed memory would emit. Measured on this
++  // build, a 36 GiB host reports 4395630592 bytes for every profile in the
++  // current pool, which is why the contradiction is invisible here and would
++  // appear immediately on a 2 or 4 GiB VM - the machines this browser is
++  // actually run on.
++  //
++  // Supply the claimed figure and let V8 do its own arithmetic, for the same
++  // reason patch 0006 supplies the input to ApproximatedDeviceMemory rather
++  // than overriding its output: the mapping from memory to heap limit is
++  // V8's, it is coarse and quantised, and reimplementing it here would drift
++  // and eventually emit a number no Chrome produces.
++  //
++  // Capacity is only ever reduced, matching the clamp in patches 0004 and
++  // 0006. The claim is therefore always at or below what the host can back, so
++  // the heap genuinely behaves the way the reported limit says it does, and
++  // the browser gives up earlier than stock rather than later. Virtual memory
++  // stays the host's; it is not part of the claim.
++  const base::apostate::Profile* profile = base::apostate::Profile::Get();
++  const std::optional<uint64_t> claimed_memory =
++      profile ? profile->memory_total_bytes() : std::nullopt;
++  const uint64_t host_memory =
++      base::SysInfo::AmountOfTotalPhysicalMemory().InBytes();
+   params->constraints.ConfigureDefaults(
+-      base::SysInfo::AmountOfTotalPhysicalMemory().InBytes(),
++      claimed_memory.has_value() ? std::min(*claimed_memory, host_memory)
++                                 : host_memory,
+       base::SysInfo::AmountOfVirtualMemory().InBytes());
+   params->array_buffer_allocator = g_array_buffer_allocator;
+   params->allow_atomics_wait = true;
+--- a/v8/src/inspector/v8-debugger.cc
++++ b/v8/src/inspector/v8-debugger.cc
+@@ -111,6 +111,11 @@
+ #if V8_ENABLE_WEBASSEMBLY
+   v8::debug::EnterDebuggingForIsolate(m_isolate);
+ #endif  // V8_ENABLE_WEBASSEMBLY
++  // Apostate: the delegate is now installed, so uncaught-exception stack
++  // capture may be turned on. Recomputed here rather than only in
++  // setMaxCallStackSizeToCapture because Debugger.enable usually arrives
++  // after Runtime.enable.
++  updateUncaughtExceptionStackCapture();
+ }
+ 
+ void V8Debugger::disable() {
+@@ -147,6 +152,9 @@
+   m_isolate->RemoveNearHeapLimitCallback(&V8Debugger::nearHeapLimitCallback,
+                                          m_originalHeapLimit);
+   m_originalHeapLimit = 0;
++  // Apostate: the delegate is gone, so uncaught-exception stack capture goes
++  // back off even though the Runtime agents are still enabled.
++  updateUncaughtExceptionStackCapture();
+ }
+ 
+ bool V8Debugger::isPausedInContextGroup(int contextGroupId) const {
+@@ -1080,25 +1088,19 @@
+     m_maxCallStackSizeToCaptureMap[agent] = size;
+   }
+ 
+-  // The following logic is a bit complicated to decipher because we
+-  // want to retain backwards compatible semantics:
++  // When no `Runtime` domain is enabled we stick to the default maximum call
++  // stack size; when `Runtime` is enabled for at least one front-end we take
++  // the maximum of the sizes those front-ends requested, which might be 0.
+   //
+-  // (a) When no `Runtime` domain is enabled, we stick to the default
+-  //     maximum call stack size, but don't let V8 collect stack traces
+-  //     for uncaught exceptions.
+-  // (b) When `Runtime` is enabled for at least one front-end, we compute
+-  //     the maximum of the requested maximum call stack sizes of all the
+-  //     front-ends whose `Runtime` domains are enabled (which might be 0),
+-  //     and ask V8 to collect stack traces for uncaught exceptions.
+-  //
+-  // The latter allows performance test automation infrastructure to drive
+-  // browser via `Runtime` domain while still minimizing the performance
+-  // overhead of having the inspector attached - see the relevant design
+-  // document https://bit.ly/v8-cheaper-inspector-stack-traces for more
++  // The bookkeeping exists so that performance test automation can drive the
++  // browser over the `Runtime` domain while minimising the overhead of having
++  // the inspector attached - see the relevant design document
++  // https://bit.ly/v8-cheaper-inspector-stack-traces for more. Apostate keeps
++  // the bookkeeping and moves only the uncaught-exception request out of it,
++  // to updateUncaughtExceptionStackCapture below.
+   if (m_maxCallStackSizeToCaptureMap.empty()) {
+     m_maxCallStackSizeToCapture =
+         V8StackTraceImpl::kDefaultMaxCallStackSizeToCapture;
+-    m_isolate->SetCaptureStackTraceForUncaughtExceptions(false);
+   } else {
+     m_maxCallStackSizeToCapture = 0;
+     for (auto const& pair : m_maxCallStackSizeToCaptureMap) {
+@@ -1106,11 +1108,41 @@
+         m_maxCallStackSizeToCapture = pair.second;
+       }
+     }
+-    m_isolate->SetCaptureStackTraceForUncaughtExceptions(
+-        m_maxCallStackSizeToCapture > 0, m_maxCallStackSizeToCapture);
+   }
++  // Apostate: upstream asked V8 for uncaught-exception stack traces here as
++  // soon as one front-end enabled the Runtime domain. That made every `throw`
++  // in the isolate pay for a 200-frame capture, which a page can time. The
++  // request now depends on whether a debug delegate is installed instead.
++  updateUncaughtExceptionStackCapture();
+ }
+ 
++void V8Debugger::updateUncaughtExceptionStackCapture() {
++  // Uncaught-exception stack capture is an isolate-wide switch and its cost is
++  // paid by page script, not by the front-end: V8 walks the live JS stack on
++  // the throwing thread, so the cost of a `throw` grows with call depth.
++  // Because the capture flag can be flipped by Runtime.enable alone, a page
++  // could measure `throw` at two call depths and read the ratio as a boolean
++  // "a CDP client is attached", with no baseline to calibrate against.
++  //
++  // Gate it on the debug delegate, which only Debugger.enable installs. A
++  // front-end that is actually debugging - DevTools enables the Debugger
++  // domain on attach - still gets exception stack traces, and the states this
++  // browser can be in remain states stock Chrome can also be in: delegate
++  // absent behaves exactly like Chrome with nothing attached, delegate present
++  // exactly like Chrome with DevTools open.
++  //
++  // Upstream's own precondition is kept: no enabled Runtime domain means no
++  // capture, so this only ever narrows what upstream would have asked for.
++  const bool runtimeEnabled = !m_maxCallStackSizeToCaptureMap.empty();
++  const bool debuggerActive = m_enableCount > 0;
++  if (!runtimeEnabled || !debuggerActive || m_maxCallStackSizeToCapture <= 0) {
++    m_isolate->SetCaptureStackTraceForUncaughtExceptions(false);
++    return;
++  }
++  m_isolate->SetCaptureStackTraceForUncaughtExceptions(
++      true, m_maxCallStackSizeToCapture);
++}
++
+ void V8Debugger::asyncParentFor(int stackTraceId,
+                                 std::shared_ptr<AsyncStackTrace>* asyncParent,
+                                 V8StackTraceId* externalParent) const {
+@@ -1393,9 +1425,26 @@
+   if (fullStack) {
+     stackSize = V8StackTraceImpl::kDefaultMaxCallStackSizeToCapture;
+   } else {
++    // Apostate: upstream widened this capture from one frame to 200 as soon as
++    // any session had the Runtime domain enabled. The walk happens on the
++    // calling thread, so the cost lands in the console call the page just
++    // made, and it grows with the page's own call depth. Measured on this
++    // build, console.log at depth 240 versus depth 2 costs the same with no
++    // client attached and about eleven times more under Runtime.enable, and
++    // console.trace - which always captures fully - goes from eight times the
++    // cost of console.log to parity. Both are ratios taken inside one page, so
++    // a detector needs no baseline for the machine it is running on.
++    //
++    // Runtime.enable is what Puppeteer and Playwright send, so upstream's
++    // condition makes ordinary automation measurable. Ask for the wide capture
++    // only while a debug delegate is installed, which is Debugger.enable, a
++    // domain DevTools turns on and neither driver does. A page then sees the
++    // one-frame cost whenever it would in stock Chrome with nothing attached,
++    // and the wide cost whenever it would in stock Chrome with DevTools open.
+     m_inspector->forEachSession(
+         contextGroupId, [this, &stackSize](V8InspectorSessionImpl* session) {
+-          if (session->runtimeAgent()->enabled()) {
++          V8DebuggerAgentImpl* debuggerAgent = session->debuggerAgent();
++          if (debuggerAgent && debuggerAgent->enabled()) {
+             stackSize = maxCallStackSizeToCapture();
+           }
+         });
+--- a/v8/src/inspector/v8-debugger.h
++++ b/v8/src/inspector/v8-debugger.h
+@@ -229,6 +229,10 @@
+ 
+   int currentContextGroupId();
+ 
++  // Apostate: applies the isolate's uncaught-exception stack-capture setting
++  // from the current debug-delegate state. See v8-debugger.cc.
++  void updateUncaughtExceptionStackCapture();
++
+   bool hasScheduledBreakOnNextFunctionCall() const;
+ 
+   void quitMessageLoopIfAgentsFinishedInstrumentation();
+--- a/v8/src/inspector/value-mirror.cc
++++ b/v8/src/inspector/value-mirror.cc
+@@ -267,6 +267,27 @@
+   return function->ScriptId() == v8::UnboundScript::kNoScriptId;
+ }
+ 
++// Reads one of an error's description properties without running page code.
++//
++// Apostate: this is reached only when a session is attached, from
++// descriptionForError below, and it is the only place the attached-only
++// serialisation path still touched a console argument in a way the page could
++// observe. Upstream already declines when the OWN descriptor carries a
++// non-builtin getter, which is what kills the widely cited probe (define a
++// getter on an Error's `stack`, console.debug it, see whether it ran). But when
++// there was no own descriptor at all it fell through to a plain Get(), and a
++// plain Get() walks the prototype chain. Measured on this build: with `stack`
++// deleted from the instance and an accessor installed on Error.prototype, the
++// accessor fired exactly once per console.debug with Runtime enabled and never
++// without, and the read count for a prototype `name` accessor went from one to
++// three. Either is a clean boolean.
++//
++// So read the own property or nothing. The fallbacks in descriptionForError
++// already cover a missing property, and for `name` the fallback is
++// GetConstructorName(), which is the value that function prefers anyway. An
++// Error constructed normally keeps its own `message` and its own builtin
++// `stack` accessor, so the description a front-end receives is unchanged for
++// every error that is not deliberately shaped to detect us.
+ v8::MaybeLocal<v8::Value> getErrorProperty(v8::Local<v8::Context> context,
+                                            v8::Local<v8::Object> object,
+                                            v8::Local<v8::String> name) {
+@@ -277,9 +298,11 @@
+   v8::Local<v8::Value> descriptor;
+   if (!object->GetOwnPropertyDescriptor(context, name).ToLocal(&descriptor)) {
+     tryCatch.Reset();
+-    return object->Get(context, name);
++    return v8::MaybeLocal<v8::Value>();
+   }
+-  if (!descriptor->IsObject()) return object->Get(context, name);
++  // No own property: declining here is what keeps a prototype accessor from
++  // running.
++  if (!descriptor->IsObject()) return v8::MaybeLocal<v8::Value>();
+ 
+   v8::Local<v8::Object> descriptorObject = descriptor.As<v8::Object>();
+   v8::Local<v8::Value> getDescriptor;

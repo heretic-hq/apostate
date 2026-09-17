@@ -27,8 +27,31 @@ Primary source at ANGLE7df613367a1d4ca9aea9ece344d4580d32d132a9:
 Chromium79460ebecaa5625e57a5fb679a735659e73dc687:
 gpu/command_buffer/service/feature_info.cc:1526 requires passthrough decoding.
 References: resources/fingerprints/raw/m4-max-chrome-20260908T163229Z.json,
-whose WebGL extension list includes KHR_parallel_shader_compile. Windows comparison
-evidence is unavailable; V1, native tests and actual WebGL1/2 functional controls remain required.
+whose WebGL extension list includes KHR_parallel_shader_compile.
+
+Measured since, on the shipped binary, which settles most of what this patch
+used to list as outstanding. On this M4 Max through ANGLE/Metal the extension
+is present, as the reference says. Through ANGLE/SwiftShader on the same
+machine it is absent, because the feature condition here is Linux-only and
+deliberately so — that matches stock Chromium's SwiftShader, whose captured
+extension list does not contain it either
+(resources/fingerprints/raw/stock-linux-20260907T150627Z.json). So macOS and
+Windows software rendering are unchanged and stay stock, and the Windows
+comparison this patch waited for is not needed to say that: the Windows path is
+the untouched default.
+
+What the enablement does change is Linux software rendering, and there it is a
+difference from stock that is worth naming. A Linux host with no GPU that is
+served no profile inherits itself, and then offers KHR_parallel_shader_compile
+where stock's SwiftShader does not — one extra name in getSupportedExtensions(),
+enumerable. Serving a profile removes it, because patch 0028 deletes any
+extension the claim does not contain while the native parallel path keeps
+running underneath, so the compile speed is kept and the enumeration is stock.
+That makes the remedy the same swiftshader-backend anchor patch 0027's prose
+asks for, and until it exists this is the one page-visible cost of the speedup.
+
+Still open, and only this: the ANGLE end2end tests added below have not been
+run, because this checkout cannot build them.
 
 diff --git a/third_party/angle/src/libANGLE/renderer/vulkan/vk_renderer.cpp b/third_party/angle/src/libANGLE/renderer/vulkan/vk_renderer.cpp
 --- a/third_party/angle/src/libANGLE/renderer/vulkan/vk_renderer.cpp

@@ -77,3 +77,15 @@
 0081-apostate-profile-compositor.patch
 0082-apostate-compositor-tests.patch
 0083-loader-composes-when-no-profile-given.patch
+
+# Order below is by dependency, not by number. 0093 rewrites the branch of
+# compose.cc that 0091 reaches, so it must follow it; anything later that
+# touches Compose() is authored on top of both.
+0086-webrtc-udp-through-socks5-or-fail-closed.patch
+0087-devtools-no-cdp-attach-tells.patch
+0088-netinfo-network-quality-from-profile.patch
+0089-battery-status-from-profile.patch
+0090-font-enumeration-from-profile.patch
+0091-compose-detects-a-gpuless-host.patch
+0093-gpu-cluster-inherits-when-no-anchor-serves.patch
+0094-webshare-reports-a-cancelled-share.patch

@@ -1,0 +1,285 @@
+Subject: blink: serve the Battery Status API from the profile
+
+The Battery Status API is exposed in this build. On the shipped macos-arm64
+binary navigator.getBattery is a function, window.BatteryManager is a
+constructor, and the promise resolves with the build host's real battery:
+charging false, level 0.98, chargingTime Infinity, dischargingTime 46440. No
+patch in the series touches it, so every launch reports whatever machine the
+browser happens to be running on.
+
+That is a contradiction in both directions. A profile whose panel, display
+geometry and media topology describe a MacBook, running on a host with no
+battery, reports charging true with level 1.0, chargingTime 0 and
+dischargingTime Infinity, and that tuple is what a server reports. A profile
+describing a desktop, running on a laptop, reports a discharging battery no
+desktop has. Either way the battery disagrees with the rest of the device, and
+the disagreement is readable in one call with no permission prompt.
+
+The resolution is a battery section in the profile and BatteryDispatcher as the
+emitter. When the section is present the dispatcher never binds the
+BatteryMonitor pipe, so the host's charger state and charge level are not read
+at all rather than read and then overwritten. One status is delivered and
+nothing re-queries it: two reads in one launch are equal and no chargingchange,
+levelchange or dischargingtimechange event ever fires, which is also what a
+machine sitting on a charger looks like over a short visit.
+
+battery.present false is not an absent API and must not be confused with one.
+Desktop Chrome still resolves getBattery(), and it answers exactly the tuple
+BatteryStatus's default constructor holds. So false means emit that tuple,
+which is coherent for a chassis with no battery and incoherent for anything
+else. present true takes the level and charging flag from the profile.
+
+Two coherence rules are derived rather than stated, so a profile cannot express
+a pair the API forbids. chargingTime and dischargingTime are each pinned to
+Infinity in the direction the charge is not moving, and a battery already full
+on the charger gets a chargingTime of zero. The times are also rounded to the
+nearest whole minute, because battery_status_manager_mac.cc reports
+base::Minutes(n).InSeconds() from the IOPM minute count and so cannot produce
+anything else, while Windows BatteryLifeTime and UPower TimeToEmpty report
+seconds and a whole minute is one of the values they can produce. Rounding to
+the most constrained platform is legal on all three. Level needs no rounding
+here: BatteryStatus::EnsureTwoSignificantDigits already quantises it to two
+decimals on every platform, so the constraint is Blink's rather than the
+platform's and holds even where the platform is finer.
+
+The status is delivered on a posted task rather than inline. getBattery()
+resolves after an IPC round trip on a stock build, so resolving synchronously
+from StartListening would resolve the promise a microtask turn earlier than a
+real Chrome does, and PlatformEventDispatcher sets is_listening_ only after
+StartListening returns, so notifying from inside it would reenter the
+dispatcher's own bookkeeping.
+
+What remains open: the battery is only served for launches whose catalogue
+supplies the section. An absent section still means host inheritance, so a
+profile composed without one lands back on the measured behaviour above. The
+coherence link between battery presence and the claimed chassis lives in the
+dispersion data rather than here, because nothing in the profile states a
+chassis directly: every os_release option reports form_factors ["Desktop"],
+which is why presence is conditioned on the panel instead. This patch cannot
+detect a profile that pairs a laptop panel with no battery, or the reverse.
+
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -428,6 +428,38 @@
+   // sets it true is claiming something desktop Chrome cannot produce.
+   std::optional<bool> network_save_data() const { return network_save_data_; }
+ 
++  // The battery the claimed device has, as the Battery Status API reports it.
++  //
++  // battery_present() is the gate, and false is not the same thing as hiding
++  // the API. Desktop Chrome still resolves getBattery(); it answers charging
++  // true, level 1.0, chargingTime 0 and dischargingTime Infinity, which is
++  // BatteryStatus's own default and what every platform's manager produces for
++  // a machine with no battery. So false means emit that tuple, and it is only
++  // coherent for a chassis that has no battery. A profile claiming a laptop
++  // and omitting this section inherits the host instead, which is how a laptop
++  // profile ends up reporting the tuple a server reports.
++  //
++  // level is a fraction in [0, 1]. Blink rounds it to two decimals in
++  // BatteryStatus::EnsureTwoSignificantDigits on every platform, so detail
++  // finer than a whole percent is discarded rather than served.
++  //
++  // The two times are seconds, and an absent one means Infinity, which is what
++  // the spec requires for the direction the charge is not moving in. macOS can
++  // only report whole minutes, since battery_status_manager_mac.cc multiplies
++  // the IOPM minute count by 60; Windows and UPower report seconds, where a
++  // whole minute is one of the values they can produce. The emitter rounds to
++  // the nearest minute so a figure no platform could have produced cannot
++  // reach a page.
++  std::optional<bool> battery_present() const { return battery_present_; }
++  std::optional<bool> battery_charging() const { return battery_charging_; }
++  std::optional<double> battery_level() const { return battery_level_; }
++  std::optional<int> battery_charging_time_seconds() const {
++    return battery_charging_time_seconds_;
++  }
++  std::optional<int> battery_discharging_time_seconds() const {
++    return battery_discharging_time_seconds_;
++  }
++
+   // Pointing device capability: "fine", "coarse" or "none".
+   //
+   // Headless has no input device at all, so it reports none — and a desktop
+@@ -513,6 +545,11 @@
+   std::optional<int> network_http_rtt_ms_;
+   std::optional<double> network_downlink_mbps_;
+   std::optional<bool> network_save_data_;
++  std::optional<bool> battery_present_;
++  std::optional<bool> battery_charging_;
++  std::optional<double> battery_level_;
++  std::optional<int> battery_charging_time_seconds_;
++  std::optional<int> battery_discharging_time_seconds_;
+   std::optional<std::string> pointer_type_;
+   std::optional<bool> has_hover_;
+   std::optional<uint32_t> css_highlight_argb_;
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -647,6 +647,42 @@
+     }
+   }
+ 
++  if (const DictValue* battery = dict->FindDict("battery")) {
++    if (std::optional<bool> v = battery->FindBool("present")) {
++      profile->battery_present_ = *v;
++    }
++    if (std::optional<bool> v = battery->FindBool("charging")) {
++      profile->battery_charging_ = *v;
++    }
++    if (std::optional<double> v = battery->FindDouble("level")) {
++      if (std::isfinite(*v) && *v >= 0 && *v <= 1) {
++        profile->battery_level_ = *v;
++      } else {
++        LOG(ERROR) << "apostate: battery.level must be 0-1; ignoring";
++      }
++    }
++    // A week is past what any charger or discharge curve reaches, and both
++    // fields are seconds, so anything larger is a unit mistake rather than a
++    // claim.
++    constexpr int kMaxBatterySeconds = 7 * 24 * 60 * 60;
++    if (std::optional<int> v = battery->FindInt("charging_time_seconds")) {
++      if (*v >= 0 && *v <= kMaxBatterySeconds) {
++        profile->battery_charging_time_seconds_ = *v;
++      } else {
++        LOG(ERROR) << "apostate: battery.charging_time_seconds must be "
++                      "0-604800; ignoring";
++      }
++    }
++    if (std::optional<int> v = battery->FindInt("discharging_time_seconds")) {
++      if (*v >= 0 && *v <= kMaxBatterySeconds) {
++        profile->battery_discharging_time_seconds_ = *v;
++      } else {
++        LOG(ERROR) << "apostate: battery.discharging_time_seconds must be "
++                      "0-604800; ignoring";
++      }
++    }
++  }
++
+   return profile.release();
+ }
+ 
+--- a/third_party/blink/renderer/modules/battery/battery_dispatcher.h
++++ b/third_party/blink/renderer/modules/battery/battery_dispatcher.h
+@@ -5,6 +5,8 @@
+ #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_BATTERY_BATTERY_DISPATCHER_H_
+ #define THIRD_PARTY_BLINK_RENDERER_MODULES_BATTERY_BATTERY_DISPATCHER_H_
+ 
++#include <optional>
++
+ #include "services/device/public/mojom/battery_monitor.mojom-blink.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/platform_event_dispatcher.h"
+@@ -34,6 +36,16 @@
+   void OnDidChange(device::mojom::blink::BatteryStatusPtr);
+   void UpdateBatteryStatus(const BatteryStatus&);
+ 
++  // The status the device profile describes, or nullopt when this process has
++  // no profile or the profile carries no battery section. Deterministic: the
++  // same profile always produces the same status, which is what keeps two
++  // reads in one launch equal.
++  static std::optional<BatteryStatus> ProfileBatteryStatus();
++
++  // Hands the profile's status to the controllers. Posted from StartListening
++  // rather than called inline.
++  void DeliverProfileBatteryStatus();
++
+   // Inherited from PlatformEventDispatcher.
+   void StartListening(LocalDOMWindow*) override;
+   void StopListening() override;
+--- a/third_party/blink/renderer/modules/battery/battery_dispatcher.cc
++++ b/third_party/blink/renderer/modules/battery/battery_dispatcher.cc
+@@ -4,6 +4,12 @@
+ 
+ #include "third_party/blink/renderer/modules/battery/battery_dispatcher.h"
+ 
++#include <algorithm>
++#include <optional>
++
++#include "base/apostate/profile.h"
++#include "base/location.h"
++#include "base/time/time.h"
+ #include "services/device/public/mojom/battery_status.mojom-blink.h"
+ #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/platform/platform.h"
+@@ -42,8 +48,83 @@
+   NotifyControllers();
+ }
+ 
++// static
++std::optional<BatteryStatus> BatteryDispatcher::ProfileBatteryStatus() {
++  const base::apostate::Profile* profile = base::apostate::Profile::Get();
++  if (!profile) {
++    return std::nullopt;
++  }
++  const std::optional<bool> present = profile->battery_present();
++  if (!present) {
++    return std::nullopt;
++  }
++
++  // Infinity, as the API spells it. BatteryStatus stores these as TimeDeltas
++  // and InSecondsF turns the maximum into the double infinity a page sees.
++  constexpr base::TimeDelta kForever = base::TimeDelta::Max();
++
++  // A chassis with no battery. This is not an absent API: desktop Chrome
++  // resolves getBattery() with exactly this tuple, which is also what
++  // BatteryStatus's default constructor holds.
++  if (!*present) {
++    return BatteryStatus(/*charging=*/true, /*charging_time=*/base::TimeDelta(),
++                         /*discharging_time=*/kForever, /*level=*/1.0);
++  }
++
++  const bool charging = profile->battery_charging().value_or(false);
++  const double level =
++      std::clamp(profile->battery_level().value_or(1.0), 0.0, 1.0);
++
++  // Whole minutes. macOS can only produce a multiple of 60, so a finer figure
++  // could not have come from the platform a macOS profile claims; Windows and
++  // UPower report seconds, where a whole minute is a value they can produce.
++  auto whole_minutes = [](std::optional<int> seconds) {
++    return seconds ? base::Minutes((*seconds + 30) / 60)
++                   : base::TimeDelta::Max();
++  };
++
++  // The API pins each time to Infinity in the direction the charge is not
++  // moving, and a battery already full on the charger needs no time to fill.
++  // Deriving both from the charging flag means a profile cannot state a pair
++  // the API itself forbids.
++  if (charging) {
++    return BatteryStatus(
++        true,
++        level >= 1.0 ? base::TimeDelta()
++                     : whole_minutes(profile->battery_charging_time_seconds()),
++        kForever, level);
++  }
++  return BatteryStatus(
++      false, kForever,
++      whole_minutes(profile->battery_discharging_time_seconds()), level);
++}
++
++void BatteryDispatcher::DeliverProfileBatteryStatus() {
++  if (std::optional<BatteryStatus> from_profile = ProfileBatteryStatus()) {
++    UpdateBatteryStatus(*from_profile);
++  }
++}
++
+ void BatteryDispatcher::StartListening(LocalDOMWindow* window) {
+   DCHECK(!monitor_.is_bound());
++
++  if (ProfileBatteryStatus()) {
++    // The monitor is never bound, so the host's charger and charge level are
++    // not read at all. One status is delivered and nothing re-queries, so two
++    // reads in one launch agree and no levelchange event ever fires.
++    //
++    // Posted rather than delivered inline. getBattery() resolves after an IPC
++    // round trip on a stock build, and PlatformEventDispatcher sets
++    // is_listening_ only once StartListening has returned, so notifying from
++    // inside it would resolve the promise a turn early and reenter the
++    // dispatcher's own bookkeeping.
++    window->GetTaskRunner(TaskType::kMiscPlatformAPI)
++        ->PostTask(FROM_HERE,
++                   BindOnce(&BatteryDispatcher::DeliverProfileBatteryStatus,
++                            WrapPersistent(this)));
++    return;
++  }
++
+   // See https://bit.ly/2S0zRAS for task types.
+   window->GetBrowserInterfaceBroker().GetInterface(
+       monitor_.BindNewPipeAndPassReceiver(

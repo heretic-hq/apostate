@@ -1,0 +1,1958 @@
+Subject: webrtc: relay UDP through a SOCKS5 association, or emit no candidate
+
+Patches 0073 and 0074 rewrite the address in host and server-reflexive ICE
+candidate text, and 0073 says plainly that it does not add a media relay. The
+consequence of that sentence was never followed through. `P2PSocket::Create`
+hands every TCP, SSLTCP and TLS variant the `ProxyResolvingClientSocketFactory`
+and therefore makes them honour `--proxy-server`; `P2P_SOCKET_UDP` is the one
+branch of that switch that never sees it, and `P2PSocketUdp::Init` binds a
+plain `net::UDPServerSocket` and sends STUN, TURN and media datagrams straight
+out of a local interface.
+
+So the SDP said one address and the packets came from another. ICE is built on
+reading the source address of arriving packets: a connectivity check is
+answered to the address it arrived from, and a peer that receives one learns
+that address whether or not it was ever offered as a candidate. Any remote
+peer, and so any detector willing to complete a single exchange, read this
+host's real public address off the first packet no matter what the candidate
+text claimed. Rewriting more strings cannot reach that, because the address in
+question is put there by the kernel and not by Chromium.
+
+The project already had the missing primitive. Patch 0079 added
+`SOCKS5DatagramClientSocket`, which relays datagrams through an RFC 1928 UDP
+association, and patch 0080 routed QUIC over it. This patch gives WebRTC's UDP
+sockets the same treatment, so that the address a page is told is the address
+its packets come from rather than a substitution for it.
+
+`SOCKS5DatagramServerSocket` is the many-destinations counterpart of the QUIC
+socket. The QUIC socket serves one destination and derives its per-datagram
+header once at construction; a peer connection sends to a STUN server, a TURN
+server and every remote candidate over one socket and receives from all of
+them, so the header is built per `SendTo` from the caller's destination and
+parsed per `RecvFrom` to recover the sender. An association is by construction
+a send-to-anyone, receive-from-anyone datagram relay, which is a closer fit for
+a P2P socket than it is for QUIC. The handshake is byte-for-byte the one patch
+0079 sends, down to the all-zero DST.ADDR of the ASSOCIATE request and the
+substitution rules for a BND.ADDR of 0.0.0.0, so a proxy watching both paths
+sees one client rather than two. Its wire constants are duplicated into the new
+file rather than shared, because they live in the other file's unnamed
+namespace; the names are identical so a later move is mechanical.
+
+Three addresses matter and each is deliberate:
+
+  - `Listen()` binds the datagram socket to the wildcard address of the
+    requested family on an ephemeral port, discarding the address and port
+    asked for. A specific interface address may have no route to the proxy, and
+    the port a page is told is now the relay's, so choosing a local one would
+    constrain nothing observable.
+
+  - `GetLocalAddress()` returns the relay endpoint from the ASSOCIATE reply,
+    never the bound socket's own address. `P2PSocketUdp::Init` passes that value
+    to the renderer through `SocketCreated`, `IpcPacketSocket::OnOpen` publishes
+    it, and `UDPPort::OnLocalAddressReady` turns it into the host candidate.
+    Returning the real local address there is precisely the leak this class
+    exists to close.
+
+  - `RecvFrom` reports the sender the relay names in the datagram header, which
+    is what WebRTC matches against a remote candidate, so remote peers appear
+    at their own addresses and ICE works normally.
+
+Datagrams whose source is not the relay are dropped rather than delivered. They
+carry no RFC 1928 header so they cannot be deframed, and the only address any
+peer was ever told is the relay's, so nothing legitimate can arrive from
+elsewhere. A drop is indistinguishable from the packet loss WebRTC already
+handles.
+
+`DatagramServerSocket` gains one virtual, `ConnectRelay`, whose default returns
+OK. `Listen()` is synchronous and the association costs three round trips, so
+the relay's address does not exist at the moment `Listen()` returns.
+`P2PSocketUdp::Init` now binds, sets its buffer sizes, calls `ConnectRelay` and
+finishes in `OnEgressReady`, which is where `GetLocalAddress` and
+`SocketCreated` moved. A plain UDP socket answers OK immediately, so the direct
+path runs exactly as it did, in one straight line, and every existing
+`DatagramServerSocket` implementation and test fake compiles unchanged.
+
+`P2PSocketManager::CreateSocket` decides what a UDP request gets, and the
+decision is made there because `P2PSocket::Create` is the only place a WebRTC
+UDP socket is ever built. Every peer connection's UDP sockets share one egress
+and it has to be chosen before any destination is known, since a P2P UDP socket
+is created with no remote address. There is no URL for per-request proxy
+resolution to answer about, so the static configuration is read and any
+configuration that cannot be reduced to a single datagram-capable proxy is
+refused instead of guessed at:
+
+  - No proxy configured, or a configuration whose single entry is `direct://`:
+    direct, unchanged from before this patch. There is nothing to leak, because
+    the host's address is the identity the page's other traffic already carries.
+
+  - A single-hop SOCKS5 proxy: relayed. Host candidates are the proxy's, and
+    the packets a peer receives originate at the proxy.
+
+  - Anything else, which is an HTTP, HTTPS or SOCKS4 proxy, a multi-proxy
+    chain, per-scheme rules, a PAC script or WPAD: no socket is created at all.
+    HTTP and HTTPS cannot carry a datagram, SOCKS4 has no ASSOCIATE command, a
+    multi-proxy chain would need an association per hop with no way to frame
+    the inner ones, and a PAC script answers per URL while a peer connection
+    has none. The page then gets no UDP candidate of any type.
+
+  - A SOCKS5 proxy that answers ASSOCIATE with REP 0x07, which is what a proxy
+    without UDP support answers: the association fails, `OnEgressReady` calls
+    `OnError`, the socket does not exist and again no UDP candidate is emitted.
+
+Bypass rules are deliberately not consulted. They would send some traffic
+direct, and a datagram has no host to test against them, so the media plane
+takes the proxy unconditionally. That is the safe direction of the two.
+
+What each ICE candidate type becomes, and what a cooperating remote peer sees
+as the source of the packets it receives:
+
+  - host, relayed: emitted, at the relay endpoint from the ASSOCIATE reply.
+    Packets reach the peer from the proxy's egress address.
+  - host, blocked: not emitted, because the socket does not exist.
+  - srflx: emitted when the page supplies a STUN server, at the address that
+    STUN server observed, which through the association is the proxy's egress.
+    That is the truthful public address, obtained the same way it is obtained
+    behind a NAT. When it equals the host candidate `UDPPort` suppresses it, so
+    a proxy that relays on one port presents as a single host candidate at a
+    public address, which is what a machine with a public address looks like.
+  - prflx: as upstream. A peer that receives a connectivity check from an
+    address it has no candidate for creates one, and that address is the
+    proxy's egress. This is how a relayed connection completes even when the
+    host candidate's port is not the egress port.
+  - relay: unchanged. TURN over UDP travels through the association like any
+    other datagram; TURN over TCP and TLS travels through
+    `ProxyResolvingClientSocketFactory` as it did before this patch, which is
+    why failing closed still leaves a page that configures
+    `turn:...?transport=tcp` or `turns:` with working media.
+
+In every case the invariant holds: no UDP packet reaches a peer-selected
+destination from an interface address the page was not told about. Traffic
+between this host and the configured proxy is not covered by that sentence and
+is not meant to be, because the proxy is the egress the user chose and already
+carries every TCP byte the browser sends.
+
+`--fingerprint-webrtc-udp` overrides the decision. Absent is the automatic
+behaviour above. `direct` forces direct UDP even under a proxy, which is an
+explicit acceptance that a peer will read this host's real address, and exists
+because a user with an HTTP proxy who needs a call to work should be able to
+have one knowingly. `block` never creates a WebRTC UDP socket at all, with or
+without a proxy. An unrecognised value is treated as `block` rather than as the
+permissive default. The switch is read in the network service, so it joins
+`kCommonSwitchNames` in `AppendExtraCommandLineSwitches` next to the switch
+patch 0073 added. It adds no page-readable value: both outcomes it selects are
+states stock Chrome reaches, `direct` being its default and the absence of UDP
+candidates being what the `WebRTCIPHandling` enterprise policy produces.
+
+What is still open, stated rather than hidden:
+
+  - The host candidate is the relay's ingress endpoint, because BND.ADDR and
+    BND.PORT are the address RFC 1928 tells a client to send to and an
+    association never reports its egress. A proxy that serves an association
+    from one socket makes the two the same, and then the host candidate is
+    exactly truthful and reachable. A proxy that uses a separate outbound
+    socket makes the port differ, and then the host candidate is a dead address
+    on the proxy and the working path is srflx or prflx. Either way no address
+    of this host is disclosed and no packet reaches a peer from one, which is
+    the property this patch is for. Closing the remainder needs a protocol that
+    reports its egress, which is TURN, and a TURN server is the user's to
+    supply.
+
+  - Adapter enumeration is blocked until microphone or camera permission is
+    granted, so the common case is one association per address family. With
+    permission granted `IpcNetworkManager` offers the real interface list and
+    WebRTC asks for a socket per interface, which becomes one association per
+    interface, all reporting the same proxy address on different relay ports.
+    A real machine would show different addresses there. The fix is to replace
+    the interface list in `P2PSocketManager::DoGetNetworkList`, which is the
+    `webrtc.ice-candidates` ledger row and a separate patch; it is not
+    something to do from inside the socket.
+
+  - The `WebRtcUdpPortRange` policy is not honoured on a relayed socket,
+    because the port a page sees is the proxy's and not one this host chose.
+
+  - mDNS obfuscation still applies to a relayed host candidate before media
+    permission is granted, so its address reaches the page as a `.local` name
+    and the announcement goes out on the local network with the proxy's address
+    in it. That is stock behaviour for a host candidate and it hides the proxy
+    address rather than revealing anything of this host's.
+
+  - A `Send` that arrives before the association exists fails the socket rather
+    than queueing. Chromium's renderer cannot do that, because
+    `IpcPacketSocket::Send` refuses until `OnOpen`, so this is the response to a
+    renderer that violates the protocol and not a path a page can reach.
+
+  - The relayed socket reports ECN_NOT_ECT from `GetLastTos` and does not
+    enable `IP_RECVTOS`, for the reason patch 0079 gives: the TOS byte of a
+    relayed datagram belongs to the relay-to-client hop, and reporting it as
+    the sender's would be worse than reporting none. DSCP on an outgoing
+    datagram is still set, on the host-to-relay hop, which is the hop this host
+    owns.
+
+No page-visible observable is added. There is no new JavaScript property, no
+wrapper object, no CDP override and no injection: the values a page reads are
+the ones `UDPPort` and `Port::AddAddress` already compute, from a socket that
+now reports a different address because its packets now leave from a different
+place. No NetLog event type is added either. The relayed socket returns the
+underlying UDP socket's NetLog source, so a net-export capture gains no field
+and in particular none holding the relay address or a credential, which is the
+decision patches 0001 and 0079 made for the same reason.
+
+Nothing here is randomised per call. The relay endpoint is fixed for the life
+of an association, so two reads of the same candidate in one launch agree, and
+variation comes only from the proxy the user configured.
+
+Compile-unverified: this cannot be built in this session.
+
+--- a/net/socket/datagram_server_socket.h
++++ b/net/socket/datagram_server_socket.h
+@@ -125,6 +125,17 @@
+ 
+   // Resets the thread to be used for thread-safety checks.
+   virtual void DetachFromThread() = 0;
++
++  // Completes any out-of-band setup this socket needs after Listen() before
++  // GetLocalAddress() is meaningful and datagrams can flow. The RFC 1928 UDP
++  // association of a SOCKS5 relay is the case this exists for: the relay's
++  // address is not known until the proxy has answered, and that answer takes
++  // three round trips.
++  //
++  // Returns a network error code, or ERR_IO_PENDING and runs |callback|. The
++  // default reports OK, because a plain UDP socket is ready to send and
++  // report its address as soon as it is bound.
++  virtual int ConnectRelay(CompletionOnceCallback callback);
+ };
+ 
+ }  // namespace net
+
+--- /dev/null
++++ b/net/socket/datagram_server_socket.cc
+@@ -0,0 +1,18 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "net/socket/datagram_server_socket.h"
++
++#include "net/base/net_errors.h"
++
++namespace net {
++
++// Out of line rather than inline in the header: Chromium's style plugin
++// rejects a virtual method with a non-empty inline body, and the default has
++// to return a value.
++int DatagramServerSocket::ConnectRelay(CompletionOnceCallback callback) {
++  return OK;
++}
++
++}  // namespace net
+
+--- /dev/null
++++ b/net/socket/socks5_datagram_server_socket.h
+@@ -0,0 +1,275 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#ifndef NET_SOCKET_SOCKS5_DATAGRAM_SERVER_SOCKET_H_
++#define NET_SOCKET_SOCKS5_DATAGRAM_SERVER_SOCKET_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include <memory>
++#include <optional>
++#include <vector>
++
++#include "base/memory/raw_ptr.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/memory/weak_ptr.h"
++#include "net/base/address_family.h"
++#include "net/base/address_list.h"
++#include "net/base/completion_once_callback.h"
++#include "net/base/host_port_pair.h"
++#include "net/base/ip_endpoint.h"
++#include "net/base/net_errors.h"
++#include "net/base/net_export.h"
++#include "net/base/network_anonymization_key.h"
++#include "net/base/network_handle.h"
++#include "net/dns/host_resolver.h"
++#include "net/socket/datagram_server_socket.h"
++#include "net/socket/socks5_client_socket.h"
++#include "net/socket/socks5_datagram_client_socket.h"
++#include "net/traffic_annotation/network_traffic_annotation.h"
++
++namespace net {
++
++class ClientSocketFactory;
++class DrainableIOBuffer;
++class GrowableIOBuffer;
++class IOBuffer;
++class IOBufferWithSize;
++class StreamSocket;
++
++// A DatagramServerSocket that relays every datagram through a SOCKS5 proxy
++// using RFC 1928 UDP ASSOCIATE.
++//
++// This is the many-destinations counterpart of SOCKS5DatagramClientSocket. That
++// class serves QUIC, which talks to exactly one destination, so it derives its
++// per-datagram header once at construction. A peer connection sends to a STUN
++// server, a TURN server and every remote candidate over one socket and receives
++// from all of them, so here the header is built per SendTo() from the caller's
++// destination and parsed per RecvFrom() to recover the sender. An association
++// is a send-to-anyone, receive-from-anyone datagram relay, which is exactly the
++// shape a P2P socket needs.
++//
++// It owns two sockets. The TCP control socket carries the greeting, the
++// optional RFC 1929 authentication and the UDP ASSOCIATE request; RFC 1928 §7
++// ties the association's lifetime to that connection, so it is held open for as
++// long as this socket exists and nothing is ever written on it after the
++// ASSOCIATE reply. The datagram socket, supplied by the caller and therefore a
++// stock UDPServerSocket, carries the data.
++//
++// Addresses:
++//  - Listen() binds the datagram socket to the wildcard address of the
++//    requested family on an ephemeral port, whatever address was asked for. A
++//    specific interface address may have no route to the proxy, and the port a
++//    page is told is the relay's, so pinning a local one buys nothing.
++//  - GetLocalAddress() returns the relay endpoint from the ASSOCIATE reply,
++//    because that is the address this socket's traffic reaches the network
++//    from. It is what becomes the host ICE candidate, and it is a proxy address
++//    rather than one of this host's.
++//  - GetPeerAddress() fails: an association has no single peer.
++//
++// Datagrams whose source is not the relay are dropped. They carry no RFC 1928
++// header, so they cannot be deframed, and nothing else has any business
++// arriving on a port only the relay was told about.
++//
++// Credentials are launch-only transport state. They are held by this socket and
++// nowhere else; no NetLog parameter sees them, and this class introduces no
++// NetLog event type of its own.
++class NET_EXPORT_PRIVATE SOCKS5DatagramServerSocket
++    : public DatagramServerSocket {
++ public:
++  // `datagram_socket` is the unbound socket that will carry the relayed
++  // datagrams. `client_socket_factory` creates the TCP control socket and
++  // `host_resolver` resolves `proxy`, which may be a name; both must outlive
++  // this socket. `network_anonymization_key` keys that resolution.
++  SOCKS5DatagramServerSocket(
++      std::unique_ptr<DatagramServerSocket> datagram_socket,
++      ClientSocketFactory* client_socket_factory,
++      HostResolver* host_resolver,
++      const NetworkAnonymizationKey& network_anonymization_key,
++      const HostPortPair& proxy,
++      std::optional<SOCKS5Credentials> credentials,
++      const NetworkTrafficAnnotationTag& traffic_annotation);
++
++  SOCKS5DatagramServerSocket(const SOCKS5DatagramServerSocket&) = delete;
++  SOCKS5DatagramServerSocket& operator=(const SOCKS5DatagramServerSocket&) =
++      delete;
++
++  ~SOCKS5DatagramServerSocket() override;
++
++  // DatagramSocket implementation.
++  void Close() override;
++  int GetPeerAddress(IPEndPoint* address) const override;
++  int GetLocalAddress(IPEndPoint* address) const override;
++  void UseNonBlockingIO() override;
++  int SetDoNotFragment() override;
++  int SetRecvTos() override;
++  int SetTos(DiffServCodePoint dscp, EcnCodePoint ecn) override;
++  void SetMsgConfirm(bool confirm) override;
++  const NetLogWithSource& NetLog() const override;
++  DscpAndEcn GetLastTos() const override;
++
++  // DatagramServerSocket implementation.
++  int Listen(const IPEndPoint& address) override;
++  int RecvFrom(IOBuffer* buf,
++               int buf_len,
++               IPEndPoint* address,
++               CompletionOnceCallback callback) override;
++  int SendTo(IOBuffer* buf,
++             int buf_len,
++             const IPEndPoint& address,
++             CompletionOnceCallback callback) override;
++  int SetReceiveBufferSize(int32_t size) override;
++  int SetSendBufferSize(int32_t size) override;
++  void AllowAddressReuse() override;
++  void AllowBroadcast() override;
++  void AllowAddressSharingForMulticast() override;
++  int JoinGroup(const IPAddress& group_address) const override;
++  int LeaveGroup(const IPAddress& group_address) const override;
++  int SetMulticastInterface(uint32_t interface_index) override;
++  int SetMulticastTimeToLive(int time_to_live) override;
++  int SetMulticastLoopbackMode(bool loopback) override;
++  int SetDiffServCodePoint(DiffServCodePoint dscp) override;
++  void DetachFromThread() override;
++  int ConnectRelay(CompletionOnceCallback callback) override;
++
++  // The relay endpoint learned from the ASSOCIATE reply. Test-only; nothing
++  // logs it.
++  const IPEndPoint& relay_endpoint_for_testing() const {
++    return relay_endpoint_;
++  }
++
++ private:
++  enum State {
++    STATE_NONE,
++    STATE_RESOLVE_PROXY,
++    STATE_RESOLVE_PROXY_COMPLETE,
++    STATE_CONTROL_CONNECT,
++    STATE_CONTROL_CONNECT_COMPLETE,
++    STATE_GREET_WRITE,
++    STATE_GREET_WRITE_COMPLETE,
++    STATE_GREET_READ,
++    STATE_GREET_READ_COMPLETE,
++    STATE_AUTH_WRITE,
++    STATE_AUTH_WRITE_COMPLETE,
++    STATE_AUTH_READ,
++    STATE_AUTH_READ_COMPLETE,
++    STATE_ASSOCIATE_WRITE,
++    STATE_ASSOCIATE_WRITE_COMPLETE,
++    STATE_ASSOCIATE_READ,
++    STATE_ASSOCIATE_READ_COMPLETE,
++  };
++
++  void OnIOComplete(int result);
++  int DoLoop(int last_io_result);
++  int DoResolveProxy();
++  int DoResolveProxyComplete(int result);
++  int DoControlConnect();
++  int DoControlConnectComplete(int result);
++  int DoGreetWrite();
++  int DoGreetWriteComplete(int result);
++  int DoGreetRead();
++  int DoGreetReadComplete(int result);
++  int DoAuthWrite();
++  int DoAuthWriteComplete(int result);
++  int DoAuthRead();
++  int DoAuthReadComplete(int result);
++  int DoAssociateWrite();
++  int DoAssociateWriteComplete(int result);
++  int DoAssociateRead();
++  int DoAssociateReadComplete(int result);
++
++  // Sends `bytes` on the control connection, looping until it is drained.
++  // `write_complete_state` handles a partial write; `done_state` runs once the
++  // whole buffer is out.
++  int StartControlWrite(std::vector<uint8_t> bytes,
++                        State write_complete_state,
++                        State done_state);
++  int ContinueControlWrite(State write_complete_state, State done_state);
++
++  // Reads up to `capacity` bytes of a reply, resuming into the same buffer on
++  // a partial read. Returns a net error or ERR_IO_PENDING.
++  int StartControlRead(size_t capacity, State complete_state);
++  int ContinueControlRead(State complete_state);
++
++  // Additional bytes the ASSOCIATE reply needs beyond its five-byte prefix, or
++  // std::nullopt when the prefix is malformed.
++  std::optional<size_t> AssociateReplyRemainder() const;
++
++  // Fills `relay_endpoint_` from a complete ASSOCIATE reply, applying the same
++  // substitution rules as SOCKS5DatagramClientSocket. Returns a net error.
++  int ResolveRelayEndpoint();
++
++  // Starts the single outstanding read that watches the control connection for
++  // closure. It never completes under normal operation.
++  void StartControlWatch();
++  void OnControlWatchComplete(int result);
++
++  // Records a terminal error and fails a pending read with it. A send into a
++  // dead association must fail rather than appear to succeed.
++  void LatchError(int error);
++
++  int ReadLoop();
++  void OnDatagramReadComplete(int result);
++  // Returns true when `*out_result` is final, false when the datagram was
++  // dropped and another read must be issued.
++  bool Deframe(int result, int* out_result);
++  void ClearReadState();
++
++  void OnDatagramSendComplete(int result);
++  int TranslateSendResult(int result) const;
++
++  // The socket that carries data. Supplied by the caller, never replaced.
++  const std::unique_ptr<DatagramServerSocket> datagram_socket_;
++  // Creates the TCP control socket. Not owned.
++  const raw_ptr<ClientSocketFactory> client_socket_factory_;
++  // Resolves `proxy_`. Not owned.
++  const raw_ptr<HostResolver> host_resolver_;
++  // Holds the association open. Destroying it ends the association.
++  std::unique_ptr<StreamSocket> control_socket_;
++
++  const NetworkAnonymizationKey network_anonymization_key_;
++  const HostPortPair proxy_;
++  const std::optional<SOCKS5Credentials> credentials_;
++  const NetworkTrafficAnnotationTag traffic_annotation_;
++
++  State next_state_ = STATE_NONE;
++  bool listening_ = false;
++  bool associated_ = false;
++  int latched_error_ = OK;
++
++  // The family Listen() bound, which the proxy must be reachable over.
++  AddressFamily listen_family_ = ADDRESS_FAMILY_UNSPECIFIED;
++
++  std::unique_ptr<HostResolver::ResolveHostRequest> resolve_request_;
++  IPEndPoint proxy_endpoint_;
++  IPEndPoint relay_endpoint_;
++
++  CompletionOnceCallback connect_callback_;
++
++  scoped_refptr<DrainableIOBuffer> control_write_buf_;
++  scoped_refptr<GrowableIOBuffer> control_read_buf_;
++  scoped_refptr<IOBufferWithSize> control_watch_buf_;
++
++  // Read state. `read_user_address_` is the caller's out-parameter and the
++  // caller keeps it alive until the callback runs.
++  raw_ptr<IOBuffer> read_user_buffer_ = nullptr;
++  size_t read_user_buffer_len_ = 0;
++  raw_ptr<IPEndPoint> read_user_address_ = nullptr;
++  CompletionOnceCallback read_user_callback_;
++  scoped_refptr<IOBufferWithSize> read_frame_buffer_;
++  IPEndPoint read_frame_address_;
++
++  // Send state.
++  scoped_refptr<IOBufferWithSize> send_frame_buffer_;
++  size_t send_payload_len_ = 0;
++  size_t send_framed_len_ = 0;
++  CompletionOnceCallback send_user_callback_;
++
++  base::WeakPtrFactory<SOCKS5DatagramServerSocket> weak_factory_{this};
++};
++
++}  // namespace net
++
++#endif  // NET_SOCKET_SOCKS5_DATAGRAM_SERVER_SOCKET_H_
+
+--- /dev/null
++++ b/net/socket/socks5_datagram_server_socket.cc
+@@ -0,0 +1,941 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#include "net/socket/socks5_datagram_server_socket.h"
++
++#include <utility>
++
++#include "base/check.h"
++#include "base/check_op.h"
++#include "base/functional/bind.h"
++#include "base/notreached.h"
++#include "base/numerics/safe_conversions.h"
++#include "net/base/address_family.h"
++#include "net/base/io_buffer.h"
++#include "net/base/ip_address.h"
++#include "net/log/net_log_with_source.h"
++#include "net/socket/client_socket_factory.h"
++#include "net/socket/stream_socket.h"
++
++namespace net {
++
++namespace {
++
++// These are the same wire constants SOCKS5DatagramClientSocket uses. They live
++// in that file's unnamed namespace, so they cannot be shared without moving
++// them; the names are kept identical so a later move is mechanical.
++constexpr uint8_t kSOCKS5Version = 0x05;
++constexpr uint8_t kUdpAssociateCommand = 0x03;
++constexpr uint8_t kAuthMethodNone = 0x00;
++constexpr uint8_t kAuthMethodUserPass = 0x02;
++constexpr uint8_t kAuthSubnegotiationVersion = 0x01;
++constexpr uint8_t kAuthStatusSuccess = 0x00;
++constexpr uint8_t kReplySuccess = 0x00;
++constexpr uint8_t kAddressTypeIPv4 = 0x01;
++constexpr uint8_t kAddressTypeDomain = 0x03;
++constexpr uint8_t kAddressTypeIPv6 = 0x04;
++
++// VER + METHOD for the greeting reply, VER + STATUS for the RFC 1929 reply.
++constexpr size_t kTwoByteReplySize = 2;
++// VER, REP, RSV, ATYP and the first address byte: enough to size the rest.
++constexpr size_t kReplyPrefixSize = 5;
++
++// RSV(2) + FRAG(1) + ATYP(1) before the address, DST.PORT(2) after it.
++constexpr size_t kHeaderPrefixSize = 4;
++constexpr size_t kPortSize = 2;
++
++uint16_t ReadPort(base::span<const uint8_t> bytes) {
++  return static_cast<uint16_t>((static_cast<uint16_t>(bytes[0]) << 8) |
++                               bytes[1]);
++}
++
++// The RFC 1928 §7 prefix addressing `destination`, or an empty vector when the
++// destination has no address this socket can frame. Unlike the QUIC socket's
++// header this is rebuilt per datagram, because a peer connection reaches a
++// different destination on almost every send.
++std::vector<uint8_t> BuildDatagramHeader(const IPEndPoint& destination) {
++  const IPAddress& address = destination.address();
++  if (!address.IsIPv4() && !address.IsIPv6()) {
++    return std::vector<uint8_t>();
++  }
++  std::vector<uint8_t> header;
++  header.reserve(kHeaderPrefixSize + address.size() + kPortSize);
++  header.insert(header.end(),
++                {0x00, 0x00, 0x00,
++                 address.IsIPv4() ? kAddressTypeIPv4 : kAddressTypeIPv6});
++  header.insert(header.end(), address.bytes().begin(), address.bytes().end());
++  header.push_back(static_cast<uint8_t>(destination.port() >> 8));
++  header.push_back(static_cast<uint8_t>(destination.port() & 0xff));
++  return header;
++}
++
++}  // namespace
++
++SOCKS5DatagramServerSocket::SOCKS5DatagramServerSocket(
++    std::unique_ptr<DatagramServerSocket> datagram_socket,
++    ClientSocketFactory* client_socket_factory,
++    HostResolver* host_resolver,
++    const NetworkAnonymizationKey& network_anonymization_key,
++    const HostPortPair& proxy,
++    std::optional<SOCKS5Credentials> credentials,
++    const NetworkTrafficAnnotationTag& traffic_annotation)
++    : datagram_socket_(std::move(datagram_socket)),
++      client_socket_factory_(client_socket_factory),
++      host_resolver_(host_resolver),
++      network_anonymization_key_(network_anonymization_key),
++      proxy_(proxy),
++      credentials_(std::move(credentials)),
++      traffic_annotation_(traffic_annotation) {
++  CHECK(datagram_socket_);
++  CHECK(client_socket_factory_);
++  CHECK(host_resolver_);
++}
++
++SOCKS5DatagramServerSocket::~SOCKS5DatagramServerSocket() {
++  // Destroying `control_socket_` ends the association, which is the point of
++  // holding it for this object's whole lifetime.
++}
++
++// ---------------------------------------------------------------------------
++// Association setup
++// ---------------------------------------------------------------------------
++
++int SOCKS5DatagramServerSocket::Listen(const IPEndPoint& address) {
++  CHECK(!listening_);
++  const IPAddress& requested = address.address();
++  if (!requested.IsIPv4() && !requested.IsIPv6()) {
++    return ERR_ADDRESS_INVALID;
++  }
++  // The wildcard address of the requested family on an ephemeral port,
++  // whatever address and port were asked for. A specific interface address may
++  // have no route to the proxy, and the port the page is told is the relay's,
++  // so binding a chosen local port would constrain nothing a page can see.
++  const IPEndPoint bind_address(requested.IsIPv4() ? IPAddress::IPv4AllZeros()
++                                                   : IPAddress::IPv6AllZeros(),
++                                0);
++  int rv = datagram_socket_->Listen(bind_address);
++  if (rv != OK) {
++    return rv;
++  }
++  listening_ = true;
++  listen_family_ = GetAddressFamily(requested);
++  return OK;
++}
++
++int SOCKS5DatagramServerSocket::ConnectRelay(CompletionOnceCallback callback) {
++  if (!listening_) {
++    return ERR_SOCKET_NOT_CONNECTED;
++  }
++  CHECK(!associated_);
++  CHECK(connect_callback_.is_null());
++  next_state_ = STATE_RESOLVE_PROXY;
++  int rv = DoLoop(OK);
++  if (rv == ERR_IO_PENDING) {
++    connect_callback_ = std::move(callback);
++  }
++  return rv;
++}
++
++void SOCKS5DatagramServerSocket::OnIOComplete(int result) {
++  CHECK_NE(STATE_NONE, next_state_);
++  int rv = DoLoop(result);
++  if (rv != ERR_IO_PENDING && !connect_callback_.is_null()) {
++    std::move(connect_callback_).Run(rv);
++  }
++}
++
++int SOCKS5DatagramServerSocket::DoLoop(int last_io_result) {
++  int rv = last_io_result;
++  do {
++    State state = next_state_;
++    next_state_ = STATE_NONE;
++    switch (state) {
++      case STATE_RESOLVE_PROXY:
++        rv = DoResolveProxy();
++        break;
++      case STATE_RESOLVE_PROXY_COMPLETE:
++        rv = DoResolveProxyComplete(rv);
++        break;
++      case STATE_CONTROL_CONNECT:
++        rv = DoControlConnect();
++        break;
++      case STATE_CONTROL_CONNECT_COMPLETE:
++        rv = DoControlConnectComplete(rv);
++        break;
++      case STATE_GREET_WRITE:
++        rv = DoGreetWrite();
++        break;
++      case STATE_GREET_WRITE_COMPLETE:
++        rv = DoGreetWriteComplete(rv);
++        break;
++      case STATE_GREET_READ:
++        rv = DoGreetRead();
++        break;
++      case STATE_GREET_READ_COMPLETE:
++        rv = DoGreetReadComplete(rv);
++        break;
++      case STATE_AUTH_WRITE:
++        rv = DoAuthWrite();
++        break;
++      case STATE_AUTH_WRITE_COMPLETE:
++        rv = DoAuthWriteComplete(rv);
++        break;
++      case STATE_AUTH_READ:
++        rv = DoAuthRead();
++        break;
++      case STATE_AUTH_READ_COMPLETE:
++        rv = DoAuthReadComplete(rv);
++        break;
++      case STATE_ASSOCIATE_WRITE:
++        rv = DoAssociateWrite();
++        break;
++      case STATE_ASSOCIATE_WRITE_COMPLETE:
++        rv = DoAssociateWriteComplete(rv);
++        break;
++      case STATE_ASSOCIATE_READ:
++        rv = DoAssociateRead();
++        break;
++      case STATE_ASSOCIATE_READ_COMPLETE:
++        rv = DoAssociateReadComplete(rv);
++        break;
++      case STATE_NONE:
++        NOTREACHED();
++    }
++  } while (rv != ERR_IO_PENDING && next_state_ != STATE_NONE);
++  return rv;
++}
++
++int SOCKS5DatagramServerSocket::DoResolveProxy() {
++  next_state_ = STATE_RESOLVE_PROXY_COMPLETE;
++  // The default query type, not one narrowed to `listen_family_`: the stream
++  // path through the same proxy asks for both families, and asking for one
++  // would make the media plane's lookup distinguishable at the resolver. An
++  // IP-literal proxy resolves without a query at all, and a named one is
++  // usually already in the host cache from the stream path.
++  resolve_request_ = host_resolver_->CreateRequest(
++      proxy_, network_anonymization_key_, handles::kInvalidNetworkHandle,
++      datagram_socket_->NetLog(), std::nullopt);
++  return resolve_request_->Start(base::BindOnce(
++      &SOCKS5DatagramServerSocket::OnIOComplete, weak_factory_.GetWeakPtr()));
++}
++
++int SOCKS5DatagramServerSocket::DoResolveProxyComplete(int result) {
++  if (result != OK) {
++    return result;
++  }
++  for (const IPEndPoint& endpoint :
++       resolve_request_->GetAddressResults().endpoints()) {
++    if (GetAddressFamily(endpoint.address()) == listen_family_) {
++      proxy_endpoint_ = endpoint;
++      break;
++    }
++  }
++  resolve_request_.reset();
++  if (proxy_endpoint_.address().empty()) {
++    // The proxy has no address in this socket's family, so this family has no
++    // relayed egress. Reporting it unreachable is what stops a candidate of
++    // that family being emitted at all.
++    return ERR_ADDRESS_UNREACHABLE;
++  }
++  next_state_ = STATE_CONTROL_CONNECT;
++  return OK;
++}
++
++int SOCKS5DatagramServerSocket::DoControlConnect() {
++  next_state_ = STATE_CONTROL_CONNECT_COMPLETE;
++  const NetLogWithSource& net_log = datagram_socket_->NetLog();
++  control_socket_ = client_socket_factory_->CreateTransportClientSocket(
++      AddressList(proxy_endpoint_), handles::kInvalidNetworkHandle,
++      /*socket_performance_watcher=*/nullptr,
++      /*network_quality_estimator=*/nullptr, net_log.net_log(),
++      net_log.source());
++  return control_socket_->Connect(base::BindOnce(
++      &SOCKS5DatagramServerSocket::OnIOComplete, weak_factory_.GetWeakPtr()));
++}
++
++int SOCKS5DatagramServerSocket::DoControlConnectComplete(int result) {
++  if (result != OK) {
++    return result;
++  }
++  next_state_ = STATE_GREET_WRITE;
++  return OK;
++}
++
++int SOCKS5DatagramServerSocket::DoGreetWrite() {
++  // Byte-for-byte the greeting SOCKS5DatagramClientSocket sends, which without
++  // credentials is byte-for-byte Chromium's own, so the proxy sees one client.
++  std::vector<uint8_t> greeting;
++  if (credentials_) {
++    greeting = {kSOCKS5Version, 0x02, kAuthMethodNone, kAuthMethodUserPass};
++  } else {
++    greeting = {kSOCKS5Version, 0x01, kAuthMethodNone};
++  }
++  return StartControlWrite(std::move(greeting), STATE_GREET_WRITE_COMPLETE,
++                           STATE_GREET_READ);
++}
++
++int SOCKS5DatagramServerSocket::DoGreetWriteComplete(int result) {
++  if (result < 0) {
++    return result;
++  }
++  control_write_buf_->DidConsume(result);
++  return ContinueControlWrite(STATE_GREET_WRITE_COMPLETE, STATE_GREET_READ);
++}
++
++int SOCKS5DatagramServerSocket::DoGreetRead() {
++  return StartControlRead(kTwoByteReplySize, STATE_GREET_READ_COMPLETE);
++}
++
++int SOCKS5DatagramServerSocket::DoGreetReadComplete(int result) {
++  if (result < 0) {
++    return result;
++  }
++  if (result == 0) {
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++  control_read_buf_->DidConsume(result);
++  if (control_read_buf_->RemainingCapacity() > 0) {
++    return ContinueControlRead(STATE_GREET_READ_COMPLETE);
++  }
++  base::span<const uint8_t> reply = control_read_buf_->span_before_offset();
++  if (reply[0] != kSOCKS5Version) {
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++  if (reply[1] == kAuthMethodNone) {
++    next_state_ = STATE_ASSOCIATE_WRITE;
++    return OK;
++  }
++  if (reply[1] == kAuthMethodUserPass && credentials_) {
++    next_state_ = STATE_AUTH_WRITE;
++    return OK;
++  }
++  // Includes 0xFF ("no acceptable methods"), which is what a proxy requiring
++  // credentials answers when none were configured.
++  return ERR_SOCKS_CONNECTION_FAILED;
++}
++
++int SOCKS5DatagramServerSocket::DoAuthWrite() {
++  CHECK(credentials_);
++  std::vector<uint8_t> request;
++  request.reserve(3u + credentials_->username.size() +
++                  credentials_->password.size());
++  request.push_back(kAuthSubnegotiationVersion);
++  request.push_back(static_cast<uint8_t>(credentials_->username.size()));
++  request.insert(request.end(), credentials_->username.begin(),
++                 credentials_->username.end());
++  request.push_back(static_cast<uint8_t>(credentials_->password.size()));
++  request.insert(request.end(), credentials_->password.begin(),
++                 credentials_->password.end());
++  return StartControlWrite(std::move(request), STATE_AUTH_WRITE_COMPLETE,
++                           STATE_AUTH_READ);
++}
++
++int SOCKS5DatagramServerSocket::DoAuthWriteComplete(int result) {
++  if (result < 0) {
++    return result;
++  }
++  control_write_buf_->DidConsume(result);
++  return ContinueControlWrite(STATE_AUTH_WRITE_COMPLETE, STATE_AUTH_READ);
++}
++
++int SOCKS5DatagramServerSocket::DoAuthRead() {
++  return StartControlRead(kTwoByteReplySize, STATE_AUTH_READ_COMPLETE);
++}
++
++int SOCKS5DatagramServerSocket::DoAuthReadComplete(int result) {
++  if (result < 0) {
++    return result;
++  }
++  if (result == 0) {
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++  control_read_buf_->DidConsume(result);
++  if (control_read_buf_->RemainingCapacity() > 0) {
++    return ContinueControlRead(STATE_AUTH_READ_COMPLETE);
++  }
++  base::span<const uint8_t> reply = control_read_buf_->span_before_offset();
++  // The sub-negotiation carries its own version, which is not the SOCKS
++  // version.
++  if (reply[0] != kAuthSubnegotiationVersion ||
++      reply[1] != kAuthStatusSuccess) {
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++  next_state_ = STATE_ASSOCIATE_WRITE;
++  return OK;
++}
++
++int SOCKS5DatagramServerSocket::DoAssociateWrite() {
++  // DST.ADDR and DST.PORT of an ASSOCIATE request name the address the client
++  // will send datagrams from. This socket is bound to a wildcard address, so
++  // the address it will be seen at is the proxy's to observe and not this
++  // host's to state, and RFC 1928 §4 requires zeros in exactly that case. It
++  // is also the same ten bytes SOCKS5DatagramClientSocket sends.
++  std::vector<uint8_t> request = {kSOCKS5Version, kUdpAssociateCommand,
++                                  0x00,           kAddressTypeIPv4,
++                                  0x00,           0x00,
++                                  0x00,           0x00,
++                                  0x00,           0x00};
++  return StartControlWrite(std::move(request), STATE_ASSOCIATE_WRITE_COMPLETE,
++                           STATE_ASSOCIATE_READ);
++}
++
++int SOCKS5DatagramServerSocket::DoAssociateWriteComplete(int result) {
++  if (result < 0) {
++    return result;
++  }
++  control_write_buf_->DidConsume(result);
++  return ContinueControlWrite(STATE_ASSOCIATE_WRITE_COMPLETE,
++                              STATE_ASSOCIATE_READ);
++}
++
++int SOCKS5DatagramServerSocket::DoAssociateRead() {
++  return StartControlRead(kReplyPrefixSize, STATE_ASSOCIATE_READ_COMPLETE);
++}
++
++int SOCKS5DatagramServerSocket::DoAssociateReadComplete(int result) {
++  if (result < 0) {
++    return result;
++  }
++  if (result == 0) {
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++  control_read_buf_->DidConsume(result);
++  if (control_read_buf_->RemainingCapacity() > 0) {
++    return ContinueControlRead(STATE_ASSOCIATE_READ_COMPLETE);
++  }
++  if (static_cast<size_t>(control_read_buf_->offset()) == kReplyPrefixSize) {
++    // The prefix is in: size the remainder from ATYP and keep reading.
++    std::optional<size_t> remainder = AssociateReplyRemainder();
++    if (!remainder.has_value()) {
++      return ERR_SOCKS_CONNECTION_FAILED;
++    }
++    if (*remainder > 0) {
++      control_read_buf_->SetCapacity(
++          base::checked_cast<int>(kReplyPrefixSize + *remainder));
++      return ContinueControlRead(STATE_ASSOCIATE_READ_COMPLETE);
++    }
++  }
++  int rv = ResolveRelayEndpoint();
++  if (rv != OK) {
++    return rv;
++  }
++  control_read_buf_.reset();
++  associated_ = true;
++  StartControlWatch();
++  return OK;
++}
++
++std::optional<size_t> SOCKS5DatagramServerSocket::AssociateReplyRemainder()
++    const {
++  base::span<const uint8_t> reply = control_read_buf_->span_before_offset();
++  if (reply[0] != kSOCKS5Version || reply[2] != 0x00) {
++    return std::nullopt;
++  }
++  // The prefix already holds one address byte, so that byte is not counted
++  // again. For a domain name it is the length octet.
++  switch (reply[3]) {
++    case kAddressTypeIPv4:
++      return 4u - 1u + kPortSize;
++    case kAddressTypeIPv6:
++      return 16u - 1u + kPortSize;
++    case kAddressTypeDomain:
++      return size_t{reply[4]} + kPortSize;
++    default:
++      return std::nullopt;
++  }
++}
++
++int SOCKS5DatagramServerSocket::ResolveRelayEndpoint() {
++  base::span<const uint8_t> reply = control_read_buf_->span_before_offset();
++  if (reply[1] != kReplySuccess) {
++    // Includes 0x07 (command not supported), which is what a proxy without UDP
++    // ASSOCIATE answers. That is the failure that makes this socket, and
++    // therefore the UDP candidate it would have produced, not exist.
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++
++  IPAddress reported;
++  uint16_t port = 0;
++  bool usable = false;
++  switch (reply[3]) {
++    case kAddressTypeIPv4:
++      reported = IPAddress(reply.subspan(kHeaderPrefixSize, 4u));
++      port = ReadPort(reply.subspan(kHeaderPrefixSize + 4u, kPortSize));
++      usable = true;
++      break;
++    case kAddressTypeIPv6:
++      reported = IPAddress(reply.subspan(kHeaderPrefixSize, 16u));
++      port = ReadPort(reply.subspan(kHeaderPrefixSize + 16u, kPortSize));
++      usable = true;
++      break;
++    case kAddressTypeDomain: {
++      // Resolving the relay's name would be a DNS query the stream path
++      // through the same proxy never makes.
++      const size_t name_length = size_t{reply[4]};
++      port = ReadPort(
++          reply.subspan(kHeaderPrefixSize + 1u + name_length, kPortSize));
++      usable = false;
++      break;
++    }
++    default:
++      return ERR_SOCKS_CONNECTION_FAILED;
++  }
++  if (port == 0) {
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++
++  // The substitution rules of SOCKS5DatagramClientSocket, unchanged. Only the
++  // address is ever replaced; the port always comes from BND.PORT.
++  const IPAddress& proxy_address = proxy_endpoint_.address();
++  if (usable) {
++    if (reported.IsZero()) {
++      usable = false;  // "This host", and the most common real reply.
++    } else if (reported.IsLoopback() && !proxy_address.IsLoopback()) {
++      usable = false;  // The proxy reported its inside-the-box address.
++    } else if (reported.size() != proxy_address.size()) {
++      usable = false;  // Unreachable from the socket this object bound.
++    }
++  }
++  relay_endpoint_ = IPEndPoint(usable ? reported : proxy_address, port);
++  return OK;
++}
++
++int SOCKS5DatagramServerSocket::StartControlWrite(std::vector<uint8_t> bytes,
++                                                  State write_complete_state,
++                                                  State done_state) {
++  const size_t size = bytes.size();
++  control_write_buf_ = base::MakeRefCounted<DrainableIOBuffer>(
++      base::MakeRefCounted<VectorIOBuffer>(std::move(bytes)), size);
++  return ContinueControlWrite(write_complete_state, done_state);
++}
++
++int SOCKS5DatagramServerSocket::ContinueControlWrite(State write_complete_state,
++                                                     State done_state) {
++  while (control_write_buf_->BytesRemaining() > 0) {
++    next_state_ = write_complete_state;
++    int rv = control_socket_->Write(
++        control_write_buf_.get(), control_write_buf_->BytesRemaining(),
++        base::BindOnce(&SOCKS5DatagramServerSocket::OnIOComplete,
++                       weak_factory_.GetWeakPtr()),
++        traffic_annotation_);
++    if (rv == ERR_IO_PENDING) {
++      return ERR_IO_PENDING;
++    }
++    if (rv <= 0) {
++      return rv == 0 ? ERR_SOCKS_CONNECTION_FAILED : rv;
++    }
++    control_write_buf_->DidConsume(rv);
++  }
++  control_write_buf_.reset();
++  next_state_ = done_state;
++  return OK;
++}
++
++int SOCKS5DatagramServerSocket::StartControlRead(size_t capacity,
++                                                 State complete_state) {
++  if (!control_read_buf_) {
++    control_read_buf_ = base::MakeRefCounted<GrowableIOBuffer>();
++  }
++  control_read_buf_->set_offset(0);
++  control_read_buf_->SetCapacity(base::checked_cast<int>(capacity));
++  return ContinueControlRead(complete_state);
++}
++
++int SOCKS5DatagramServerSocket::ContinueControlRead(State complete_state) {
++  next_state_ = complete_state;
++  return control_socket_->Read(
++      control_read_buf_.get(), control_read_buf_->RemainingCapacity(),
++      base::BindOnce(&SOCKS5DatagramServerSocket::OnIOComplete,
++                     weak_factory_.GetWeakPtr()));
++}
++
++void SOCKS5DatagramServerSocket::StartControlWatch() {
++  control_watch_buf_ = base::MakeRefCounted<IOBufferWithSize>(size_t{1});
++  int rv = control_socket_->Read(
++      control_watch_buf_.get(), 1,
++      base::BindOnce(&SOCKS5DatagramServerSocket::OnControlWatchComplete,
++                     weak_factory_.GetWeakPtr()));
++  if (rv != ERR_IO_PENDING) {
++    OnControlWatchComplete(rv);
++  }
++}
++
++void SOCKS5DatagramServerSocket::OnControlWatchComplete(int result) {
++  // RFC 1928 §7: the association ends with the control connection, so anything
++  // other than "still pending" is terminal. Latching it here is what makes the
++  // next SendTo() fail instead of handing a packet to a relay that has stopped
++  // listening, which would otherwise look to WebRTC like a silent path.
++  if (result > 0) {
++    // A conforming proxy sends nothing after the ASSOCIATE reply.
++    LatchError(ERR_SOCKS_CONNECTION_FAILED);
++  } else if (result == 0) {
++    LatchError(ERR_CONNECTION_CLOSED);
++  } else {
++    LatchError(result);
++  }
++}
++
++void SOCKS5DatagramServerSocket::LatchError(int error) {
++  CHECK_LT(error, 0);
++  CHECK_NE(error, ERR_IO_PENDING);
++  if (latched_error_ != OK) {
++    return;
++  }
++  latched_error_ = error;
++  if (!read_user_callback_.is_null()) {
++    CompletionOnceCallback callback = std::move(read_user_callback_);
++    ClearReadState();
++    std::move(callback).Run(error);
++  }
++}
++
++// ---------------------------------------------------------------------------
++// Receive
++// ---------------------------------------------------------------------------
++
++int SOCKS5DatagramServerSocket::RecvFrom(IOBuffer* buf,
++                                         int buf_len,
++                                         IPEndPoint* address,
++                                         CompletionOnceCallback callback) {
++  if (latched_error_ != OK) {
++    return latched_error_;
++  }
++  if (!associated_) {
++    return ERR_SOCKET_NOT_CONNECTED;
++  }
++  CHECK_GT(buf_len, 0);
++  CHECK(address);
++  CHECK(read_user_callback_.is_null());
++  read_user_buffer_ = buf;
++  read_user_buffer_len_ = static_cast<size_t>(buf_len);
++  read_user_address_ = address;
++  read_user_callback_ = std::move(callback);
++
++  const size_t frame_len = read_user_buffer_len_ + kMaxSocks5InboundHeaderSize;
++  if (!read_frame_buffer_ ||
++      static_cast<size_t>(read_frame_buffer_->size()) < frame_len) {
++    read_frame_buffer_ = base::MakeRefCounted<IOBufferWithSize>(frame_len);
++  }
++
++  int rv = ReadLoop();
++  if (rv == ERR_IO_PENDING) {
++    return ERR_IO_PENDING;
++  }
++  read_user_callback_.Reset();
++  ClearReadState();
++  return rv;
++}
++
++int SOCKS5DatagramServerSocket::ReadLoop() {
++  while (true) {
++    int rv = datagram_socket_->RecvFrom(
++        read_frame_buffer_.get(),
++        base::checked_cast<int>(read_frame_buffer_->size()),
++        &read_frame_address_,
++        base::BindOnce(&SOCKS5DatagramServerSocket::OnDatagramReadComplete,
++                       weak_factory_.GetWeakPtr()));
++    if (rv == ERR_IO_PENDING) {
++      return ERR_IO_PENDING;
++    }
++    int result = OK;
++    if (Deframe(rv, &result)) {
++      return result;
++    }
++    // The datagram was dropped rather than delivered, which is
++    // indistinguishable from the packet loss WebRTC already handles. Read
++    // again rather than report an error.
++  }
++}
++
++void SOCKS5DatagramServerSocket::OnDatagramReadComplete(int result) {
++  if (read_user_callback_.is_null()) {
++    return;
++  }
++  int out_result = OK;
++  if (!Deframe(result, &out_result)) {
++    // Dropped. Issue the next read; only a final result falls through.
++    out_result = ReadLoop();
++    if (out_result == ERR_IO_PENDING) {
++      return;
++    }
++  }
++  CompletionOnceCallback callback = std::move(read_user_callback_);
++  ClearReadState();
++  std::move(callback).Run(out_result);
++}
++
++bool SOCKS5DatagramServerSocket::Deframe(int result, int* out_result) {
++  if (result < 0) {
++    *out_result = result;
++    return true;
++  }
++  // A datagram from anything other than the relay carries no RFC 1928 header,
++  // so there is nothing to deframe and nothing legitimate it could be: the
++  // only address any peer was told is the relay's.
++  if (read_frame_address_ != relay_endpoint_) {
++    return false;
++  }
++  base::span<const uint8_t> datagram =
++      read_frame_buffer_->span().first(static_cast<size_t>(result));
++  if (datagram.size() < kHeaderPrefixSize) {
++    return false;
++  }
++  if (datagram[0] != 0x00 || datagram[1] != 0x00) {
++    return false;
++  }
++  // A non-zero FRAG means the relay fragmented the datagram. Reassembly is
++  // optional in RFC 1928 §7 and reassembling one datagram out of several
++  // would need a timer no relay in practice exercises, so it is dropped.
++  if (datagram[2] != 0x00) {
++    return false;
++  }
++  size_t address_length = 0;
++  switch (datagram[3]) {
++    case kAddressTypeIPv4:
++      address_length = 4u;
++      break;
++    case kAddressTypeIPv6:
++      address_length = 16u;
++      break;
++    case kAddressTypeDomain:
++      // The sender has to become an IPEndPoint for WebRTC to match it against
++      // a candidate, and a name cannot.
++      return false;
++    default:
++      return false;
++  }
++  const size_t header_length = kHeaderPrefixSize + address_length + kPortSize;
++  if (datagram.size() < header_length) {
++    return false;
++  }
++  const size_t payload_length = datagram.size() - header_length;
++  // A header-only datagram carries nothing. Stock Chromium already discards a
++  // zero-length one: P2PSocketUdp::HandleReadResult only delivers a positive
++  // result, so dropping it here is the same observable behaviour with one
++  // fewer round trip.
++  if (payload_length == 0 || payload_length > read_user_buffer_len_) {
++    return false;
++  }
++  // The sender the relay reports, which is what WebRTC treats as the remote
++  // address of this packet.
++  *read_user_address_ = IPEndPoint(
++      IPAddress(datagram.subspan(kHeaderPrefixSize, address_length)),
++      ReadPort(datagram.subspan(kHeaderPrefixSize + address_length,
++                                kPortSize)));
++  read_user_buffer_->span().first(payload_length).copy_from(
++      datagram.subspan(header_length, payload_length));
++  *out_result = base::checked_cast<int>(payload_length);
++  return true;
++}
++
++void SOCKS5DatagramServerSocket::ClearReadState() {
++  read_user_buffer_ = nullptr;
++  read_user_buffer_len_ = 0;
++  read_user_address_ = nullptr;
++}
++
++// ---------------------------------------------------------------------------
++// Send
++// ---------------------------------------------------------------------------
++
++int SOCKS5DatagramServerSocket::SendTo(IOBuffer* buf,
++                                       int buf_len,
++                                       const IPEndPoint& address,
++                                       CompletionOnceCallback callback) {
++  if (latched_error_ != OK) {
++    return latched_error_;
++  }
++  if (!associated_) {
++    return ERR_SOCKET_NOT_CONNECTED;
++  }
++  CHECK_GT(buf_len, 0);
++  CHECK(send_user_callback_.is_null());
++  const std::vector<uint8_t> header = BuildDatagramHeader(address);
++  if (header.empty()) {
++    return ERR_ADDRESS_INVALID;
++  }
++  const size_t payload_len = static_cast<size_t>(buf_len);
++  const size_t framed_len = header.size() + payload_len;
++  if (!send_frame_buffer_ ||
++      static_cast<size_t>(send_frame_buffer_->size()) < framed_len) {
++    send_frame_buffer_ = base::MakeRefCounted<IOBufferWithSize>(framed_len);
++  }
++  // The caller's buffer must not be modified, so the frame is assembled here.
++  base::span<uint8_t> frame = send_frame_buffer_->span();
++  frame.first(header.size()).copy_from(base::span<const uint8_t>(header));
++  frame.subspan(header.size(), payload_len)
++      .copy_from(buf->span().first(payload_len));
++
++  send_payload_len_ = payload_len;
++  send_framed_len_ = framed_len;
++  send_user_callback_ = std::move(callback);
++  int rv = datagram_socket_->SendTo(
++      send_frame_buffer_.get(), base::checked_cast<int>(framed_len),
++      relay_endpoint_,
++      base::BindOnce(&SOCKS5DatagramServerSocket::OnDatagramSendComplete,
++                     weak_factory_.GetWeakPtr()));
++  if (rv == ERR_IO_PENDING) {
++    return ERR_IO_PENDING;
++  }
++  send_user_callback_.Reset();
++  return TranslateSendResult(rv);
++}
++
++void SOCKS5DatagramServerSocket::OnDatagramSendComplete(int result) {
++  if (send_user_callback_.is_null()) {
++    return;
++  }
++  CompletionOnceCallback callback = std::move(send_user_callback_);
++  std::move(callback).Run(TranslateSendResult(result));
++}
++
++int SOCKS5DatagramServerSocket::TranslateSendResult(int result) const {
++  if (result < 0) {
++    return result;
++  }
++  // The count must be in the caller's frame of reference, or the sender sees a
++  // short write for a packet that was in fact sent whole.
++  if (static_cast<size_t>(result) != send_framed_len_) {
++    // A datagram goes whole or not at all, and the tail of a framed packet
++    // cannot be resent because it carries no header.
++    return ERR_MSG_TOO_BIG;
++  }
++  return base::checked_cast<int>(send_payload_len_);
++}
++
++// ---------------------------------------------------------------------------
++// Addresses and options
++// ---------------------------------------------------------------------------
++
++void SOCKS5DatagramServerSocket::Close() {
++  next_state_ = STATE_NONE;
++  associated_ = false;
++  listening_ = false;
++  connect_callback_.Reset();
++  // A read or send in flight is abandoned without running its callback, which
++  // is what Close() means for every other socket.
++  read_user_callback_.Reset();
++  send_user_callback_.Reset();
++  ClearReadState();
++  resolve_request_.reset();
++  control_write_buf_.reset();
++  control_read_buf_.reset();
++  control_watch_buf_.reset();
++  // Destroying the control connection is what ends the association.
++  if (control_socket_) {
++    control_socket_->Disconnect();
++    control_socket_.reset();
++  }
++  datagram_socket_->Close();
++}
++
++int SOCKS5DatagramServerSocket::GetPeerAddress(IPEndPoint* address) const {
++  // An association has no single peer: every datagram names its own.
++  return ERR_SOCKET_NOT_CONNECTED;
++}
++
++int SOCKS5DatagramServerSocket::GetLocalAddress(IPEndPoint* address) const {
++  if (!associated_) {
++    return ERR_SOCKET_NOT_CONNECTED;
++  }
++  // The relay endpoint, never the bound socket's own address. This is the
++  // address this socket's traffic reaches the network from, and the caller
++  // publishes it: returning the real local address here is precisely the leak
++  // this class exists to close.
++  *address = relay_endpoint_;
++  return OK;
++}
++
++void SOCKS5DatagramServerSocket::UseNonBlockingIO() {
++  datagram_socket_->UseNonBlockingIO();
++}
++
++int SOCKS5DatagramServerSocket::SetDoNotFragment() {
++  // Applies to the outer datagram on the client-to-relay hop, which is the hop
++  // whose MTU this host can discover.
++  return datagram_socket_->SetDoNotFragment();
++}
++
++int SOCKS5DatagramServerSocket::SetRecvTos() {
++  // Deliberately not enabled on the inner socket. The TOS byte of a relayed
++  // datagram belongs to the relay-to-client hop; reporting it as the sender's
++  // would be worse than reporting none, so GetLastTos() reports ECN_NOT_ECT.
++  return OK;
++}
++
++int SOCKS5DatagramServerSocket::SetTos(DiffServCodePoint dscp,
++                                       EcnCodePoint ecn) {
++  // The DSCP of the outer datagram is this host's to set. The ECN bits are
++  // not: a relay re-originates the inner packet and cannot carry them.
++  return datagram_socket_->SetTos(dscp, ECN_NO_CHANGE);
++}
++
++void SOCKS5DatagramServerSocket::SetMsgConfirm(bool confirm) {
++  datagram_socket_->SetMsgConfirm(confirm);
++}
++
++const NetLogWithSource& SOCKS5DatagramServerSocket::NetLog() const {
++  // No new NetLog source or event type is introduced for the relay, so a
++  // net-export capture gains no field and in particular none holding the relay
++  // address or a credential.
++  return datagram_socket_->NetLog();
++}
++
++DscpAndEcn SOCKS5DatagramServerSocket::GetLastTos() const {
++  return DscpAndEcn{DSCP_DEFAULT, ECN_NOT_ECT};
++}
++
++int SOCKS5DatagramServerSocket::SetReceiveBufferSize(int32_t size) {
++  return datagram_socket_->SetReceiveBufferSize(size);
++}
++
++int SOCKS5DatagramServerSocket::SetSendBufferSize(int32_t size) {
++  return datagram_socket_->SetSendBufferSize(size);
++}
++
++void SOCKS5DatagramServerSocket::AllowAddressReuse() {
++  datagram_socket_->AllowAddressReuse();
++}
++
++void SOCKS5DatagramServerSocket::AllowBroadcast() {
++  datagram_socket_->AllowBroadcast();
++}
++
++void SOCKS5DatagramServerSocket::AllowAddressSharingForMulticast() {
++  datagram_socket_->AllowAddressSharingForMulticast();
++}
++
++int SOCKS5DatagramServerSocket::JoinGroup(
++    const IPAddress& group_address) const {
++  // RFC 1928 has no multicast membership, and a relay is a unicast path.
++  return ERR_NOT_IMPLEMENTED;
++}
++
++int SOCKS5DatagramServerSocket::LeaveGroup(
++    const IPAddress& group_address) const {
++  return ERR_NOT_IMPLEMENTED;
++}
++
++int SOCKS5DatagramServerSocket::SetMulticastInterface(
++    uint32_t interface_index) {
++  return ERR_NOT_IMPLEMENTED;
++}
++
++int SOCKS5DatagramServerSocket::SetMulticastTimeToLive(int time_to_live) {
++  return ERR_NOT_IMPLEMENTED;
++}
++
++int SOCKS5DatagramServerSocket::SetMulticastLoopbackMode(bool loopback) {
++  return ERR_NOT_IMPLEMENTED;
++}
++
++int SOCKS5DatagramServerSocket::SetDiffServCodePoint(DiffServCodePoint dscp) {
++  return datagram_socket_->SetDiffServCodePoint(dscp);
++}
++
++void SOCKS5DatagramServerSocket::DetachFromThread() {
++  datagram_socket_->DetachFromThread();
++}
++
++}  // namespace net
+
+--- a/net/BUILD.gn
++++ b/net/BUILD.gn
+@@ -987,6 +987,7 @@
+     "socket/connection_attempts.h",
+     "socket/datagram_client_socket.cc",
+     "socket/datagram_client_socket.h",
++    "socket/datagram_server_socket.cc",
+     "socket/datagram_server_socket.h",
+     "socket/datagram_socket.h",
+     "socket/delayed_socket_config.h",
+@@ -1021,6 +1022,8 @@
+     "socket/socks5_client_socket.h",
+     "socket/socks5_datagram_client_socket.cc",
+     "socket/socks5_datagram_client_socket.h",
++    "socket/socks5_datagram_server_socket.cc",
++    "socket/socks5_datagram_server_socket.h",
+     "socket/socks_client_socket.cc",
+     "socket/socks_client_socket.h",
+     "socket/socks_connect_job.cc",
+
+--- a/services/network/p2p/socket.h
++++ b/services/network/p2p/socket.h
+@@ -13,6 +13,7 @@
+ #include "base/component_export.h"
+ #include "base/containers/span.h"
+ #include "base/feature.h"
++#include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/unguessable_token.h"
+@@ -27,6 +28,7 @@
+ #include "services/network/public/mojom/p2p.mojom.h"
+ 
+ namespace net {
++class DatagramServerSocket;
+ class NetLog;
+ class NetworkAnonymizationKey;
+ }
+@@ -70,6 +72,15 @@
+       net::NetLog* net_log,
+       ProxyResolvingClientSocketFactory* proxy_resolving_socket_factory,
+       P2PMessageThrottler* throttler,
++      // Creates the datagram socket a P2P_SOCKET_UDP binds; ignored for every
++      // TCP type. This is P2PSocketUdp::DatagramServerSocketFactory, spelled
++      // out because socket_udp.h includes this header. The substitution has to
++      // happen here because this switch is the only place a WebRTC UDP socket
++      // is ever built, so it is also the only place that can guarantee no
++      // WebRTC datagram leaves an unrelayed socket.
++      const base::RepeatingCallback<
++          std::unique_ptr<net::DatagramServerSocket>(net::NetLog*)>&
++          udp_socket_factory,
+       std::optional<base::UnguessableToken> devtools_token);
+ 
+   P2PSocket(const P2PSocket&) = delete;
+
+--- a/services/network/p2p/socket.cc
++++ b/services/network/p2p/socket.cc
+@@ -140,12 +140,15 @@
+     net::NetLog* net_log,
+     ProxyResolvingClientSocketFactory* proxy_resolving_socket_factory,
+     P2PMessageThrottler* throttler,
++    const base::RepeatingCallback<
++        std::unique_ptr<net::DatagramServerSocket>(net::NetLog*)>&
++        udp_socket_factory,
+     std::optional<base::UnguessableToken> devtools_token) {
+   switch (type) {
+     case P2P_SOCKET_UDP:
+       return std::make_unique<P2PSocketUdp>(
+           delegate, std::move(client), std::move(socket), throttler,
+-          traffic_annotation, net_log, devtools_token);
++          traffic_annotation, net_log, udp_socket_factory, devtools_token);
+     case P2P_SOCKET_TCP_CLIENT:
+     case P2P_SOCKET_SSLTCP_CLIENT:
+     case P2P_SOCKET_TLS_CLIENT:
+
+--- a/services/network/p2p/socket_udp.h
++++ b/services/network/p2p/socket_udp.h
+@@ -79,14 +79,14 @@
+                net::NetLog* net_log,
+                const DatagramServerSocketFactory& socket_factory,
+                std::optional<base::UnguessableToken> devtools_token);
+-  P2PSocketUdp(Delegate* delegate,
+-               mojo::PendingRemote<mojom::P2PSocketClient> client,
+-               mojo::PendingReceiver<mojom::P2PSocket> socket,
+-               P2PMessageThrottler* throttler,
+-               const net::NetworkTrafficAnnotationTag& traffic_annotation,
+-               net::NetLog* net_log,
+-               std::optional<base::UnguessableToken> devtools_token);
+ 
++  // The plain UDP socket this class binds when nothing wraps it. Public so
++  // that a caller which does wrap it -- P2PSocketManager, when WebRTC's media
++  // plane is relayed through a proxy -- hands the relay the same socket,
++  // configured the same way, as the direct path binds.
++  static std::unique_ptr<net::DatagramServerSocket> CreateDefaultSocket(
++      net::NetLog* net_log);
++
+   P2PSocketUdp(const P2PSocketUdp&) = delete;
+   P2PSocketUdp& operator=(const P2PSocketUdp&) = delete;
+ 
+@@ -111,6 +111,11 @@
+ 
+   typedef std::set<net::IPEndPoint> ConnectedPeerSet;
+ 
++  // Runs once this socket can report an address and carry datagrams:
++  // immediately for a plain UDP socket, and after the SOCKS5 association has
++  // been established for a relayed one.
++  void OnEgressReady(net::IPEndPoint remote_address, int result);
++
+   bool SendPacket(base::span<const uint8_t> data,
+                   const P2PPacketInfo& packet_info);
+   void DoRead();
+
+--- a/services/network/p2p/socket_udp.cc
++++ b/services/network/p2p/socket_udp.cc
+@@ -107,17 +107,6 @@
+   return "";
+ }
+ 
+-std::unique_ptr<net::DatagramServerSocket> DefaultSocketFactory(
+-    net::NetLog* net_log) {
+-  net::UDPServerSocket* socket =
+-      new net::UDPServerSocket(net_log, net::NetLogSource());
+-#if BUILDFLAG(IS_WIN)
+-  socket->UseNonBlockingIO();
+-#endif
+-
+-  return base::WrapUnique(socket);
+-}
+-
+ webrtc::EcnMarking GetEcnMarking(net::DscpAndEcn tos) {
+   switch (tos.ecn) {
+     case net::ECN_NO_CHANGE:
+@@ -184,6 +173,18 @@
+ P2PPendingPacket::P2PPendingPacket(const P2PPendingPacket& other) = default;
+ P2PPendingPacket::~P2PPendingPacket() = default;
+ 
++// static
++std::unique_ptr<net::DatagramServerSocket> P2PSocketUdp::CreateDefaultSocket(
++    net::NetLog* net_log) {
++  net::UDPServerSocket* socket =
++      new net::UDPServerSocket(net_log, net::NetLogSource());
++#if BUILDFLAG(IS_WIN)
++  socket->UseNonBlockingIO();
++#endif
++
++  return base::WrapUnique(socket);
++}
++
+ P2PSocketUdp::P2PSocketUdp(
+     Delegate* Delegate,
+     mojo::PendingRemote<mojom::P2PSocketClient> client,
+@@ -209,23 +210,6 @@
+     interceptor_->RegisterSocket(this);
+   }
+ }
+-
+-P2PSocketUdp::P2PSocketUdp(
+-    Delegate* Delegate,
+-    mojo::PendingRemote<mojom::P2PSocketClient> client,
+-    mojo::PendingReceiver<mojom::P2PSocket> socket,
+-    P2PMessageThrottler* throttler,
+-    const net::NetworkTrafficAnnotationTag& traffic_annotation,
+-    net::NetLog* net_log,
+-    std::optional<base::UnguessableToken> devtools_token)
+-    : P2PSocketUdp(Delegate,
+-                   std::move(client),
+-                   std::move(socket),
+-                   throttler,
+-                   traffic_annotation,
+-                   net_log,
+-                   base::BindRepeating(&DefaultSocketFactory),
+-                   devtools_token) {}
+ 
+ P2PSocketUdp::~P2PSocketUdp() {
+   if (interceptor_) {
+@@ -282,6 +266,32 @@
+                  << kUdpSendSocketBufferSize;
+   }
+ 
++  // A socket whose datagrams are relayed has no address to report and can
++  // carry nothing until its association exists, which costs three round trips
++  // to the proxy. A plain UDP socket answers OK here, so the direct path stays
++  // straight-line. Unretained is safe because this object owns `socket_`, so
++  // destroying it cancels the pending handshake before the callback can run.
++  result = socket_->ConnectRelay(
++      base::BindOnce(&P2PSocketUdp::OnEgressReady, base::Unretained(this),
++                     remote_address.ip_address));
++  if (result == net::ERR_IO_PENDING) {
++    return;
++  }
++  OnEgressReady(remote_address.ip_address, result);
++}
++
++void P2PSocketUdp::OnEgressReady(net::IPEndPoint remote_address, int result) {
++  if (result != net::OK) {
++    // The configured proxy cannot carry this socket's datagrams, so the socket
++    // does not exist. The renderer sees the pipe close and WebRTC gets no
++    // candidate from it, rather than a candidate whose packets would have gone
++    // out of a real interface.
++    LOG(ERROR) << "P2PSocketUdp::Init(): no usable egress for this socket: "
++               << result;
++    OnError();
++    return;
++  }
++
+   net::IPEndPoint address;
+   result = socket_->GetLocalAddress(&address);
+   if (result < 0) {
+@@ -293,7 +303,7 @@
+   VLOG(1) << "Local address: " << address.ToString();
+ 
+   // NOTE: Remote address will be same as what renderer provided.
+-  client_->SocketCreated(address, remote_address.ip_address);
++  client_->SocketCreated(address, remote_address);
+ 
+   recv_buffer_ =
+       base::MakeRefCounted<net::IOBufferWithSize>(kUdpReadBufferSize);
+
+--- a/services/network/p2p/socket_manager.cc
++++ b/services/network/p2p/socket_manager.cc
+@@ -9,6 +9,8 @@
+ #include <optional>
+ #include <utility>
+ 
++#include "base/apostate/profile.h"
++#include "base/command_line.h"
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
+ #include "base/memory/raw_ptr.h"
+@@ -16,22 +18,32 @@
+ #include "base/task/thread_pool.h"
+ #include "net/base/address_family.h"
+ #include "net/base/address_list.h"
++#include "net/base/host_port_pair.h"
+ #include "net/base/net_errors.h"
+ #include "net/base/network_anonymization_key.h"
+ #include "net/base/network_handle.h"
+ #include "net/base/network_interfaces.h"
+ #include "net/base/port_util.h"
++#include "net/base/proxy_chain.h"
++#include "net/base/proxy_server.h"
+ #include "net/base/sys_addrinfo.h"
+ #include "net/dns/dns_util.h"
+ #include "net/dns/host_resolver.h"
+ #include "net/http/http_network_session.h"
+ #include "net/log/net_log_source.h"
+ #include "net/log/net_log_with_source.h"
++#include "net/proxy_resolution/configured_proxy_resolution_service.h"
++#include "net/proxy_resolution/proxy_config.h"
++#include "net/proxy_resolution/proxy_config_with_annotation.h"
++#include "net/proxy_resolution/proxy_list.h"
+ #include "net/socket/client_socket_factory.h"
++#include "net/socket/socks5_client_socket.h"
++#include "net/socket/socks5_datagram_server_socket.h"
+ #include "net/traffic_annotation/network_traffic_annotation.h"
+ #include "net/url_request/url_request_context.h"
+ #include "net/url_request/url_request_context_getter.h"
+ #include "services/network/p2p/socket.h"
++#include "services/network/p2p/socket_udp.h"
+ #include "services/network/proxy_resolving_client_socket_factory.h"
+ #include "services/network/public/cpp/p2p_param_traits.h"
+ #include "third_party/webrtc/media/base/rtp_utils.h"
+@@ -56,6 +68,164 @@
+ const size_t kMinRtcpHeaderLength = 8;
+ const size_t kDtlsRecordHeaderLength = 13;
+ 
++// --fingerprint-webrtc-udp overrides how WebRTC's UDP sockets reach the
++// network. Absent means automatic, which is the only value that consults the
++// proxy configuration.
++constexpr char kWebRtcUdpSwitch[] = "fingerprint-webrtc-udp";
++// Bind and send from this host's own interfaces even when a proxy is
++// configured. An explicit acceptance that a remote peer will read this host's
++// real address off the source of the packets it receives.
++constexpr char kWebRtcUdpDirectValue[] = "direct";
++// Never create a WebRTC UDP socket, with or without a proxy.
++constexpr char kWebRtcUdpBlockValue[] = "block";
++
++// Where a peer connection's datagrams are allowed to go.
++enum class UdpEgress {
++  kDirect,
++  kRelayThroughSocks5,
++  kBlocked,
++};
++
++// Annotates the SOCKS5 control connection of a relayed WebRTC UDP socket: the
++// greeting, the optional RFC 1929 sub-negotiation and the UDP ASSOCIATE
++// request. The relayed datagrams themselves are the STUN, TURN and media
++// packets P2PSocketUdp already annotates, because they are the same packets it
++// would otherwise have sent directly.
++const net::NetworkTrafficAnnotationTag kP2PSocks5AssociateTrafficAnnotation =
++    net::DefineNetworkTrafficAnnotation("p2p_socks5_udp_associate", R"(
++        semantics {
++          sender: "P2P Socket Manager"
++          description:
++            "Establishes a SOCKS5 UDP association so a peer connection's STUN, "
++            "TURN and media datagrams are relayed by the configured SOCKS5 "
++            "proxy instead of being sent from a local interface. Carries the "
++            "SOCKS5 greeting, the optional username/password sub-negotiation, "
++            "and the UDP ASSOCIATE request."
++          trigger:
++            "A page creates an RTCPeerConnection while a SOCKS5 proxy is "
++            "configured."
++          data:
++            "The SOCKS5 handshake. No media and no destination address; each "
++            "relayed datagram names its own destination, not this connection."
++          destination: OTHER
++          destination_other: "The configured SOCKS5 proxy."
++        }
++        policy {
++          cookies_allowed: NO
++          setting:
++            "This traffic only occurs when a SOCKS5 proxy is configured and a "
++            "page uses WebRTC, and stops when either stops being true."
++          policy_exception_justification:
++            "Not implemented, behaviour follows the proxy configuration."
++        }
++    )");
++
++// Decides where a peer connection's UDP datagrams may go, and on success
++// leaves the proxy to relay them through in `proxy`.
++//
++// Every UDP socket of every peer connection shares one egress, and it has to
++// be chosen before any destination is known: a P2P UDP socket is created with
++// no remote address and then sends to a STUN server, a TURN server and
++// arbitrary remote candidates over that one socket. There is no URL for
++// per-request proxy resolution to answer about, so the static configuration is
++// the only thing that can be consulted, and a configuration that cannot be
++// reduced to a single datagram-capable proxy is refused rather than guessed
++// at. Refusing is the whole point: the alternative is a candidate whose
++// packets carry an address the page was never told.
++//
++// Bypass rules are deliberately not consulted. They would send some traffic
++// direct, and a datagram has no host to test against them, so the media plane
++// takes the proxy unconditionally. That is the safe direction.
++UdpEgress ResolveUdpEgress(net::URLRequestContext* context,
++                           net::HostPortPair* proxy) {
++  const base::CommandLine& command_line =
++      *base::CommandLine::ForCurrentProcess();
++  if (command_line.HasSwitch(kWebRtcUdpSwitch)) {
++    const std::string mode = command_line.GetSwitchValueASCII(kWebRtcUdpSwitch);
++    if (mode == kWebRtcUdpDirectValue) {
++      return UdpEgress::kDirect;
++    }
++    // Includes an unrecognised value, which is refused rather than silently
++    // treated as the permissive default.
++    return UdpEgress::kBlocked;
++  }
++
++  net::ConfiguredProxyResolutionService* configured = nullptr;
++  if (!context->proxy_resolution_service()
++           ->CastToConfiguredProxyResolutionService(&configured)) {
++    // A resolution service whose configuration cannot be read cannot be shown
++    // to be direct.
++    return UdpEgress::kBlocked;
++  }
++  const std::optional<net::ProxyConfigWithAnnotation>& config =
++      configured->config().has_value() ? configured->config()
++                                       : configured->fetched_config();
++  if (!config.has_value()) {
++    // No configuration has been applied yet, which is the state of a context
++    // that was never given one.
++    return UdpEgress::kDirect;
++  }
++  if (config->value().HasAutomaticSettings()) {
++    // A PAC script or WPAD answers per URL, and a peer connection has none.
++    return UdpEgress::kBlocked;
++  }
++
++  const net::ProxyConfig::ProxyRules& rules = config->value().proxy_rules();
++  const net::ProxyList* list = nullptr;
++  switch (rules.type) {
++    case net::ProxyConfig::ProxyRules::Type::EMPTY:
++      return UdpEgress::kDirect;
++    case net::ProxyConfig::ProxyRules::Type::PROXY_LIST:
++      list = &rules.single_proxies;
++      break;
++    case net::ProxyConfig::ProxyRules::Type::PROXY_LIST_PER_SCHEME:
++      // Per-scheme rules answer a question a datagram cannot ask.
++      return UdpEgress::kBlocked;
++  }
++  if (list->size() != 1) {
++    // A fallback list means some attempts would take another route, and the
++    // last entry of one is usually direct://.
++    return UdpEgress::kBlocked;
++  }
++  const net::ProxyChain& chain = list->First();
++  if (chain.is_direct()) {
++    return UdpEgress::kDirect;
++  }
++  if (!chain.is_single_proxy() ||
++      chain.First().scheme() != net::ProxyServer::SCHEME_SOCKS5) {
++    // HTTP, HTTPS and SOCKS4 cannot relay a datagram at all, and a multi-proxy
++    // chain would need an association per hop with no way to frame the inner
++    // ones.
++    return UdpEgress::kBlocked;
++  }
++  *proxy = chain.First().host_port_pair();
++  return UdpEgress::kRelayThroughSocks5;
++}
++
++std::unique_ptr<net::DatagramServerSocket> CreateRelayedUdpSocket(
++    net::ClientSocketFactory* client_socket_factory,
++    net::HostResolver* host_resolver,
++    net::NetworkAnonymizationKey network_anonymization_key,
++    net::HostPortPair proxy,
++    net::NetLog* net_log) {
++  // Credentials are read here, at the point of use, and held only by the
++  // socket. Nothing puts them in a NetLog parameter or a pool key.
++  std::optional<net::SOCKS5Credentials> credentials;
++  if (const base::apostate::Profile* profile = base::apostate::Profile::Get()) {
++    if (const std::optional<base::apostate::ProxyCredentials>& configured =
++            profile->proxy_credentials()) {
++      credentials.emplace(configured->username, configured->password);
++    }
++  }
++  // The socket that carries data is the same one the direct path binds, so its
++  // kernel-visible configuration is unchanged; the wrapper only frames and
++  // deframes, and answers with the relay's address instead of this host's.
++  return std::make_unique<net::SOCKS5DatagramServerSocket>(
++      P2PSocketUdp::CreateDefaultSocket(net_log), client_socket_factory,
++      host_resolver, network_anonymization_key, proxy, std::move(credentials),
++      kP2PSocks5AssociateTrafficAnnotation);
++}
++
+ bool IsDtlsPacket(base::span<const uint8_t> data) {
+   return data.size() >= kDtlsRecordHeaderLength &&
+          (data[0] > 19 && data[0] < 64);
+@@ -440,11 +610,42 @@
+     LOG(ERROR) << "Too many sockets created";
+     return;
+   }
++
++  // Which socket a UDP request gets, or whether it gets one at all. Every TCP
++  // type already reaches the network through proxy_resolving_socket_factory_,
++  // so only this branch was ever unproxied.
++  base::RepeatingCallback<std::unique_ptr<net::DatagramServerSocket>(
++      net::NetLog*)>
++      udp_socket_factory;
++  if (type == P2P_SOCKET_UDP) {
++    net::HostPortPair proxy;
++    switch (ResolveUdpEgress(url_request_context_, &proxy)) {
++      case UdpEgress::kDirect:
++        udp_socket_factory =
++            base::BindRepeating(&P2PSocketUdp::CreateDefaultSocket);
++        break;
++      case UdpEgress::kRelayThroughSocks5:
++        udp_socket_factory = base::BindRepeating(
++            &CreateRelayedUdpSocket,
++            url_request_context_->GetNetworkSessionContext()
++                ->client_socket_factory.get(),
++            url_request_context_->host_resolver(), network_anonymization_key_,
++            proxy);
++        break;
++      case UdpEgress::kBlocked:
++        // No socket, so no UDP host, server-reflexive or relay candidate. A
++        // call that does not connect is worse for the user than one that does,
++        // and better than one whose packets carry this host's address to the
++        // far end while the SDP claims another.
++        return;
++    }
++  }
++
+   std::unique_ptr<P2PSocket> socket = P2PSocket::Create(
+       this, std::move(client), std::move(receiver), type,
+       net::NetworkTrafficAnnotationTag(traffic_annotation),
+       url_request_context_->net_log(), proxy_resolving_socket_factory_.get(),
+-      &throttler_, devtools_token);
++      &throttler_, udp_socket_factory, devtools_token);
+ 
+   if (!socket)
+     return;
+
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -2962,6 +2962,10 @@
+       // per-process-type list.
+       ::switches::kApostateProfile,
+       "fingerprint-webrtc-ip",
++      // Read in the network service, where it decides whether WebRTC's UDP
++      // sockets are relayed through the configured proxy, sent directly, or
++      // not created at all.
++      "fingerprint-webrtc-udp",
+   };
+   command_line->CopySwitchesFrom(browser_command_line, kCommonSwitchNames);
+ 
+

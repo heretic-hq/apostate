@@ -40,14 +40,23 @@ git -C "$DEPOT_TOOLS" checkout -q --detach "$DEPOT_TOOLS_REVISION"
 actual="$(git -C "$DEPOT_TOOLS" rev-parse HEAD)"
 [ "$actual" = "$DEPOT_TOOLS_REVISION" ] || die "depot_tools is at $actual, expected $DEPOT_TOOLS_REVISION"
 
-# Measured on a complete macos-arm64 build: 66GB total -- 49GB checkout, 16GB
-# output, 0.7GB depot_tools. The floor is 100GB so a target that needs more
-# than macOS still has room; the old 200GB figure was roughly three times
-# actual consumption, so it fired on the one runner with the least headroom
-# and nowhere else, which is how a warning gets ignored. The number is
-# reported unconditionally so each target's real consumption is in its log.
+# Measured on a complete macos-arm64 build: 66GB total -- 50GB checkout, 16GB
+# output, 0.7GB depot_tools. Two tiers, because one number cannot do both jobs.
+#
+# The 100GB warning is comfort: a target that needs more than macOS still has
+# room. The old 200GB figure was roughly three times actual consumption, so it
+# fired on the one runner with the least headroom and nowhere else, which is
+# how a warning gets ignored.
+#
+# The 45GB floor is arithmetic. Windows never fetches
+# third_party/swift-toolchain, so its checkout cannot be smaller than about
+# 46GB, and a build that starts below the size of its own source tree will
+# spend hours on the most expensive runner we use before dying of ENOSPC
+# somewhere inside ninja. Failing here costs seconds and says why.
 avail_kb="$(df -Pk "$WORKSPACE" | awk 'NR==2{print $4}')"
 say "workspace has $((avail_kb / 1048576))GB free at $WORKSPACE"
+[ "$avail_kb" -gt 47185920 ] ||
+  die "only $((avail_kb / 1048576))GB free at $WORKSPACE; the checkout alone measures 46GB before any output. Free space or use a larger runner."
 [ "$avail_kb" -gt 104857600 ] || warn "under 100GB free; a measured checkout plus build needs 66GB on macOS"
 
 say "bootstrap ok  chromium=$CHROMIUM_VERSION  workspace=$WORKSPACE"

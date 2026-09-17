@@ -79,3 +79,14 @@ if [ "$(uname -s)" = "Linux" ] && [ -x "$SRC/build/install-build-deps.sh" ]; the
 fi
 
 say "chromium at $(git -C "$SRC" describe --tags 2>/dev/null || git -C "$SRC" rev-parse --short HEAD)"
+
+# The checkout exists now, so its real size and the real remaining space are
+# both knowable, which they were not at bootstrap. A complete macos-arm64
+# build's output measured 16GB with symbol_level=0; 20GB is that plus margin.
+# Below it, ninja will run out of disk somewhere in 57128 actions, hours in and
+# with an error naming a random object file rather than the cause.
+checkout_gb="$(du -sm "$SRC" 2>/dev/null | awk '{printf "%d", $1 / 1024}')"
+avail_kb="$(df -Pk "$WORKSPACE" | awk 'NR==2{print $4}')"
+say "checkout occupies ${checkout_gb}GB; $((avail_kb / 1048576))GB free for output"
+[ "$avail_kb" -gt 20971520 ] ||
+  die "only $((avail_kb / 1048576))GB free after the checkout; the build output measures 16GB. This build cannot finish, so it is not started."

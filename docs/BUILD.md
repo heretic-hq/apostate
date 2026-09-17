@@ -329,14 +329,34 @@ shipped. `scripts/reclaim-windows-disk.sh` removes measured, build-irrelevant
 software before the build; the candidates came from a disk census on the image,
 not from a list of things that sound unnecessary.
 
-What is deliberately NOT reclaimed matters as much. The 17.5 GB of dependency
-`.git` directories in the checkout look like free disk and are not:
-`third_party/angle/src/commit_id.py` reads git to bake `ANGLE_COMMIT_HASH` into
-the binary and falls back to `"unknown hash"` when `.git` is absent, and that
-string reaches ANGLE's `GL_VERSION`, which pages can read. Pruning them would
-break coherence and introduce a novel observable in one step. The active Python
-in `hostedtoolcache` is likewise load-bearing — `python3` resolves into it — and
-`C:\Windows\Installer` is needed by the SDK installer this build runs.
+What is deliberately NOT reclaimed matters as much. The checkout holds 17.5 GB
+of dependency `.git` directories, which look like free disk. They are not
+reclaimed, but the reason is narrower than it first appears and the difference
+is worth writing down.
+
+`third_party/angle/src/commit_id.py` reads git to bake `ANGLE_COMMIT_HASH`,
+`ANGLE_COMMIT_DATE` and `ANGLE_COMMIT_POSITION` into the binary, and its
+`git rev-parse` sits inside a bare `except: pass`, so a missing `.git` silently
+yields `"unknown hash"` rather than failing. That string reaches ANGLE's own
+`GL_VERSION` via `ANGLE_VERSION_STRING`
+(`third_party/angle/src/libANGLE/Context.cpp`), which is what makes it look
+like a fingerprint surface. It is not one: the GPU service never forwards
+ANGLE's string. `GetServiceVersionString`
+(`gpu/command_buffer/service/gl_utils.cc:391`) returns the constant
+`"OpenGL ES 2.0 Chromium"` or `"OpenGL ES 3.0 Chromium"`, and Blink wraps that
+constant, so `getParameter(VERSION)` reads `WebGL 1.0 (OpenGL ES 2.0
+Chromium)` on every machine and the commit hash is not web-exposed.
+
+So pruning is not an axiom violation; it is an unmeasured change to
+compiled-in strings that would silently make the Windows binary differ from the
+other targets' for a saving nothing has yet shown we need. If the measured
+checkout says the space is required, the route is `ANGLE_UPSTREAM_HASH` — which
+`commit_id.py` reads before touching git — set from the DEPS-pinned revision,
+plus the same audit for `dawn`, `skia` and `swiftshader`. Not a blind `rm`.
+
+The active Python in `hostedtoolcache` is load-bearing — `python3` resolves
+into it — and `C:\Windows\Installer` is needed by the SDK installer this build
+runs.
 
 `scripts/bootstrap.sh` reports free space on every run, and the workflow
 reports disk again after the build even when it fails, so each target's real

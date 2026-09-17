@@ -13,6 +13,18 @@ DEPOT_TOOLS="$WORKSPACE/depot_tools"
 SRC="$WORKSPACE/src"
 export GOCACHE="${GOCACHE:-$WORKSPACE/.go-cache}"
 
+# GN actions that compile our data into the binary have to read this
+# repository, and they run from inside the checkout. When the workspace sits
+# under the repo they can walk up and find it; on a hosted runner the workspace
+# is in $RUNNER_TEMP, outside the repo, and the walk fails the build. Naming
+# the root here is what makes the workspace location a free choice.
+export APOSTATE_DATA_ROOT="${APOSTATE_DATA_ROOT:-$REPO_ROOT}"
+
+# build/rust/gni_impl/run_bindgen.py refuses to run when TARGET is set, so a
+# single inherited variable with a very common name fails the build thousands
+# of actions in. Chromium's own instruction is to remove it, so remove it.
+unset TARGET
+
 # depot_tools updates itself on every invocation unless told not to. That single
 # behaviour is the most common cause of a build that worked yesterday.
 export DEPOT_TOOLS_UPDATE=0
@@ -27,6 +39,24 @@ export DEPOT_TOOLS_METRICS=0
 # pinning those paths by hand in build/args instead leaves runtime_dirs empty,
 # so the CRT redistributables never get staged into the package.
 export DEPOT_TOOLS_WIN_TOOLCHAIN=0
+
+# Git for Windows checks text files out with CRLF by default. depot_tools'
+# POSIX cipd bootstrap then parses cipd_client_version.digests with a regex
+# anchored on end-of-line, no line matches with a trailing \r, and it reports
+# "Platform windows-amd64 is not supported by the CIPD client bootstrap" --
+# which is false, the hash is right there in the file. Set through the
+# environment rather than `git config` so every child git inherits it,
+# including the ones gclient runs, and the machine's own config is untouched.
+# Appended at the next free index so an existing GIT_CONFIG_COUNT survives.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    _git_config_next="${GIT_CONFIG_COUNT:-0}"
+    export "GIT_CONFIG_KEY_${_git_config_next}=core.autocrlf"
+    export "GIT_CONFIG_VALUE_${_git_config_next}=false"
+    export GIT_CONFIG_COUNT="$((_git_config_next + 1))"
+    unset _git_config_next
+    ;;
+esac
 export PATH="$DEPOT_TOOLS:$PATH"
 
 # Prefer the build tools the checkout pins through DEPS over depot_tools'

@@ -56,6 +56,47 @@ jobs:
       - name: Report available disk
         shell: bash
         run: df -h .
+      # The Windows image reports 130GB of storage but only 55GB free, and a
+      # measured complete build needs 66GB. Before deleting anything from a
+      # runner image, measure what is actually on it -- including which python3
+      # the build would lose if hostedtoolcache went.
+      - name: Census Windows disk usage
+        if: ${{ matrix.target == 'windows-x64' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          printf 'python3 resolves to: %s\n' "$(command -v python3 || echo none)"
+          printf 'git resolves to: %s\n' "$(command -v git || echo none)"
+          if command -v docker >/dev/null 2>&1; then
+            echo "--- docker images"
+            docker images --format '{{.Size}}\t{{.Repository}}:{{.Tag}}' 2>&1 | head -20
+          else
+            echo "--- no docker"
+          fi
+          echo "--- candidate directory sizes (MB)"
+          for dir in \
+            "/c/Android" \
+            "/c/hostedtoolcache" \
+            "/c/Program Files/dotnet" \
+            "/c/Program Files/MongoDB" \
+            "/c/Program Files/MySQL" \
+            "/c/Program Files/PostgreSQL" \
+            "/c/Program Files/Microsoft SDKs" \
+            "/c/Program Files/Microsoft Visual Studio" \
+            "/c/Program Files (x86)/Microsoft SDKs" \
+            "/c/Program Files (x86)/Windows Kits" \
+            "/c/ProgramData/chocolatey" \
+            "/c/ProgramData/Docker" \
+            "/c/Windows/SoftwareDistribution" \
+            "/c/Windows/Installer"; do
+            if [ -d "$dir" ]; then
+              printf '%8s MB  %s\n' "$(du -sm "$dir" 2>/dev/null | cut -f1)" "$dir"
+            else
+              printf '%8s     %s\n' "absent" "$dir"
+            fi
+          done
+          echo "--- hostedtoolcache breakdown"
+          du -sm /c/hostedtoolcache/* 2>/dev/null | sort -rn | head -10
       # Runs the same provisioning the build does, so this probe rehearses the
       # real Windows setup path rather than only reporting what the bare image
       # has. A pass here means the build's first minutes will pass too.

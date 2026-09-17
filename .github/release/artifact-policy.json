@@ -61,7 +61,8 @@
   "extraction_policy": {
     "reject_absolute_paths": true,
     "reject_parent_traversal": true,
-    "reject_symbolic_links": true,
+    "symbolic_links": "contained",
+    "symbolic_links_rule": "Containment, not prohibition. A relative link target that resolves inside the extraction root is accepted; an absolute target, or one that climbs out of the root, is refused. Outright prohibition was unsatisfiable and shipping macOS at the same time: the macos-arm64 artifact contains five symlinks, all inside Chromium Framework.framework -- Versions/Current pointing at 152.0.7977.83, and Chromium Framework, Resources, Libraries and Helpers pointing through Versions/Current -- and that is simply how a macOS framework bundle is laid out. A bundle without them does not launch. Containment preserves the property the prohibition was protecting, which is that extracting an archive can never write outside the directory you pointed it at.",
     "require_manifest_binding": true
   }
 }

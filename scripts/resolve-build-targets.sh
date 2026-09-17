@@ -2,11 +2,11 @@
 # Resolve which targets a build workflow may schedule, and on which runner.
 #
 # This is the runner-availability gate. A job pinned to a label no runner
-# carries does not fail: it queues forever, holds the host concurrency group,
-# and the workflow looks "running" for days. The set of targets is therefore
-# configuration (the repository variable APOSTATE_BUILD_TARGETS) rather than
-# something baked into the workflow. The default includes the three targets
-# with Blacksmith hosted runners.
+# carries does not fail: it queues until GitHub gives up, holding the
+# concurrency group while the workflow looks "running". The set of targets is
+# therefore configuration (the repository variable APOSTATE_BUILD_TARGETS)
+# rather than something baked into the workflow. The default is every target
+# that has both build args and a Blacksmith runner label below.
 #
 # Reads:
 #   REQUESTED_TARGETS   comma-separated override (workflow_dispatch input)

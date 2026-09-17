@@ -248,6 +248,7 @@ integer.
 | `linux-x64` | `blacksmith-32vcpu-ubuntu-2404` | Pinned `linux/amd64` container on Linux x64 |
 | `linux-arm64` | `blacksmith-32vcpu-ubuntu-2404` | ARM64 cross-build in the same container architecture |
 | `macos-arm64` | `blacksmith-12vcpu-macos-latest` | Native macOS ARM64 with the pinned SDK |
+| `windows-x64` | `blacksmith-32vcpu-windows-2025` | Native Windows x64 against the runner's own VS Build Tools and SDK |
 
 Linux arm64 runs on x64 because the pinned `linux/amd64` container is the
 reproducibility boundary. `scripts/in-linux-build-container.sh` explicitly

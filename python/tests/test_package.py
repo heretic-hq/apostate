@@ -31,16 +31,14 @@ from apostate import (  # noqa: E402
     ConfigurationError,
     LaunchError,
     ProfileError,
-    SignatureVerificationError,
     UnpublishedArtifactError,
     launch_async,
     launch_persistent_context,
+    load_catalogue,
     resolve_profile,
     target_platform,
     translate_options,
 )
-from apostate import binary as binary_module  # noqa: E402
-from apostate.binary import canonical_manifest_bytes  # noqa: E402
 
 
 class _FakeAsyncChromium:
@@ -120,16 +118,20 @@ class PackageContractTests(unittest.TestCase):
             staged_site = root / "site"
             shutil.copytree(package_dir, staged_site / "apostate")
             script = """
-from apostate.config import translate_options
+from apostate.errors import ProfileError
 from apostate.profile_validation import validate_profile
-from apostate.resolver import DeterministicResolver
-resolution = DeterministicResolver().resolve(
-    translate_options(fingerprint='staged-seed', fingerprint_platform='macos')
-)
-validate_profile(resolution.profile)
-assert resolution.profile['platform']['navigator_platform'] == 'MacIntel'
-assert resolution.profile['gpu']['unmasked_vendor'] == 'Google Inc. (Apple)'
-print(resolution.profile_id)
+from apostate.resolver import load_catalogue, resolve_profile
+catalogue = load_catalogue()
+assert catalogue['model'] == 'anchors+dispersion', catalogue['model']
+assert catalogue['catalogue_version'] == 2, catalogue['catalogue_version']
+validate_profile({'id': 'staged', 'platform': {'name': 'macOS'}})
+try:
+    resolve_profile(fingerprint='staged-seed', fingerprint_platform='macos')
+except ProfileError as exc:
+    assert 'in-binary compositor' in str(exc), str(exc)
+else:
+    raise AssertionError('a seed and persona must not compose inside the package')
+print(catalogue['browser_build'])
 """
             environment = os.environ.copy()
             environment["PYTHONPATH"] = str(staged_site)
@@ -142,118 +144,129 @@ print(resolution.profile_id)
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue(result.stdout.strip().startswith("apple-metal-"), result.stdout)
+            self.assertEqual(result.stdout.strip(), CHROMIUM_VERSION)
 
-    def test_package_resolve_profile_selects_catalogue_family(self) -> None:
-        resolution = resolve_profile(fingerprint="package-selection", fingerprint_platform="macos")
-        self.assertTrue(resolution.profile_id.startswith("apple-metal-"))
-        self.assertEqual(resolution.profile["platform"]["navigator_platform"], "MacIntel")
-        self.assertEqual(resolution.browser_version, CHROMIUM_VERSION)
-
-    def test_acceptance_rejects_forged_digest_family_tamper_and_raw_paths(self) -> None:
-        source = PACKAGE_ROOT.parent / "resources" / "profiles"
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            shutil.copy2(source / "catalogue.json", root / "catalogue.json")
-            shutil.copy2(source / "compatibility-acceptance.json", root / "compatibility-acceptance.json")
-            shutil.copytree(source / "families", root / "families")
-
-            acceptance_path = root / "compatibility-acceptance.json"
-            acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
-            acceptance["families"][0]["source"]["normalized_source_sha256"] = "0" * 64
-            acceptance_path.write_text(json.dumps(acceptance), encoding="utf-8")
-            with self.assertRaises(ProfileError):
-                resolve_profile(profile="apple-metal-m2", fingerprint_platform="macos", catalogue=root / "catalogue.json")
-
-            acceptance["families"][0]["source"]["normalized_source_sha256"] = "3f58ac378cf5559e509023a976b47d06f513eeaae687dc5312f8299cd08ccd3d"
-            acceptance["families"][0]["known_limitations"][0] = "captures/raw/apple-metal-m2.json"
-            acceptance_path.write_text(json.dumps(acceptance), encoding="utf-8")
-            with self.assertRaises(ProfileError):
-                resolve_profile(profile="apple-metal-m2", fingerprint_platform="macos", catalogue=root / "catalogue.json")
-
-            acceptance["families"][0]["known_limitations"][0] = "WebGL limits remain host-clamped."
-            acceptance_path.write_text(json.dumps(acceptance), encoding="utf-8")
-            family_path = root / "families" / "apple-metal-m2.json"
-            family = json.loads(family_path.read_text(encoding="utf-8"))
-            family["profile"]["gpu"]["unmasked_renderer"] = "tampered"
-            family_path.write_text(json.dumps(family), encoding="utf-8")
-            with self.assertRaises(ProfileError):
-                resolve_profile(profile="apple-metal-m2", fingerprint_platform="macos", catalogue=root / "catalogue.json")
+    def test_catalogue_exposes_the_version_two_anchor_and_dispersion_shape(self) -> None:
+        catalogue = load_catalogue()
+        self.assertEqual(catalogue["catalogue_version"], CATALOGUE_VERSION)
+        self.assertEqual(catalogue["profile_schema_version"], PROFILE_SCHEMA_VERSION)
+        self.assertEqual(catalogue["browser_build"], CHROMIUM_VERSION)
+        self.assertEqual(catalogue["model"], "anchors+dispersion")
+        for anchor in catalogue["anchors"]:
+            self.assertEqual(
+                set(anchor), {"id", "platform", "backend", "members", "rotation_status"}
+            )
+            self.assertIn(anchor["platform"], {"windows", "macos", "linux"})
+            self.assertIn(anchor["rotation_status"], {"measured-safe", "single-member"})
+            self.assertTrue(anchor["members"])
+        self.assertIn(
+            "macos-metal-apple-850a91233555", {anchor["id"] for anchor in catalogue["anchors"]}
+        )
+        self.assertEqual(
+            [axis["axis"] for axis in catalogue["axes"]],
+            ["os_release", "gpu_identity", "cpu", "memory", "panel", "furniture",
+             "font_packs", "media_topology", "voices"],
+        )
+        anchor_axis = next(axis for axis in catalogue["axes"] if axis["axis"] == "gpu_identity")
+        self.assertEqual(anchor_axis["conditioned_on"], ["anchor"])
+        self.assertEqual(anchor_axis["servability"], "anchor-member")
+        self.assertEqual(sorted(catalogue["policies"]), ["locale", "theme"])
+        self.assertIn("en-us", catalogue["policies"]["locale"])
 
     @staticmethod
-    def _catalogue(family: dict[str, Any]) -> dict[str, Any]:
-        return {
+    def _catalogue(**overrides: Any) -> dict[str, Any]:
+        catalogue = {
+            "catalogue_id": "apostate",
             "catalogue_version": CATALOGUE_VERSION,
+            "version": CATALOGUE_VERSION,
             "profile_schema_version": PROFILE_SCHEMA_VERSION,
             "browser_build": CHROMIUM_VERSION,
-            "families": [family],
+            "model": "anchors+dispersion",
+            "anchors": [{
+                "id": "macos-metal-apple-test", "platform": "macos", "backend": "ANGLE/Metal",
+                "members": ["Apple M4 Max"], "member_count": 1, "rotation_status": "single-member",
+            }],
+            "axes": [
+                {"axis": axis, "selection": "single", "servability": "none", "conditioned_on": []}
+                for axis in ("os_release", "gpu_identity", "cpu", "memory", "panel",
+                             "furniture", "font_packs", "media_topology", "voices")
+            ],
+            "policies": {
+                "locale": [{"id": "en-us"}],
+                "theme": [{"id": "light"}],
+            },
         }
+        catalogue.update(overrides)
+        return catalogue
 
-    @staticmethod
-    def _family(family_id: str = "test-family", platform: str = "macos") -> dict[str, Any]:
-        profile_name = "macOS" if platform == "macos" else "Windows" if platform == "windows" else "Linux"
-        return {
-            "id": family_id,
-            "file": f"families/{family_id}.json",
-            "platform": platform,
-            "gpu_family": "test-gpu",
-            "evidence_class": "compatibility-capture",
-            "provenance": "focused package test",
-            "anchor": {"gpu_vendor_renderer": "compatibility-capture"},
-            "profile": {"id": family_id, "platform": {"name": profile_name}},
-        }
+    def test_catalogue_rejects_version_disagreement_and_the_retired_family_model(self) -> None:
+        self.assertEqual(load_catalogue(self._catalogue())["model"], "anchors+dispersion")
+        for label, catalogue in (
+            ("catalogue_version", self._catalogue(catalogue_version=1, version=1)),
+            ("profile_schema_version", self._catalogue(profile_schema_version=2)),
+            ("families", self._catalogue(families=[{"id": "apple-metal-m2"}])),
+            ("family_count", self._catalogue(family_count=14)),
+            ("compatibility_acceptance", self._catalogue(compatibility_acceptance={})),
+            ("model", self._catalogue(model="families")),
+        ):
+            with self.subTest(rejected=label), self.assertRaises(ProfileError):
+                load_catalogue(catalogue)
 
-    def test_family_file_path_is_direct_confined_json_and_not_symlinked(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            families = root / "families"
-            families.mkdir()
-            family = self._family()
-            (families / "test-family.json").write_text(json.dumps(family), encoding="utf-8")
-            catalogue_path = root / "catalogue.json"
-            for unsafe in (
-                "../test-family.json",
-                str((families / "test-family.json").resolve()),
-                "families/nested/test-family.json",
-                "families/test-family.txt",
-            ):
-                indexed = dict(family, file=unsafe)
-                catalogue_path.write_text(json.dumps(self._catalogue(indexed)), encoding="utf-8")
-                with self.subTest(path=unsafe), self.assertRaises(ProfileError):
-                    resolve_profile(profile="test-family", fingerprint_platform="macos", catalogue=catalogue_path)
+    def test_seed_persona_and_catalogue_ids_fail_closed_without_the_compositor(self) -> None:
+        with self.assertRaisesRegex(ProfileError, "in-binary compositor"):
+            resolve_profile(fingerprint=12345, fingerprint_platform="windows")
+        with self.assertRaisesRegex(ProfileError, "in-binary compositor"):
+            resolve_profile(fingerprint_platform="windows")
+        # The documented default with no arguments is a drawn seed, so the bare
+        # call is a composition request and must not fall back to the host.
+        with self.assertRaisesRegex(ProfileError, "in-binary compositor"):
+            resolve_profile()
+        with self.assertRaisesRegex(ProfileError, "retired with catalogue version 1"):
+            resolve_profile(profile="apple-metal-m2", fingerprint_platform="macos")
 
-            outside = root / "outside.json"
-            outside.write_text(json.dumps(family), encoding="utf-8")
-            direct = families / "test-family.json"
-            direct.unlink()
-            try:
-                direct.symlink_to(outside)
-            except (OSError, NotImplementedError):
-                self.skipTest("symbolic links are unavailable")
-            catalogue_path.write_text(json.dumps(self._catalogue(family)), encoding="utf-8")
-            with self.assertRaises(ProfileError):
-                resolve_profile(profile="test-family", fingerprint_platform="macos", catalogue=catalogue_path)
+    def test_host_inheritance_is_explicit_and_sends_no_profile_envelope(self) -> None:
+        launch_module = importlib.import_module("apostate.launch")
+        resolution = resolve_profile(fingerprint="host")
+        self.assertEqual(resolution.profile, {})
+        self.assertEqual(resolution.profile_id, "host-inherited")
+        self.assertEqual(resolution.catalogue_version, CATALOGUE_VERSION)
+        plan = launch_module._resolve_plan(translate_options(fingerprint="host", geoip=False))
+        self.assertFalse(
+            [item for item in launch_module._native_args(plan) if item.startswith("--apostate-profile=")]
+        )
+        localized = launch_module._resolve_plan(
+            translate_options(fingerprint="host", locale="en-GB,en", timezone="Europe/London", geoip=False)
+        )
+        self.assertEqual(
+            localized.profile,
+            {"locale": {"accept_languages": "en-GB,en", "timezone": "Europe/London"}},
+        )
+        argument = next(item for item in launch_module._native_args(localized)
+                        if item.startswith("--apostate-profile="))
+        self.assertEqual(
+            json.loads(base64.b64decode(argument.split("=", 1)[1]))["locale"]["timezone"],
+            "Europe/London",
+        )
+        with self.assertRaises(ProfileError):
+            resolve_profile(fingerprint="host", fingerprint_platform="windows")
 
-    def test_family_metadata_is_bound_and_exposed_only_in_resolution(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "families").mkdir()
-            family = self._family()
-            family_file = dict(family, gpu_family="other-gpu")
-            (root / "families" / "test-family.json").write_text(json.dumps(family_file), encoding="utf-8")
-            catalogue_path = root / "catalogue.json"
-            catalogue_path.write_text(json.dumps(self._catalogue(family)), encoding="utf-8")
-            with self.assertRaises(ProfileError):
-                resolve_profile(profile="test-family", fingerprint_platform="macos", catalogue=catalogue_path)
-
-            (root / "families" / "test-family.json").write_text(json.dumps(family), encoding="utf-8")
-            resolution = resolve_profile(profile="test-family", fingerprint_platform="macos", catalogue=catalogue_path)
-            diagnostics = resolution.to_dict()
-            self.assertEqual(diagnostics["gpu_family"], "test-gpu")
-            self.assertEqual(diagnostics["profile_schema_version"], PROFILE_SCHEMA_VERSION)
-            self.assertEqual(diagnostics["anchor"], family["anchor"])
-            self.assertNotIn("gpu_family", resolution.profile)
-            self.assertNotIn("provenance", resolution.profile)
+    def test_explicit_inline_profile_validates_and_reaches_the_native_envelope(self) -> None:
+        launch_module = importlib.import_module("apostate.launch")
+        plan = launch_module._resolve_plan(
+            translate_options(profile={"id": "explicit", "platform": {"name": "macOS"}},
+                              fingerprint_platform="macos", geoip=False)
+        )
+        argument = next(item for item in launch_module._native_args(plan)
+                        if item.startswith("--apostate-profile="))
+        self.assertEqual(
+            json.loads(base64.b64decode(argument.split("=", 1)[1])),
+            {"id": "explicit", "platform": {"name": "macOS"}},
+        )
+        self.assertEqual(plan.diagnostics["profile_id"], "explicit")
+        self.assertEqual(plan.diagnostics["platform"], "macos")
+        self.assertIn("bypasses composition", " ".join(plan.diagnostics["warnings"]))
+        with self.assertRaises(ProfileError):
+            resolve_profile(profile={"id": "explicit", "unsupported_section": {}})
 
     def test_explicit_mapping_and_file_platform_must_match_request(self) -> None:
         profile = {"id": "explicit", "platform": {"name": "Windows"}}
@@ -279,49 +292,54 @@ print(resolution.profile_id)
         self.assertEqual(plan.profile["source_capture"], "capture.json")
         self.assertEqual(plan.diagnostics["profile_id"], "explicit")
 
-    def test_unpublished_package_manifest_fails_before_signature_or_download(self) -> None:
+    def test_unpublished_package_manifest_fails_before_download(self) -> None:
         calls: list[str] = []
         manifest = {
             "package_version": "0.1.0",
             "chromium_version": CHROMIUM_VERSION,
             "catalogue_version": CATALOGUE_VERSION,
             "artifacts": {},
-            "signature": None,
             "status": "unpublished",
         }
         with tempfile.TemporaryDirectory() as temporary:
             manager = BinaryManager(cache_dir=temporary, manifest=manifest, downloader=lambda source: calls.append(source))
-            with mock.patch.object(binary_module, "verify_manifest") as verify:
-                with self.assertRaisesRegex(UnpublishedArtifactError, "unpublished"):
-                    manager.ensure(target="macos-arm64")
-            verify.assert_not_called()
+            with self.assertRaisesRegex(UnpublishedArtifactError, "unpublished"):
+                manager.ensure(target="macos-arm64")
         self.assertEqual(calls, [])
-    def test_canonical_manifest_vector_has_sorted_compact_utf8_and_one_lf(self) -> None:
-        manifest = {"z": "café", "signature": "ignored", "a": 1}
-        expected = b'{"a":1,"signature":null,"z":"caf\\u00e9"}\n'
-        self.assertEqual(canonical_manifest_bytes(manifest), expected)
-        self.assertEqual(canonical_manifest_bytes(manifest).count(b"\n"), 1)
 
-    def test_invalid_signature_is_rejected_before_download(self) -> None:
-        calls: list[str] = []
-        manifest = {
+    def test_unpublished_platform_refuses_other_platform_artifacts(self) -> None:
+        records = [{
+            "platform": target,
+            "artifact": f"apostate-{CHROMIUM_VERSION}-{target}.tar.zst",
+            "sha256": "0" * 64,
+        } for target in ("linux-x64", "linux-arm64", "macos-arm64")]
+        identity = {
             "package_version": "0.1.0",
             "chromium_version": CHROMIUM_VERSION,
             "catalogue_version": CATALOGUE_VERSION,
-            "platform": "macos-arm64",
-            "artifact": "apostate-test.zip",
-            "sha256": hashlib.sha256(b"archive").hexdigest(),
-            "signature": base64.b64encode(b"\0" * 64).decode("ascii"),
         }
+        calls: list[str] = []
         with tempfile.TemporaryDirectory() as temporary:
-            manager = BinaryManager(
-                cache_dir=temporary,
-                manifest=manifest,
-                downloader=lambda source: calls.append(source),
-            )
-            with self.assertRaises(SignatureVerificationError):
-                manager.ensure(target="macos-arm64")
+            for shape in (
+                {"artifacts": {record["platform"]: record for record in records}},
+                {"artifacts": records},
+                records[0],
+            ):
+                with self.subTest(shape=shape):
+                    manifest = {**identity, **shape}
+                    manager = BinaryManager(cache_dir=temporary, manifest=manifest,
+                                            downloader=lambda source: calls.append(source))
+                    with self.assertRaisesRegex(UnpublishedArtifactError, "windows-x64.*not published for this release"):
+                        manager.ensure(target="windows-x64")
         self.assertEqual(calls, [])
+
+    def test_packaged_release_manifest_agrees_with_the_package_catalogue_version(self) -> None:
+        # A stale catalogue_version here turns "no artifact is published yet"
+        # into "this manifest is for another package", which is a lie.
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = BinaryManager(cache_dir=temporary)
+            with self.assertRaisesRegex(UnpublishedArtifactError, "unpublished"):
+                manager.ensure(target="macos-arm64")
 
     def test_cache_paths_and_clear_cache_are_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -352,7 +370,6 @@ print(resolution.profile_id)
             "platform": "macos-arm64",
             "artifact": "apostate-test.zip",
             "sha256": hashlib.sha256(archive_bytes).hexdigest(),
-            "signature": "bypass-in-test",
         }
         with tempfile.TemporaryDirectory() as temporary:
             calls: list[str] = []
@@ -361,14 +378,13 @@ print(resolution.profile_id)
                 manifest=manifest,
                 downloader=lambda source: calls.append(source) or archive_bytes,
             )
-            with mock.patch.object(binary_module, "verify_manifest"):
-                executable = manager.ensure(target="macos-arm64")
-                executable.write_bytes(b"tampered")
-                marker = executable.parent / "verified.json"
-                marker_data = json.loads(marker.read_text(encoding="utf-8"))
-                marker_data["binary_sha256"] = hashlib.sha256(b"tampered").hexdigest()
-                marker.write_text(json.dumps(marker_data), encoding="utf-8")
-                rebuilt = manager.ensure(target="macos-arm64")
+            executable = manager.ensure(target="macos-arm64")
+            executable.write_bytes(b"tampered")
+            marker = executable.parent / "verified.json"
+            marker_data = json.loads(marker.read_text(encoding="utf-8"))
+            marker_data["binary_sha256"] = hashlib.sha256(b"tampered").hexdigest()
+            marker.write_text(json.dumps(marker_data), encoding="utf-8")
+            rebuilt = manager.ensure(target="macos-arm64")
             self.assertEqual(rebuilt.read_bytes(), b"native binary")
             self.assertEqual(calls, ["apostate-test.zip"])
 
@@ -380,11 +396,10 @@ print(resolution.profile_id)
             with mock.patch.object(launch_module, "_load_async_backend", return_value=lambda: fake):
                 result = asyncio.run(
                     launch_async(
-                        fingerprint="async-seed",
+                        profile={"id": "async-explicit", "platform": {"name": "macOS"}},
                         fingerprint_platform="macos",
                         geoip=False,
                         binary_path=executable.name,
-                        resolver=lambda config: {},
                     )
                 )
         self.assertIsNotNone(result)

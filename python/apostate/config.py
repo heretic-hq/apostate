@@ -19,8 +19,8 @@ from .errors import ConfigurationError, ProfileError
 
 PACKAGE_VERSION = "0.1.0"
 CHROMIUM_VERSION = "152.0.7977.83"
-CATALOGUE_VERSION = 1
-PROFILE_SCHEMA_VERSION = 2
+CATALOGUE_VERSION = 2
+PROFILE_SCHEMA_VERSION = 3
 SUPPORTED_PLATFORMS = frozenset({"windows", "macos", "linux"})
 
 

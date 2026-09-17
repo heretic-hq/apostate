@@ -1,21 +1,16 @@
-"""Verified Apostate binary discovery, cache, and extraction.
+"""Apostate binary discovery, cache, and extraction.
 
-Only the standard library is used.  A release manifest is authenticated with
-an Ed25519 SubjectPublicKeyInfo key before an artifact is considered.  The
-artifact's SHA-256 is checked before extraction, and cached archives are
+The artifact's SHA-256 is checked before extraction, and cached archives are
 re-hashed on every cache hit.
 """
 
 from __future__ import annotations
 
-import base64
-import copy
 import hashlib
 import importlib.resources
 import json
 import os
 import platform
-import re
 import shutil
 import stat
 import subprocess
@@ -27,19 +22,16 @@ import zipfile
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from ._ed25519 import verify as verify_ed25519
 from .config import CATALOGUE_VERSION, CHROMIUM_VERSION, PACKAGE_VERSION
 from .errors import (
     BinaryError,
     BinaryNotFoundError,
     IntegrityError,
     ManifestError,
-    SignatureVerificationError,
     UnpublishedArtifactError,
     UnsupportedArchiveError,
 )
 
-_PUBLIC_KEY_RESOURCE = "assets/public-key.txt"
 _MANIFEST_RESOURCE = "assets/release-manifest.json"
 
 
@@ -85,42 +77,6 @@ def _read_resource(name: str) -> bytes:
         raise ManifestError(f"package release asset is unavailable: {name}") from exc
 
 
-def _load_public_key(value: bytes | str | Path | None) -> bytes | str:
-    if value is None:
-        return _read_resource(_PUBLIC_KEY_RESOURCE)
-    if isinstance(value, Path):
-        try:
-            return value.read_bytes()
-        except OSError as exc:
-            raise SignatureVerificationError("configured release public key is unreadable") from exc
-    if isinstance(value, str):
-        path = Path(value).expanduser()
-        if path.is_file():
-            try:
-                return path.read_bytes()
-            except OSError as exc:
-                raise SignatureVerificationError("configured release public key is unreadable") from exc
-        return value
-    return bytes(value)
-
-
-def canonical_manifest_bytes(manifest: Mapping[str, Any]) -> bytes:
-    """Return sorted compact UTF-8 bytes signed by release tooling."""
-    value = copy.deepcopy(dict(manifest))
-    value["signature"] = None
-    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("utf-8")
-
-
-def _decode_signature(value: Any) -> bytes:
-    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9+/]{86}==", value):
-        raise SignatureVerificationError("release manifest signature must be padded RFC4648 base64")
-    try:
-        raw = base64.b64decode(value, validate=True)
-    except (ValueError, base64.binascii.Error) as exc:
-        raise SignatureVerificationError("release manifest signature is not valid base64") from exc
-    if len(raw) != 64 or base64.b64encode(raw).decode("ascii") != value:
-        raise SignatureVerificationError("release manifest signature must canonically decode to 64 bytes")
-    return raw
 
 
 def _read_manifest(value: Mapping[str, Any] | str | Path | None) -> dict[str, Any]:
@@ -143,7 +99,7 @@ def _read_manifest(value: Mapping[str, Any] | str | Path | None) -> dict[str, An
     status = parsed.get("status")
     if status is not None and status not in {"published", "unpublished"}:
         raise ManifestError("release manifest status must be published or unpublished")
-    required = ("package_version", "chromium_version", "catalogue_version", "signature")
+    required = ("package_version", "chromium_version", "catalogue_version")
     missing = [key for key in required if key not in parsed]
     if missing:
         raise ManifestError("release manifest is missing " + ", ".join(missing))
@@ -169,18 +125,13 @@ def _read_manifest(value: Mapping[str, Any] | str | Path | None) -> dict[str, An
     return dict(parsed)
 
 
-def verify_manifest(manifest: Mapping[str, Any], public_key: bytes | str | Path | None = None) -> None:
-    signature = _decode_signature(manifest.get("signature"))
-    key = _load_public_key(public_key)
-    if not verify_ed25519(signature, canonical_manifest_bytes(manifest), key):
-        raise SignatureVerificationError("release manifest Ed25519 signature verification failed")
 
 def _artifact_record(manifest: Mapping[str, Any], target: str, requested: Any = None) -> dict[str, Any]:
     if isinstance(requested, Mapping):
         record = dict(requested)
     elif all(key in manifest for key in ("platform", "artifact", "sha256")):
         if manifest.get("platform") != target:
-            raise BinaryNotFoundError(f"release manifest is for {manifest.get('platform')}, not {target}")
+            raise UnpublishedArtifactError(f"Apostate binary for {target} is not published for this release.")
         record = {key: manifest[key] for key in ("platform", "artifact", "sha256")}
         for key in ("name", "executable", "binary", "path", "url"):
             if key in manifest:
@@ -195,7 +146,7 @@ def _artifact_record(manifest: Mapping[str, Any], target: str, requested: Any = 
             matches = [item for item in records if isinstance(item, Mapping) and item.get("platform") == target]
             record = matches[0] if len(matches) == 1 else None
         if not isinstance(record, Mapping):
-            raise BinaryNotFoundError(f"release manifest has no artifact for {target}")
+            raise UnpublishedArtifactError(f"Apostate binary for {target} is not published for this release.")
         record = dict(record)
     if not isinstance(record.get("sha256"), str) or len(record["sha256"]) != 64:
         raise ManifestError(f"artifact metadata for {target} has no valid sha256")
@@ -318,7 +269,7 @@ def _materialize_binary(archive: Path, destination: Path, record: Mapping[str, A
 
 
 def _archive_binary_hash(archive: Path, record: Mapping[str, Any]) -> str:
-    """Compute the executable hash from the signed archive on every cache hit."""
+    """Compute the executable hash from the hash-verified archive on every cache hit."""
     with tempfile.TemporaryDirectory(prefix="verify-", dir=str(archive.parent)) as temporary:
         selected = _materialize_binary(archive, Path(temporary), record)
         return _hash_file(selected)
@@ -333,17 +284,13 @@ class BinaryManager:
 
     def __init__(self, *, cache_dir: str | Path | None = None,
                  manifest: Mapping[str, Any] | str | Path | None = None,
-                 public_key: bytes | str | Path | None = None,
                  downloader: Callable[[str], Any] | None = None) -> None:
         self.cache_dir = Path(cache_dir).expanduser() if cache_dir is not None else _default_cache_dir()
         self.manifest_value = manifest
-        self.public_key = public_key
         self.downloader = downloader
 
     def _manifest(self) -> dict[str, Any]:
-        manifest = _read_manifest(self.manifest_value)
-        verify_manifest(manifest, self.public_key)
-        return manifest
+        return _read_manifest(self.manifest_value)
 
     def _download(self, record: Mapping[str, Any]) -> bytes:
         source = record.get("path") or record.get("artifact") or record.get("url")
@@ -423,8 +370,7 @@ class BinaryManager:
         temporary_archive = root / (archive.name + ".part")
         try:
             temporary_archive.write_bytes(data)
-            # Manifest authentication has already succeeded; hash verification
-            # above completes authenticity/integrity checks before extraction.
+            # Hash verification above completes the integrity check before extraction.
             with tempfile.TemporaryDirectory(prefix="extract-", dir=str(root)) as temporary:
                 extracted = Path(temporary)
                 selected = _materialize_binary(temporary_archive, extracted, record)
@@ -487,17 +433,15 @@ class BinaryManager:
 
 def ensure_binary(*, target: str | None = None, cache_dir: str | Path | None = None,
                   manifest: Mapping[str, Any] | str | Path | None = None,
-                  public_key: bytes | str | Path | None = None,
                   downloader: Callable[[str], Any] | None = None,
                   artifact: Mapping[str, Any] | str | Path | None = None) -> Path:
-    return BinaryManager(cache_dir=cache_dir, manifest=manifest, public_key=public_key,
+    return BinaryManager(cache_dir=cache_dir, manifest=manifest,
                          downloader=downloader).ensure(target=target, artifact=artifact)
 
 
 def binary_info(*, target: str | None = None, cache_dir: str | Path | None = None,
-                manifest: Mapping[str, Any] | str | Path | None = None,
-                public_key: bytes | str | Path | None = None) -> dict[str, Any]:
-    return BinaryManager(cache_dir=cache_dir, manifest=manifest, public_key=public_key).info(target=target)
+                manifest: Mapping[str, Any] | str | Path | None = None) -> dict[str, Any]:
+    return BinaryManager(cache_dir=cache_dir, manifest=manifest).info(target=target)
 
 
 def clear_cache(*, cache_dir: str | Path | None = None) -> None:
@@ -505,6 +449,5 @@ def clear_cache(*, cache_dir: str | Path | None = None) -> None:
 
 
 __all__ = [
-    "BinaryManager", "binary_info", "canonical_manifest_bytes", "clear_cache",
-    "ensure_binary", "target_platform", "verify_manifest",
+    "BinaryManager", "binary_info", "clear_cache", "ensure_binary", "target_platform",
 ]

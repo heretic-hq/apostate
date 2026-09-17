@@ -48,10 +48,6 @@ class UnpublishedArtifactError(ManifestError):
     """The package manifest deliberately contains no published artifact."""
 
 
-class SignatureVerificationError(BinaryError):
-    """A release artifact has no valid Ed25519 signature."""
-
-
 class UnsupportedArchiveError(BinaryError):
     """The package cannot safely extract the artifact archive format."""
 
@@ -71,7 +67,6 @@ __all__ = [
     "ManifestError",
     "IntegrityError",
     "UnpublishedArtifactError",
-    "SignatureVerificationError",
     "UnsupportedArchiveError",
     "LaunchError",
 ]

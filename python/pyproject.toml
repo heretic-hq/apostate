@@ -21,4 +21,4 @@ where = ["."]
 include = ["apostate*"]
 
 [tool.setuptools.package-data]
-apostate = ["assets/*.json", "assets/*.txt", "assets/families/*.json"]
+apostate = ["assets/*.json"]

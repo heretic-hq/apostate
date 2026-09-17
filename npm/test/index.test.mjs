@@ -1,63 +1,39 @@
 import assert from "node:assert/strict";
-import { createHash, createPrivateKey, createPublicKey, sign } from "node:crypto";
-import { copyFile, chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { createServer, request as httpRequest } from "node:http";
+import { chmod, readFile, writeFile } from "node:fs/promises";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-
 import {
   BinaryExtractionError,
-  BinarySignatureError,
+  CATALOGUE_VERSION,
   CHROMIUM_VERSION,
   ProfileResolutionError,
   UnpublishedArtifactError,
-  canonicalManifestBytes,
   ensureBinary,
   launch,
+  loadCatalogue,
   resolveProfile,
   toCanonicalLaunchConfig,
-  verifyArtifact,
 } from "../dist/index.js";
 
 const target = "linux-x64";
 const artifactNameFor = (platform) => `apostate-${CHROMIUM_VERSION}-${platform}.${platform === "windows-x64" ? "zip" : "tar.zst"}`;
-const artifactName = artifactNameFor(target);
-const privateKey = createPrivateKey({
-  key: Buffer.concat([
-    Buffer.from("302e020100300506032b657004220420", "hex"),
-    Buffer.from("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", "hex"),
-  ]),
-  format: "der",
-  type: "pkcs8",
-});
-const publicKey = createPublicKey(privateKey).export({ format: "pem", type: "spki" });
-
-function signedManifest(archive, platform = target) {
+function releaseManifest(archive, platform = target) {
   const artifact = artifactNameFor(platform);
-  const manifest = {
+  return {
     package_version: "0.1.0",
     chromium_version: CHROMIUM_VERSION,
-    catalogue_version: 1,
+    catalogue_version: CATALOGUE_VERSION,
     platform,
     artifact,
     sha256: createHash("sha256").update(archive).digest("hex"),
     url: `https://example.invalid/${artifact}`,
-    signature: null,
   };
-  const signature = sign(null, canonicalManifestBytes(manifest), privateKey).toString("base64");
-  return { ...manifest, signature };
 }
 
-function artifactFor(manifest, platform = target) {
-  return {
-    target: platform,
-    platform,
-    artifact: manifest.artifact,
-    sha256: manifest.sha256,
-    signature: manifest.signature,
-  };
-}
 function crc32(value) {
   let crc = 0xffffffff;
   for (const byte of value) {
@@ -134,58 +110,16 @@ function tarArchive(entries) {
 }
 
 
-function fixtureFamily(id = "fixture-family", profilePlatform = "macOS") {
-  return {
-    id,
-    platform: "macos",
-    gpu_family: "apple-metal",
-    evidence_class: "compatibility-capture",
-    provenance: "fixture provenance",
-    anchor: { renderer: "compatibility-capture", source: "catalogue-value" },
-    profile: {
-      id,
-      source_capture: "fixture-capture",
-      platform: { name: profilePlatform },
-    },
-  };
+const shippedCataloguePath = new URL("../assets/catalogue.json", import.meta.url);
+
+async function catalogueFixture(root, mutate) {
+  const catalogue = JSON.parse(await readFile(shippedCataloguePath, "utf8"));
+  mutate(catalogue);
+  const cataloguePath = join(root, "catalogue.json");
+  await writeFile(cataloguePath, JSON.stringify(catalogue));
+  return cataloguePath;
 }
 
-function fixtureCatalogue(index, extra = {}) {
-  return {
-    catalogue_version: 1,
-    profile_schema_version: 2,
-    browser_build: CHROMIUM_VERSION,
-    families: [index],
-    ...extra,
-  };
-}
-
-async function writeCatalogueFixture(root, index, envelope, { writeFamily = true, catalogue = {} } = {}) {
-  await mkdir(join(root, "families"), { recursive: true });
-  await writeFile(join(root, "catalogue.json"), JSON.stringify(fixtureCatalogue(index, catalogue)));
-  if (writeFamily) await writeFile(join(root, "families", `${index.id}.json`), JSON.stringify(envelope));
-  return join(root, "catalogue.json");
-}
-async function stageAuthoritativeCatalogue(root) {
-  const assetRoot = join(new URL("../assets/", import.meta.url).pathname);
-  const catalogue = JSON.parse(await readFile(join(assetRoot, "catalogue.json"), "utf8"));
-  await mkdir(join(root, "families"), { recursive: true });
-  await writeFile(join(root, "catalogue.json"), JSON.stringify(catalogue));
-  await copyFile(join(assetRoot, "compatibility-acceptance.json"), join(root, "compatibility-acceptance.json"));
-  await copyFile(join(assetRoot, "compatibility-acceptance.schema.json"), join(root, "compatibility-acceptance.schema.json"));
-  for (const family of catalogue.families) {
-    await copyFile(join(assetRoot, family.file), join(root, family.file));
-  }
-  return { cataloguePath: join(root, "catalogue.json"), acceptancePath: join(root, "compatibility-acceptance.json") };
-}
-
-
-test("imports built ESM entrypoint and emits policy canonical bytes", async () => {
-  const bytes = Buffer.from(canonicalManifestBytes({ z: "e\u00e9", a: 1 }));
-  assert.equal(bytes.toString("utf8"), '{"a":1,"z":"e\\u00e9"}\n');
-  const declaration = await readFile(new URL("../dist/index.d.ts", import.meta.url), "utf8");
-  assert.match(declaration, /launchPersistentContext/);
-});
 
 test("translates canonical launch fields and accepts stable string seeds", () => {
   const config = toCanonicalLaunchConfig({
@@ -204,131 +138,96 @@ test("translates canonical launch fields and accepts stable string seeds", () =>
   assert.match(config.proxy, /^http:\/\/user:secret@proxy\.example:8080\/$/);
   assert.throws(() => toCanonicalLaunchConfig({ fingerprint: "bad seed" }), /fingerprint/);
 });
-test("default resolution exposes acceptance diagnostics without polluting native profile", () => {
-  const resolved = resolveProfile({ fingerprintPlatform: "macos", fingerprint: "acceptance-default" });
-  assert.equal(resolved.family.acceptance_track, "V3-C/V4-C");
-  assert.equal(resolved.family.acceptance_status, "offered");
-  assert.equal(resolved.family.validation_status, "unvalidated");
-  assert.equal(resolved.family.acceptance_record_id, resolved.profileId);
-  assert.equal(resolved.family.compatibility_acceptance.status, "offered");
-  assert.equal(resolved.family.compatibility_acceptance.record_id, resolved.profileId);
-  assert.equal(Object.hasOwn(resolved.profile, "compatibility_acceptance"), false);
-  assert.equal(Object.hasOwn(resolved.profile, "acceptance_track"), false);
-  assert.equal(Object.hasOwn(resolved.profile, "validation_status"), false);
+test("rejects humanize until native behavior exists", () => {
+  assert.throws(
+    () => toCanonicalLaunchConfig({ humanize: true }),
+    /humanize is not implemented/,
+  );
 });
-
-test("rejects malformed nested acceptance source and surface records", async () => {
-  for (const mutation of [
-    (acceptance) => { acceptance.families[0].source.collector_sha256 = "invalid"; },
-    (acceptance) => { acceptance.families[0].surfaces.webgl.identity.coverage = "invalid"; },
-  ]) {
-    const root = await mkdtemp(join(tmpdir(), "apostate-node-acceptance-tamper-"));
-    try {
-      const staged = await stageAuthoritativeCatalogue(root);
-      const acceptance = JSON.parse(await readFile(staged.acceptancePath, "utf8"));
-      mutation(acceptance);
-      await writeFile(staged.acceptancePath, JSON.stringify(acceptance));
-      assert.throws(
-        () => resolveProfile({ cataloguePath: staged.cataloguePath, fingerprintPlatform: "macos", fingerprint: "tampered" }),
-        ProfileResolutionError,
-      );
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+test("loads the version 2 catalogue and reports its anchors, axes and policy ids", () => {
+  const catalogue = loadCatalogue();
+  assert.deepEqual(Object.keys(catalogue).sort(), [
+    "anchors",
+    "axes",
+    "browser_build",
+    "catalogue_version",
+    "model",
+    "policies",
+    "profile_schema_version",
+  ]);
+  assert.equal(catalogue.catalogue_version, 2);
+  assert.equal(catalogue.profile_schema_version, 3);
+  assert.equal(catalogue.browser_build, CHROMIUM_VERSION);
+  assert.equal(catalogue.model, "anchors+dispersion");
+  assert.ok(catalogue.anchors.length > 0);
+  for (const anchor of catalogue.anchors) {
+    assert.deepEqual(Object.keys(anchor).sort(), ["backend", "id", "members", "platform", "rotation_status"]);
+    assert.ok(["linux", "macos", "windows"].includes(anchor.platform));
+    assert.ok(anchor.members.length > 0);
+    assert.ok(anchor.members.every((member) => typeof member === "string" && member.length > 0));
   }
+  assert.ok(catalogue.axes.length > 0);
+  for (const axis of catalogue.axes) {
+    assert.deepEqual(Object.keys(axis).sort(), ["axis", "conditioned_on", "option_sets", "options", "selection", "servability"]);
+  }
+  assert.equal(new Set(catalogue.axes.map((axis) => axis.axis)).size, catalogue.axes.length);
+  assert.ok(catalogue.policies.locale.length > 0);
+  assert.ok(catalogue.policies.theme.length > 0);
 });
 
-test("resolves a shipped family envelope deterministically", () => {
-  const first = resolveProfile({ fingerprintPlatform: "macos", fingerprint: "seed:stable-01" });
-  const second = resolveProfile({ fingerprintPlatform: "macos", fingerprint: "seed:stable-01" });
-  assert.match(first.profileId, /^apple-metal-/);
-  assert.equal(first.profileId, second.profileId);
-  assert.equal(first.identity, second.identity);
-  assert.equal(first.profile.platform.name, "macOS");
-});
-
-test("confines catalogue family files to direct non-symlink JSON assets", async () => {
-  const root = await mkdtemp(join(tmpdir(), "apostate-node-catalogue-paths-"));
-  const id = "fixture-family";
-  const envelope = fixtureFamily(id);
-  const familyIndex = { id, file: `families/${id}.json`, platform: "macos", gpu_family: "apple-metal", evidence_class: "compatibility-capture" };
+test("rejects a catalogue that disagrees with the package or still carries the retired model", async () => {
+  const root = await mkdtemp(join(tmpdir(), "apostate-node-catalogue-v2-"));
   try {
-    for (const file of [
-      join(root, "families", `${id}.json`),
-      `../families/${id}.json`,
-      `families/../families/${id}.json`,
-      `families/nested/${id}.json`,
-      `families/${id}.txt`,
+    assert.equal(loadCatalogue(await catalogueFixture(root, () => {})).model, "anchors+dispersion");
+    for (const mutate of [
+      (catalogue) => { catalogue.catalogue_version = 1; },
+      (catalogue) => { catalogue.profile_schema_version = 2; },
+      (catalogue) => { catalogue.browser_build = "1.2.3.4"; },
+      (catalogue) => { catalogue.model = "fixed-catalogue"; },
+      (catalogue) => { delete catalogue.catalogue_id; },
+      (catalogue) => { delete catalogue.anchors; },
+      (catalogue) => { delete catalogue.axes; },
+      (catalogue) => { catalogue.anchors[0].members = []; },
+      (catalogue) => { catalogue.anchors[0].rotation_status = ""; },
+      (catalogue) => { catalogue.axes[0].conditioned_on = "platform"; },
+      (catalogue) => { catalogue.axes[0].options = 0; },
+      (catalogue) => { catalogue.policies.gpu = [{ id: "unexpected" }]; },
+      (catalogue) => { catalogue.families = [{ id: "retired" }]; },
+      (catalogue) => { catalogue.family_count = 14; },
     ]) {
-      const cataloguePath = await writeCatalogueFixture(root, { ...familyIndex, file }, envelope);
-      assert.throws(
-        () => resolveProfile({ cataloguePath, fingerprintPlatform: "macos", fingerprint: "fixture" }),
-        ProfileResolutionError,
-      );
+      const cataloguePath = await catalogueFixture(root, mutate);
+      assert.throws(() => loadCatalogue(cataloguePath), ProfileResolutionError);
     }
-
-    await rm(join(root, "families", `${id}.json`), { force: true });
-    const missingCatalogue = await writeCatalogueFixture(root, familyIndex, envelope, { writeFamily: false });
-    assert.throws(
-      () => resolveProfile({ cataloguePath: missingCatalogue, fingerprintPlatform: "macos", fingerprint: "fixture" }),
-      ProfileResolutionError,
-    );
-
-    const outside = join(root, "outside.json");
-    await writeFile(outside, JSON.stringify(envelope));
-    await symlink(outside, join(root, "families", `${id}.json`));
-    const symlinkCatalogue = await writeCatalogueFixture(root, familyIndex, envelope, { writeFamily: false });
-    assert.throws(
-      () => resolveProfile({ cataloguePath: symlinkCatalogue, fingerprintPlatform: "macos", fingerprint: "fixture" }),
-      ProfileResolutionError,
-    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("binds family metadata and catalogue/profile schema versions", async () => {
-  const root = await mkdtemp(join(tmpdir(), "apostate-node-catalogue-binding-"));
-  const id = "fixture-family";
-  const baseEnvelope = fixtureFamily(id);
-  const baseIndex = { id, file: `families/${id}.json`, platform: "macos", gpu_family: "apple-metal", evidence_class: "compatibility-capture" };
-  try {
-    const cataloguePath = await writeCatalogueFixture(root, baseIndex, baseEnvelope);
-    const resolved = resolveProfile({ cataloguePath, fingerprintPlatform: "macos", fingerprint: "fixture" });
-    assert.equal(resolved.family.gpu_family, "apple-metal");
-    assert.equal(resolved.family.evidence_class, "compatibility-capture");
-    assert.equal(resolved.family.provenance, "fixture provenance");
-    assert.deepEqual(resolved.family.anchor, baseEnvelope.anchor);
-    assert.equal(resolved.profile.gpu_family, undefined);
-
-    const mismatches = [
-      [{ ...baseIndex, gpu_family: "intel-d3d11" }, baseEnvelope],
-      [baseIndex, { ...baseEnvelope, evidence_class: "catalogue-value" }],
-      [{ ...baseIndex, evidence_class: "bogus" }, baseEnvelope],
-      [baseIndex, { ...baseEnvelope, evidence_class: "bogus" }],
-      [baseIndex, { ...baseEnvelope, anchor: { renderer: "bogus" } }],
-      [baseIndex, { ...baseEnvelope, provenance: "" }],
-      [baseIndex, { ...baseEnvelope, anchor: {} }],
-      [baseIndex, { ...baseEnvelope, id: "different-family" }],
-      [baseIndex, { ...baseEnvelope, profile: { ...baseEnvelope.profile, id: "different-family" } }],
-      [baseIndex, { ...baseEnvelope, profile: { ...baseEnvelope.profile, platform: { name: "Windows" } } }],
-    ];
-    for (const [index, envelope] of mismatches) {
-      const mismatchCatalogue = await writeCatalogueFixture(root, index, envelope);
-      assert.throws(
-        () => resolveProfile({ cataloguePath: mismatchCatalogue, fingerprintPlatform: "macos", fingerprint: "fixture" }),
-        ProfileResolutionError,
-      );
-    }
-
-    const wrongSchemaCatalogue = await writeCatalogueFixture(root, baseIndex, baseEnvelope, { catalogue: { profile_schema_version: 99 } });
-    assert.throws(
-      () => resolveProfile({ cataloguePath: wrongSchemaCatalogue, fingerprintPlatform: "macos", fingerprint: "fixture" }),
-      ProfileResolutionError,
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
+test("fails closed instead of composing a profile or resolving a catalogue id", () => {
+  for (const options of [
+    {},
+    { fingerprint: 12345 },
+    { fingerprintPlatform: "windows" },
+    { fingerprint: "seed:stable-01", fingerprintPlatform: "macos" },
+    { fingerprint: "host", fingerprintPlatform: "windows" },
+  ]) {
+    assert.throws(() => resolveProfile(options), (error) => {
+      assert.ok(error instanceof ProfileResolutionError);
+      assert.equal(error.code, "APOSTATE_COMPOSITION_UNAVAILABLE");
+      return true;
+    });
   }
+  assert.throws(() => resolveProfile({ fingerprint: 12345 }), /in-binary compositor is not yet wired to this package/);
+  assert.throws(() => resolveProfile({ profileId: "retired-id" }), (error) => {
+    assert.ok(error instanceof ProfileResolutionError);
+    assert.equal(error.code, "APOSTATE_CATALOGUE_PROFILE_IDS_RETIRED");
+    assert.match(error.message, /composes a profile from anchors and dispersion/);
+    return true;
+  });
+  const host = resolveProfile({ fingerprint: "host" });
+  assert.equal(host.profile, null);
+  assert.equal(host.source, "host-inherited");
+  assert.equal(host.profileId, null);
 });
 
 test("rejects explicit profile and profile-file platform mismatches", async () => {
@@ -352,43 +251,119 @@ test("rejects explicit profile and profile-file platform mismatches", async () =
   }
 });
 
-test("strips source_capture only from the native Node launch payload", async () => {
+test("strips source_capture and applies timezone and WebRTC proxy policy", async () => {
   const root = await mkdtemp(join(tmpdir(), "apostate-node-source-capture-"));
   const argvPath = join(root, "argv.json");
   const executable = join(root, "capture-argv.mjs");
   const profile = { id: "explicit", source_capture: "capture-2026-09-13", platform: { name: "macOS" } };
   try {
-    await writeFile(executable, "#!/usr/bin/env node\nimport { writeFileSync } from \"node:fs\";\nwriteFileSync(process.env.APOSTATE_ARGV_PATH, JSON.stringify(process.argv.slice(2)));\nsetTimeout(() => {}, 10000);\n");
+    await writeFile(executable, "#!/usr/bin/env node\nimport { writeFileSync } from \"node:fs\";\nwriteFileSync(process.env.APOSTATE_ARGV_PATH, JSON.stringify({ argv: process.argv.slice(2), timezone: process.env.TZ }));\nsetTimeout(() => {}, 10000);\n");
     await chmod(executable, 0o755);
     const browser = await launch({
       executablePath: executable,
       profile,
       fingerprintPlatform: "macos",
+      timezone: "Asia/Karachi",
+      proxy: "http://proxy.example:8080",
+      args: ["--fingerprint-webrtc-ip=198.51.100.7"],
       geoip: false,
       headless: false,
       env: { APOSTATE_ARGV_PATH: argvPath },
     });
     try {
-      let argv;
+      let launchData;
       for (let attempt = 0; attempt < 40; attempt += 1) {
         try {
-          argv = JSON.parse(await readFile(argvPath, "utf8"));
+          launchData = JSON.parse(await readFile(argvPath, "utf8"));
           break;
         } catch (error) {
           if (attempt === 39) throw error;
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
       }
+      const argv = launchData.argv;
       const encoded = argv.find((value) => value.startsWith("--apostate-profile="));
       assert.ok(encoded);
       const payload = JSON.parse(Buffer.from(encoded.slice("--apostate-profile=".length), "base64").toString("utf8"));
+      assert.equal(payload.device_profile, undefined);
       assert.equal(payload.id, "explicit");
       assert.equal(payload.source_capture, undefined);
+      assert.equal(payload.locale.timezone, "Asia/Karachi");
+      assert.equal(launchData.timezone, "Asia/Karachi");
+      assert.equal(argv.includes("--fingerprint-webrtc-ip=198.51.100.7"), true);
+      assert.equal(argv.includes("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"), true);
       assert.equal(browser.launchConfig.profile.source_capture, profile.source_capture);
     } finally {
       await browser.close();
     }
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("geoip resolves through an authenticated HTTP proxy without leaking credentials to argv", async () => {
+  const root = await mkdtemp(join(tmpdir(), "apostate-node-geoip-proxy-"));
+  const argvPath = join(root, "argv.json");
+  const executable = join(root, "capture-argv.mjs");
+  const targetServer = createServer((request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ip: "202.63.209.57", languages: "en-US,en", timezone: "UTC" }));
+  });
+  let sawProxyAuth = false;
+  const proxyServer = createServer((request, response) => {
+    sawProxyAuth = request.headers["proxy-authorization"] === `Basic ${Buffer.from("fixture-user:fixture-password").toString("base64")}`;
+    const upstream = httpRequest(request.url, { headers: { accept: request.headers.accept ?? "" } }, (upstreamResponse) => {
+      response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
+      upstreamResponse.pipe(response);
+    });
+    upstream.on("error", () => response.writeHead(502).end());
+    upstream.end();
+  });
+  try {
+    await new Promise((resolve) => targetServer.listen(0, "127.0.0.1", resolve));
+    await new Promise((resolve) => proxyServer.listen(0, "127.0.0.1", resolve));
+    await writeFile(executable, "#!/usr/bin/env node\nimport { writeFileSync } from \"node:fs\";\nwriteFileSync(process.env.APOSTATE_ARGV_PATH, JSON.stringify(process.argv.slice(2)));\nsetTimeout(() => {}, 10000);\n");
+    await chmod(executable, 0o755);
+    const targetUrl = `http://127.0.0.1:${targetServer.address().port}/geoip`;
+    const proxyUrl = `http://127.0.0.1:${proxyServer.address().port}`;
+    const browser = await launch({
+      executablePath: executable,
+      profile: { id: "geoip-fixture", platform: { name: "macOS" } },
+      fingerprintPlatform: "macos",
+      proxy: { server: proxyUrl, username: "fixture-user", password: "fixture-password" },
+      geoipUrl: targetUrl,
+      geoip: true,
+      env: { APOSTATE_ARGV_PATH: argvPath },
+    });
+    let argv;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      try {
+        argv = JSON.parse(await readFile(argvPath, "utf8"));
+        break;
+      } catch (error) {
+        if (attempt === 39) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+    try {
+      assert.equal(browser.launchConfig.locale, "en-US");
+      assert.equal(browser.launchConfig.timezone, "UTC");
+      assert.equal(argv.includes("--fingerprint-webrtc-ip=202.63.209.57"), true);
+      assert.equal(sawProxyAuth, true);
+      assert.equal(argv.some((value) => value.includes("fixture-user") || value.includes("fixture-password")), false);
+      assert.equal(argv.includes(`--proxy-server=${proxyUrl}`), true);
+      const encoded = argv.find((value) => value.startsWith("--apostate-profile="));
+      assert.ok(encoded);
+      const payload = JSON.parse(Buffer.from(encoded.slice("--apostate-profile=".length), "base64").toString("utf8"));
+      assert.equal(payload.device_profile.id, "geoip-fixture");
+      assert.deepEqual(payload.proxy_credentials, { username: "fixture-user", password: "fixture-password" });
+      assert.equal(payload.id, undefined);
+    } finally {
+      await browser.close();
+    }
+  } finally {
+    await new Promise((resolve) => proxyServer.close(resolve));
+    await new Promise((resolve) => targetServer.close(resolve));
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -405,9 +380,8 @@ test("rejects unpublished manifests before downloading or extracting", async () 
         manifest: {
           package_version: "0.1.0",
           chromium_version: CHROMIUM_VERSION,
-          catalogue_version: 1,
+          catalogue_version: CATALOGUE_VERSION,
           artifacts: {},
-          signature: null,
           status: "unpublished",
         },
         download: async () => {
@@ -428,28 +402,47 @@ test("rejects unpublished manifests before downloading or extracting", async () 
   }
 });
 
-test("rejects an invalid Ed25519 signature before extraction", async () => {
-  const archive = Buffer.from("archive bytes");
-  const manifest = signedManifest(archive);
-  const artifact = artifactFor(manifest);
-  await assert.rejects(
-    verifyArtifact(archive, { ...manifest, signature: "A".repeat(88) }, { ...artifact, signature: "A".repeat(88) }, { publicKey }),
-    (error) => error instanceof BinarySignatureError,
-  );
+test("rejects an unpublished platform without downloading another platform's artifact", async () => {
+  const cacheDir = await mkdtemp(join(tmpdir(), "apostate-node-subset-"));
+  const records = ["linux-x64", "linux-arm64", "macos-arm64"].map((platform) => ({
+    platform,
+    artifact: artifactNameFor(platform),
+    sha256: "0".repeat(64),
+  }));
+  let downloads = 0;
+  try {
+    for (const manifest of [
+      { package_version: "0.1.0", chromium_version: CHROMIUM_VERSION, catalogue_version: CATALOGUE_VERSION, artifacts: Object.fromEntries(records.map((record) => [record.platform, record])) },
+      { package_version: "0.1.0", chromium_version: CHROMIUM_VERSION, catalogue_version: CATALOGUE_VERSION, artifacts: records },
+      { package_version: "0.1.0", chromium_version: CHROMIUM_VERSION, catalogue_version: CATALOGUE_VERSION, ...records[0] },
+    ]) {
+      await assert.rejects(
+        ensureBinary({
+          target: "windows-x64",
+          cacheDir,
+          manifest,
+          download: async () => { downloads += 1; throw new Error("unexpected download"); },
+        }),
+        (error) => error instanceof UnpublishedArtifactError && /windows-x64.*not published for this release/.test(error.message),
+      );
+    }
+    assert.equal(downloads, 0);
+  } finally {
+    await rm(cacheDir, { recursive: true, force: true });
+  }
 });
 
 test("accepts scalar release manifest and rejects tampered cache state", async () => {
   const cacheDir = await mkdtemp(join(tmpdir(), "apostate-node-cache-"));
   try {
     const archive = Buffer.from("archive bytes");
-    const manifest = signedManifest(archive);
+    const manifest = releaseManifest(archive);
     let downloads = 0;
     let extracts = 0;
     const options = {
       target,
       cacheDir,
       manifest,
-      publicKey,
       download: async () => {
         downloads += 1;
         return archive;
@@ -473,13 +466,6 @@ test("accepts scalar release manifest and rejects tampered cache state", async (
     await writeFile(binary, "tampered binary");
     await ensureBinary(options);
     assert.equal(downloads, 2, "tampered executable must invalidate cache");
-
-    const metadata = join(cacheDir, CHROMIUM_VERSION, target, "binary-info.json");
-    const metadataValue = JSON.parse(await readFile(metadata, "utf8"));
-    metadataValue.signature = "A".repeat(88);
-    await writeFile(metadata, JSON.stringify(metadataValue));
-    await ensureBinary(options);
-    assert.equal(downloads, 3, "tampered cache metadata must invalidate cache");
   } finally {
     await rm(cacheDir, { recursive: true, force: true });
   }
@@ -491,9 +477,9 @@ test("default ZIP extraction rejects traversal and symlink members before writin
       storedZip([{ name: "../outside", data: "escape" }, { name: "apostate", data: "binary" }]),
       storedZip([{ name: "link", data: "apostate", mode: 0o120777 }, { name: "apostate", data: "binary" }]),
     ]) {
-      const manifest = signedManifest(malicious, "windows-x64");
+      const manifest = releaseManifest(malicious, "windows-x64");
       await assert.rejects(
-        ensureBinary({ target: "windows-x64", cacheDir, manifest, publicKey, download: async () => malicious }),
+        ensureBinary({ target: "windows-x64", cacheDir, manifest, download: async () => malicious }),
         (error) => error instanceof BinaryExtractionError,
       );
     }
@@ -510,9 +496,9 @@ test("default tar extraction rejects link members before writing", async () => {
       { name: "apostate", data: "binary" },
       { name: "link", type: "2", linkname: "../outside" },
     ]);
-    const manifest = signedManifest(malicious, target);
+    const manifest = releaseManifest(malicious, target);
     await assert.rejects(
-      ensureBinary({ target, cacheDir, manifest, publicKey, download: async () => malicious }),
+      ensureBinary({ target, cacheDir, manifest, download: async () => malicious }),
       (error) => error instanceof BinaryExtractionError,
     );
     assert.equal(await readFile(join(cacheDir, "outside"), "utf8").catch(() => null), null);
@@ -525,13 +511,12 @@ test("rejects traversal paths returned by an extractor", async () => {
   const cacheDir = await mkdtemp(join(tmpdir(), "apostate-node-traversal-"));
   try {
     const archive = Buffer.from("archive bytes");
-    const manifest = signedManifest(archive);
+    const manifest = releaseManifest(archive);
     await assert.rejects(
       ensureBinary({
         target,
         cacheDir,
         manifest,
-        publicKey,
         download: async () => archive,
         extract: async () => "../outside",
       }),
@@ -546,7 +531,7 @@ test("launch reports an unpublished package before fabricating a browser", async
   const cacheDir = await mkdtemp(join(tmpdir(), "apostate-node-launch-"));
   try {
     await assert.rejects(
-      launch({ target, cacheDir, geoip: false }),
+      launch({ target, cacheDir, geoip: false, fingerprint: "host" }),
       (error) => error instanceof UnpublishedArtifactError,
     );
   } finally {

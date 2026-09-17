@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/apostate/apostate/config/profile.schema.json",
   "title": "Apostate device profile",
-  "description": "The native device profile accepted by base/apostate/profile.cc. Resolved profiles may be compatibility captures, catalogue values, native-derived values, or explicit user input; provenance, catalogue version, browser build, and profile schema version remain resolver metadata outside this payload. Every field is optional: an absent field leaves that surface inherited from the host, whereas an invented default is incoherent. source_capture is a resolver provenance reference and is not consumed by the native loader.",
+  "description": "The native device profile accepted by base/apostate/profile.cc. A profile is composed in the browser process from the anchors in corpus/anchors/ and the dispersion tables in resources/profiles/dispersion/; provenance, catalogue version, browser build and profile schema version remain resolver metadata outside this payload. Every field is optional: an absent field leaves that surface inherited from the host, whereas an invented default is incoherent. Each field's description names the evidence class its values carry. source_capture is a resolver provenance reference and is not consumed by the native loader.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -62,6 +62,28 @@
         "navigator_platform": {
           "type": "string",
           "description": "navigator.platform, e.g. MacIntel. Must agree with name: the two come from different emitters and a profile setting one alone produces a browser that contradicts itself."
+        },
+        "wow64": {
+          "type": "boolean",
+          "description": "Sec-CH-UA-WoW64. blink::UserAgentMetadata::wow64, populated from IsWoW64() in components/embedder_support/user_agent_utils.cc, so it is true only for a 32-bit browser on 64-bit Windows. A profile claiming true on any other platform contradicts its own platform name. Measured false on all four reference hosts. Evidence class: physical-ground-truth when captured, catalogue-value otherwise."
+        },
+        "form_factors": {
+          "type": "array",
+          "description": "Sec-CH-UA-Form-Factors. blink::UserAgentMetadata::form_factors; the accepted names are the spec list in third_party/blink/public/common/user_agent/user_agent_metadata.h and are validated by UserAgentMetadata::IsValidFormFactor. A desktop build emits [\"Desktop\"] and cannot serve \"Mobile\", so an unservable claim is reduced rather than emitted. Measured [\"Desktop\"] on all four reference hosts. Evidence class: physical-ground-truth when captured, catalogue-value otherwise.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "Desktop",
+              "Automotive",
+              "Mobile",
+              "Tablet",
+              "XR",
+              "EInk",
+              "Watch"
+            ]
+          },
+          "uniqueItems": true,
+          "minItems": 1
         }
       }
     },
@@ -72,6 +94,64 @@
         "user_agent": {
           "type": "string",
           "description": "The complete UA string. Not assembled from parts, because the OS token, AppleWebKit version and Safari token vary together. Its browser version must match the binary \u2014 Apostate does not spoof its own version."
+        },
+        "brands": {
+          "type": "array",
+          "description": "Assert-only Sec-CH-UA brand list in major-version form. The brand list is a build invariant, not a profile value: user_agent_utils.cc adds the product brand only under #if !BUILDFLAG(CHROMIUM_BRANDING), so a Chromium build emits two brands where Chrome emits three (docs/FINGERPRINTS.md section 8). The loader compares this list against what the build emits and fails closed on a mismatch; it never rewrites the emitted list, so no new observable is introduced. Evidence class: native-derived.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "brand",
+              "version"
+            ],
+            "properties": {
+              "brand": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            }
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "full_version_list": {
+          "type": "array",
+          "description": "Assert-only Sec-CH-UA-Full-Version-List. Same build-invariant semantics as brands. The versions are the binary's own, which Apostate does not spoof. Evidence class: native-derived.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "brand",
+              "version"
+            ],
+            "properties": {
+              "brand": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            }
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "full_version": {
+          "type": "string",
+          "description": "Assert-only Sec-CH-UA-Full-Version and navigator.userAgentData.uaFullVersion. blink::UserAgentMetadata::full_version comes from version_info::GetVersionNumber(), so it must equal the binary's version. Evidence class: native-derived.",
+          "minLength": 1,
+          "maxLength": 64
         }
       }
     },
@@ -261,6 +341,30 @@
         "hdr": {
           "type": "boolean",
           "description": "Whether the display has HDR headroom. Not independent of color_gamut: an HDR color space implies a wide gamut, so hdr true with color_gamut srgb describes a display that cannot exist and is derived as p3."
+        },
+        "avail_inset_left": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000,
+          "description": "Work-area inset the OS furniture contributes on the left edge, in CSS pixels. Insets are carried instead of absolute avail_* coordinates because availLeft and availTop are panel-relative: the Windows reference capture ran on a second monitor at x=1920 and reported availLeft 1920 with a zero inset. The loader derives avail_left = left + avail_inset_left and avail_width = width - avail_inset_left - avail_inset_right. Evidence class: physical-ground-truth when measured, catalogue-value for an authored furniture model."
+        },
+        "avail_inset_top": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000,
+          "description": "Work-area inset the OS furniture contributes on the top edge, in CSS pixels. Insets are carried instead of absolute avail_* coordinates because availLeft and availTop are panel-relative: the Windows reference capture ran on a second monitor at x=1920 and reported availLeft 1920 with a zero inset. The loader derives avail_top = top + avail_inset_top and avail_height = height - avail_inset_top - avail_inset_bottom. Evidence class: physical-ground-truth when measured, catalogue-value for an authored furniture model."
+        },
+        "avail_inset_right": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000,
+          "description": "Work-area inset the OS furniture contributes on the right edge, in CSS pixels. Insets are carried instead of absolute avail_* coordinates because availLeft and availTop are panel-relative: the Windows reference capture ran on a second monitor at x=1920 and reported availLeft 1920 with a zero inset. The loader derives avail_width from the two horizontal insets. Evidence class: physical-ground-truth when measured, catalogue-value for an authored furniture model."
+        },
+        "avail_inset_bottom": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000,
+          "description": "Work-area inset the OS furniture contributes on the bottom edge, in CSS pixels. Insets are carried instead of absolute avail_* coordinates because availLeft and availTop are panel-relative: the Windows reference capture ran on a second monitor at x=1920 and reported availLeft 1920 with a zero inset. The loader derives avail_height from the two vertical insets. Evidence class: physical-ground-truth when measured, catalogue-value for an authored furniture model."
         }
       }
     },
@@ -500,6 +604,46 @@
           "minimum": 0,
           "maximum": 16,
           "description": "Cameras the claimed machine has. Same semantics as audioinput_count."
+        },
+        "audiooutput_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16,
+          "description": "Audio outputs the claimed machine has. Same semantics as audioinput_count. Measured 1 on the macOS, Windows and stock Linux reference hosts. Evidence class: physical-ground-truth when captured, catalogue-value otherwise."
+        },
+        "devices": {
+          "type": "array",
+          "description": "The claimed enumerateDevices() topology. deviceId and groupId are already per-origin HMACs in Chromium, so the fingerprint content is the count, the kind mix, the group pairing and the labels once a permission is granted. group is a stable pairing key rather than a groupId: entries sharing it are one physical device and the emitter gives them the same per-origin groupId. Labels must be vendor-real and platform-correct, so a Realtek codec string is a Windows artifact and is never selectable on macOS or Linux. Counts must agree with audioinput_count, audiooutput_count and videoinput_count. Evidence class: physical-ground-truth for counts measured without a permission, catalogue-value for labels, which a page cannot read until permission is granted and which the reference captures therefore do not carry.",
+          "maxItems": 48,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "label",
+              "group"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "audioinput",
+                  "audiooutput",
+                  "videoinput"
+                ]
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "group": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            }
+          }
         }
       }
     },
@@ -556,6 +700,42 @@
               "maxLength": 256
             }
           }
+        },
+        "enumeration_allowlist": {
+          "type": "array",
+          "description": "The exact family set the claimed machine enumerates. Subtractive and always servable: the emitter removes families this host has and the claimed device does not. Addition needs the font files, so a family the host lacks is served only when it is provisioned through provisioned_directory and is otherwise reported as a limitation rather than enumerated as present. Installed fonts arrive in bundles, so this list is composed from whole packs and never from individually drawn families, which would be synthesis and a tell. Evidence class: physical-ground-truth for a measured platform core set, catalogue-value for a published software bundle.",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "uniqueItems": true,
+          "maxItems": 4096
+        },
+        "provisioned_directory": {
+          "type": "string",
+          "description": "Directory of font files provisioned into the profile, which the loader points the platform font backend at. The mechanism is measured on Linux: running the browser with FONTCONFIG_FILE set to a config naming one directory made it enumerate exactly the families in that directory, and a config whose font path excluded the system directories made it enumerate none. This is what makes addition possible at all; without it enumeration_allowlist can only remove. Evidence class: host-inherited when absent.",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Browser window chrome deltas. outerWidth/outerHeight minus innerWidth/innerHeight is the space the browser's own frame, tabstrip and toolbar occupy; it follows the OS window decoration for the claimed release rather than anything about the page. Measured: 87 CSS pixels of height on macOS 26, 121 on Windows 11, and 143 on both Linux reference hosts, with a zero width delta on all four.",
+      "properties": {
+        "outer_inner_delta_width": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000,
+          "description": "outerWidth - innerWidth. Zero on every reference host measured. Evidence class: physical-ground-truth when captured, catalogue-value otherwise."
+        },
+        "outer_inner_delta_height": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000,
+          "description": "outerHeight - innerHeight. Evidence class: physical-ground-truth when captured, catalogue-value otherwise."
         }
       }
     }

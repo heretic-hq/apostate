@@ -99,6 +99,12 @@ def _profile_payload(profile: Mapping[str, Any] | None) -> str | None:
     if profile is None:
         return None
     validated = validate_profile(profile)
+    if not validated:
+        # An empty envelope is not "no profile": --apostate-profile outranks
+        # --fingerprint in the launch precedence, so sending base64 "{}" would
+        # silently suppress the browser process's own composition and make this
+        # package carry a second, hidden host-inheritance default.
+        return None
 
     def native_value(value: Any) -> Any:
         if isinstance(value, Mapping):
@@ -143,29 +149,9 @@ def _resolve_plan(config: LaunchConfig, *, resolver: Any = None, catalogue: Any 
 
     resolution: ProfileResolution | None = None
     if resolver is None:
-        if config.profile is None and config.fingerprint is None and config.fingerprint_platform is None:
-            profile: dict[str, Any] = {}
-            diagnostics: dict[str, Any] = {
-                "profile_id": "host-inherited", "catalogue_version": None,
-                "browser_build": None, "platform": None, "locale_source": "host",
-                "timezone_source": "host", "warnings": ["host-inherited mode"],
-            }
-            locale = config.locale or (network_mapping or {}).get("locale")
-            if not isinstance(locale, str):
-                locale = ",".join((network_mapping or {}).get("languages") or []) or (network_mapping or {}).get("accept_languages")
-            timezone = config.timezone or (network_mapping or {}).get("timezone")
-            if locale or timezone:
-                profile["locale"] = {
-                    **({"accept_languages": locale} if locale else {}),
-                    **({"timezone": timezone} if timezone else {}),
-                }
-            profile = validate_profile(profile)
-            diagnostics["locale_source"] = "explicit" if config.locale else ("geoip-derived" if locale else "host")
-            diagnostics["timezone_source"] = "explicit" if config.timezone else ("geoip-derived" if timezone else "host")
-        else:
-            resolution = DeterministicResolver(catalogue).resolve(config, geoip=network_mapping)
-            profile = resolution.profile
-            diagnostics = resolution.to_dict()
+        resolution = DeterministicResolver(catalogue).resolve(config, geoip=network_mapping)
+        profile: dict[str, Any] = resolution.profile
+        diagnostics = resolution.to_dict()
     elif isinstance(resolver, DeterministicResolver):
         resolution = resolver.resolve(config, geoip=network_mapping)
         profile = resolution.profile
@@ -248,7 +234,6 @@ def launch(*, fingerprint: int | str | None = None, fingerprint_platform: str | 
            args: list[str] | tuple[str, ...] | None = None,
            binary_path: str | Path | None = None, cache_dir: str | Path | None = None,
            manifest: Mapping[str, Any] | str | Path | None = None,
-           public_key: bytes | str | Path | None = None,
            downloader: Callable[[str], Any] | None = None, resolver: Any = None,
            catalogue: Any = None, geoip_provider: Any = None, geoip_timeout: float = 10.0,
            **playwright_options: Any) -> Any:
@@ -259,8 +244,7 @@ def launch(*, fingerprint: int | str | None = None, fingerprint_platform: str | 
     plan = _resolve_plan(config, resolver=resolver, catalogue=catalogue,
                          geoip_provider=geoip_provider, geoip_timeout=geoip_timeout)
     if binary_path is None:
-        binary = ensure_binary(cache_dir=cache_dir, manifest=manifest, public_key=public_key,
-                               downloader=downloader)
+        binary = ensure_binary(cache_dir=cache_dir, manifest=manifest, downloader=downloader)
     else:
         binary = Path(binary_path).expanduser()
         if not binary.is_file():
@@ -320,7 +304,6 @@ def launch_persistent_context(user_data_dir: str | Path, *, context_options: Map
     if binary_path is None:
         binary = ensure_binary(cache_dir=options.pop("cache_dir", None),
                                manifest=options.pop("manifest", None),
-                               public_key=options.pop("public_key", None),
                                downloader=options.pop("downloader", None))
     else:
         binary = Path(binary_path).expanduser()
@@ -361,7 +344,7 @@ async def launch_async(**options: Any) -> Any:
     binary_path = options.pop("binary_path", None)
     if binary_path is None:
         binary = ensure_binary(cache_dir=options.pop("cache_dir", None), manifest=options.pop("manifest", None),
-                               public_key=options.pop("public_key", None), downloader=options.pop("downloader", None))
+                               downloader=options.pop("downloader", None))
     else:
         binary = Path(binary_path).expanduser()
         if not binary.is_file() or not os.access(binary, os.X_OK):
@@ -410,7 +393,7 @@ async def launch_persistent_context_async(user_data_dir: str | Path, *, context_
     binary_path = options.pop("binary_path", None)
     if binary_path is None:
         binary = ensure_binary(cache_dir=options.pop("cache_dir", None), manifest=options.pop("manifest", None),
-                               public_key=options.pop("public_key", None), downloader=options.pop("downloader", None))
+                               downloader=options.pop("downloader", None))
     else:
         binary = Path(binary_path).expanduser()
         if not binary.is_file() or not os.access(binary, os.X_OK):

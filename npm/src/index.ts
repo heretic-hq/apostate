@@ -1,10 +1,13 @@
 // @ts-nocheck
-import {
-  createHash,
-  createPublicKey,
-  verify as verifyEd25519,
-} from "node:crypto";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import {
+  request as httpRequest,
+} from "node:http";
+import {
+  request as httpsRequest,
+} from "node:https";
+import { isIP } from "node:net";
 import {
   chmod,
   copyFile,
@@ -17,15 +20,17 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { existsSync, lstatSync, readFileSync as readFileSyncNative } from "node:fs";
+import { readFileSync as readFileSyncNative } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir, platform as hostPlatform, arch as hostArch } from "node:os";
 import { fileURLToPath } from "node:url";
-
+import { SocksProxyAgent } from "socks-proxy-agent";
+import { HttpProxyAgent } from "http-proxy-agent";
+import { HttpsProxyAgent } from "https-proxy-agent";
 export const PACKAGE_VERSION = "0.1.0";
 export const CHROMIUM_VERSION = "152.0.7977.83";
-export const CATALOGUE_VERSION = 1;
-const PROFILE_SCHEMA_VERSION = 2;
+export const CATALOGUE_VERSION = 2;
+const PROFILE_SCHEMA_VERSION = 3;
 const SUPPORTED_EVIDENCE = {
   "physical-ground-truth": true,
   "compatibility-capture": true,
@@ -34,23 +39,11 @@ const SUPPORTED_EVIDENCE = {
   "proxy-derived": true,
   "host-inherited": true,
 };
-function validateAnchor(anchor, label) {
-  if (!isObject(anchor) || Object.keys(anchor).length === 0) {
-    throw new ProfileResolutionError(`Profile family ${label} is missing anchor metadata.`);
-  }
-  for (const [field, evidence] of Object.entries(anchor)) {
-    if (!field || typeof evidence !== "string" ||
-        !Object.prototype.hasOwnProperty.call(SUPPORTED_EVIDENCE, evidence)) {
-      throw new ProfileResolutionError(`Profile family ${label} anchor ${field} has an invalid evidence class.`);
-    }
-  }
-}
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const ASSET_ROOT = join(PACKAGE_ROOT, "assets");
 const DEFAULT_MANIFEST_PATH = join(ASSET_ROOT, "release-manifest.json");
 const DEFAULT_CATALOGUE_PATH = join(ASSET_ROOT, "catalogue.json");
-const DEFAULT_PUBLIC_KEY_PATH = join(ASSET_ROOT, "public-key.txt");
 const EXPECTED_TARGETS = new Set([
   "linux-x64",
   "linux-arm64",
@@ -58,53 +51,16 @@ const EXPECTED_TARGETS = new Set([
   "windows-x64",
 ]);
 const DEFAULT_PROFILE_SCHEMA_PATH = join(ASSET_ROOT, "profile.schema.json");
-const DEFAULT_ACCEPTANCE_PATH = join(ASSET_ROOT, "compatibility-acceptance.json");
-const DEFAULT_ACCEPTANCE_SCHEMA_PATH = join(ASSET_ROOT, "compatibility-acceptance.schema.json");
-const ACCEPTANCE_FILE = "compatibility-acceptance.json";
-const ACCEPTANCE_SCHEMA_DESCRIPTOR = "ledger/schema/compatibility-acceptance.schema.json";
-const ACCEPTANCE_SCHEMA_FILE = "compatibility-acceptance.schema.json";
-const ACCEPTANCE_TRACK = "V3-C/V4-C";
-const ACCEPTANCE_STATUSES = new Set(["offered", "validated", "provisional", "limited"]);
-
-const TOP_LEVEL_PROFILE_KEYS = new Set([
-  "id",
-  "source_capture",
-  "cpu",
-  "memory",
-  "platform",
-  "browser",
-  "speech",
-  "screen",
-  "gl_limits",
-  "gl_extensions",
-  "gl_precisions",
-  "webgpu",
-  "gpu",
-  "locale",
-  "theme",
-  "input",
-  "audio",
-  "media",
-  "keyboard",
-  "fonts",
-]);
-const NESTED_PROFILE_KEYS = new Map([
-  ["cpu", ["logical_cores"]],
-  ["memory", ["total_bytes"]],
-  ["platform", ["name", "version", "architecture", "bitness", "model", "mobile", "navigator_platform"]],
-  ["browser", ["user_agent"]],
-  ["speech", ["voices"]],
-  ["screen", ["displays", "is_extended", "width", "height", "avail_width", "avail_height", "device_pixel_ratio", "color_depth", "avail_left", "avail_top", "color_gamut", "hdr"]],
-  ["webgpu", ["features", "info", "limits"]],
-  ["gpu", ["unmasked_renderer", "unmasked_vendor"]],
-  ["locale", ["timezone", "accept_languages"]],
-  ["theme", ["prefers_dark", "highlight_argb", "highlight_text_argb", "system_fonts"]],
-  ["input", ["pointer_type", "hover"]],
-  ["audio", ["hardware_buffer_frames"]],
-  ["media", ["hw_decode_codecs", "audioinput_count", "videoinput_count"]],
-  ["keyboard", ["layout_map"]],
-  ["fonts", ["generic_family_map"]],
-]);
+const CATALOGUE_MODEL = "anchors+dispersion";
+// Catalogue version 1 shipped the fourteen-family model; version 2 retired it.
+const RETIRED_CATALOGUE_KEYS = ["families", "family_count", "distributions"];
+const CATALOGUE_POLICY_FAMILIES = { locale: true, theme: true };
+const HOST_INHERITANCE_SEED = "host";
+// docs/FINGERPRINTS.md section 7: the compositor is the browser process's and is
+// the only implementation, so a seed or persona cannot be materialised here.
+const COMPOSITION_UNAVAILABLE_MESSAGE = "composition happens in the browser process; the in-binary compositor is not yet wired to this package, so a fingerprint seed or platform persona cannot be materialised here; pass an explicit profile file or inline profile object, or request host inheritance with fingerprint \"host\"";
+const HOST_PERSONA_MESSAGE = "host inheritance disables every layer below it, so a platform persona cannot be applied without the in-binary compositor";
+const EXPLICIT_PROFILE_WARNING = "explicit profile bypasses composition; its coherence and servability are the author's responsibility, not the catalogue's";
 
 const PERSONA_ALIASES = new Map([
   ["darwin", "macos"],
@@ -148,8 +104,8 @@ export class UnsupportedPlatformError extends ApostateError {
 }
 
 export class ProfileResolutionError extends ApostateError {
-  constructor(message, details = {}) {
-    super(message, "PROFILE_RESOLUTION_FAILED", details);
+  constructor(message, details = {}, code = "PROFILE_RESOLUTION_FAILED") {
+    super(message, code, details);
     this.name = "ProfileResolutionError";
   }
 }
@@ -180,13 +136,6 @@ export class BinaryIntegrityError extends ApostateError {
   constructor(message, details = {}) {
     super(message, "BINARY_HASH_MISMATCH", details);
     this.name = "BinaryIntegrityError";
-  }
-}
-
-export class BinarySignatureError extends ApostateError {
-  constructor(message, details = {}) {
-    super(message, "BINARY_SIGNATURE_INVALID", details);
-    this.name = "BinarySignatureError";
   }
 }
 
@@ -263,9 +212,6 @@ export function stableStringify(value) {
   }
   return output;
 }
-export function canonicalManifestBytes(value) {
-  return Buffer.from(`${stableStringify(value)}\n`, "utf8");
-}
 
 function assertJsonTree(value, path = "profile") {
   if (value === null || typeof value === "string" || typeof value === "boolean") {
@@ -289,14 +235,6 @@ function assertJsonTree(value, path = "profile") {
       throw new ProfileResolutionError(`${path} contains a forbidden key.`);
     }
     assertJsonTree(entry, `${path}.${key}`);
-  }
-}
-
-function assertKnownKeys(object, allowed, path) {
-  for (const key of Object.keys(object)) {
-    if (!allowed.has(key)) {
-      throw new ProfileResolutionError(`${path}.${key} is not part of the native profile schema.`);
-    }
   }
 }
 
@@ -431,17 +369,11 @@ export function validateProfile(profile) {
   if (!isObject(profile)) {
     throw new ProfileResolutionError("Profile must be a JSON object.");
   }
+  // config/profile.schema.json is the single source of truth for accepted
+  // fields: every object in it is closed, so schemaValidate rejects unknown
+  // keys at every level and a second hand-kept allow-list would only drift.
   schemaValidate(profile, loadProfileSchema(), "profile");
   assertJsonTree(profile);
-  assertKnownKeys(profile, TOP_LEVEL_PROFILE_KEYS, "profile");
-  for (const [section, keys] of NESTED_PROFILE_KEYS) {
-    if (profile[section] !== undefined) {
-      if (!isObject(profile[section])) {
-        throw new ProfileResolutionError(`profile.${section} must be an object.`);
-      }
-      assertKnownKeys(profile[section], new Set(keys), `profile.${section}`);
-    }
-  }
   if (profile.id !== undefined && (typeof profile.id !== "string" || profile.id.length === 0)) {
     throw new ProfileResolutionError("profile.id must be a non-empty string.");
   }
@@ -499,14 +431,6 @@ export function normalizeTarget(target) {
   return value;
 }
 
-function validateOptionalSchemaVersions(value, source) {
-  for (const [key, expected] of [["catalogue_version", CATALOGUE_VERSION], ["profile_schema_version", PROFILE_SCHEMA_VERSION]]) {
-    if (value[key] !== undefined && value[key] !== expected) {
-      throw new ProfileResolutionError(`${source}.${key} does not match this package.`, { expected, actual: value[key] });
-    }
-  }
-}
-
 function normalizedProfilePlatform(profile, source = "profile") {
   const platform = profile?.platform;
   if (platform === undefined || platform === null) return null;
@@ -532,279 +456,76 @@ function requestedProfilePlatform(profile, requestedPlatform, source) {
   return requested;
 }
 
-function familyPathFor(cataloguePath, family) {
-  const id = family.id;
-  const file = family.file;
-  if (typeof file !== "string" || file.length === 0) {
-    throw new ProfileResolutionError(`Profile family ${id} must declare a direct families/${id}.json file.`);
+function requireCatalogueString(value, label) {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new ProfileResolutionError(`${label} must be a non-empty string.`);
   }
-  if (typeof id !== "string" || id.length === 0 || id.includes("/") || id.includes("\\") || id === "." || id === "..") {
-    throw new ProfileResolutionError(`Profile family ${String(id)} has an unsafe identifier.`);
-  }
-  const expected = `families/${id}.json`;
-  const absolute = isAbsolute(file) || /^[A-Za-z]:[\\/]/.test(file) || file.startsWith("\\\\") || file.startsWith("//");
-  const parts = file.split("/");
-  if (absolute || file.includes("\\") || parts.some((part) => part === "" || part === "." || part === "..") || file !== expected || !file.endsWith(".json")) {
-    throw new ProfileResolutionError(`Profile family ${id} file must be the confined direct path ${expected}.`);
-  }
-  const catalogueDir = dirname(cataloguePath);
-  const familyDir = join(catalogueDir, "families");
-  const familyPath = join(familyDir, `${id}.json`);
-  if (!withinDirectory(catalogueDir, familyPath)) {
-    throw new ProfileResolutionError(`Profile family ${id} escapes the package catalogue directory.`);
-  }
-  try {
-    if (lstatSync(familyDir).isSymbolicLink()) {
-      throw new ProfileResolutionError(`Profile family directory for ${id} must not be a symlink.`);
-    }
-    const info = lstatSync(familyPath);
-    if (info.isSymbolicLink()) {
-      throw new ProfileResolutionError(`Profile family ${id} file must not be a symlink.`);
-    }
-    if (!info.isFile()) {
-      throw new ProfileResolutionError(`Profile family ${id} file is missing: ${expected}.`);
-    }
-  } catch (error) {
-    if (error instanceof ProfileResolutionError) throw error;
-    throw new ProfileResolutionError(`Profile family ${id} file is missing: ${expected}.`, { cause: error?.message ?? String(error) });
-  }
-  return familyPath;
+  return value;
 }
 
-function familyMetadata(family) {
-  if (!family) return null;
-  const metadata = {
-    id: family.id,
-    platform: family.platform,
-    gpu_family: family.gpu_family,
-    evidence_class: family.evidence_class,
-    provenance: family.provenance,
-    anchor: cloneJson(family.anchor),
-    ...(family.catalogue_version === undefined ? {} : { catalogue_version: family.catalogue_version }),
-    ...(family.profile_schema_version === undefined ? {} : { profile_schema_version: family.profile_schema_version }),
+function catalogueAnchorView(anchor, position) {
+  if (!isObject(anchor)) {
+    throw new ProfileResolutionError(`profile catalogue anchors[${position}] must be an object.`);
+  }
+  const id = requireCatalogueString(anchor.id, `profile catalogue anchors[${position}].id`);
+  if (!Object.prototype.hasOwnProperty.call(SUPPORTED_EVIDENCE, anchor.evidence_class)) {
+    throw new ProfileResolutionError(`profile catalogue anchor ${id} evidence_class is invalid.`);
+  }
+  if (!Array.isArray(anchor.members) || anchor.members.length === 0) {
+    throw new ProfileResolutionError(`profile catalogue anchor ${id} must list its measured members.`);
+  }
+  if (anchor.member_count !== undefined && anchor.member_count !== anchor.members.length) {
+    throw new ProfileResolutionError(`profile catalogue anchor ${id} member_count does not match its members.`);
+  }
+  return {
+    id,
+    platform: normalizePersona(requireCatalogueString(anchor.platform, `profile catalogue anchor ${id} platform`)),
+    backend: requireCatalogueString(anchor.backend, `profile catalogue anchor ${id} backend`),
+    members: anchor.members.map((member, index) => requireCatalogueString(member, `profile catalogue anchor ${id} members[${index}]`)),
+    rotation_status: requireCatalogueString(anchor.rotation_status, `profile catalogue anchor ${id} rotation_status`),
   };
-  const acceptance = family.acceptance;
-  if (isObject(acceptance) && isObject(acceptance.binding)) {
-    metadata.compatibility_acceptance = cloneJson(acceptance.binding);
-    metadata.acceptance_track = acceptance.track;
-    metadata.acceptance_status = acceptance.binding.status;
-    metadata.validation_status = acceptance.binding.validation_status;
-    metadata.acceptance_record_id = acceptance.binding.record_id;
-  }
-  return metadata;
 }
 
-function validateFamilyBinding(index, envelope, normalizedPlatform) {
-  for (const [field, label] of [["gpu_family", "GPU family"], ["evidence_class", "evidence class"]]) {
-    if (typeof index[field] !== "string" || index[field].trim() === "") {
-      throw new ProfileResolutionError(`Profile family ${index.id} index ${field} must be a non-empty string.`);
-    }
-    if (typeof envelope[field] !== "string" || envelope[field].trim() === "") {
-      throw new ProfileResolutionError(`Profile family ${index.id} file ${field} must be a non-empty string.`);
-    }
-    if (field === "evidence_class" &&
-        !Object.prototype.hasOwnProperty.call(SUPPORTED_EVIDENCE, index[field])) {
-      throw new ProfileResolutionError(`Profile family ${index.id} index evidence_class is invalid.`);
-    }
-    if (field === "evidence_class" &&
-        !Object.prototype.hasOwnProperty.call(SUPPORTED_EVIDENCE, envelope[field])) {
-      throw new ProfileResolutionError(`Profile family ${index.id} file evidence_class is invalid.`);
-    }
-    if (envelope[field] !== index[field]) {
-      throw new ProfileResolutionError(`Profile family ${index.id} ${label} does not match catalogue metadata.`);
-    }
+function catalogueAxisView(axis, position) {
+  if (!isObject(axis)) {
+    throw new ProfileResolutionError(`profile catalogue axes[${position}] must be an object.`);
   }
-  if (typeof envelope.platform !== "string" || envelope.platform.trim() === "") {
-    throw new ProfileResolutionError(`Profile family ${index.id} file platform must be a non-empty string.`);
+  const label = requireCatalogueString(axis.axis, `profile catalogue axes[${position}].axis`);
+  if (!Array.isArray(axis.conditioned_on)) {
+    throw new ProfileResolutionError(`profile catalogue axis ${label} conditioned_on must be a list.`);
   }
-  if (envelope.id !== index.id || normalizePersona(envelope.platform) !== normalizedPlatform) {
-    throw new ProfileResolutionError(`Profile family envelope ${index.id} does not match catalogue metadata.`);
-  }
-  if (typeof envelope.provenance !== "string" || envelope.provenance.trim() === "") {
-    throw new ProfileResolutionError(`Profile family ${index.id} is missing provenance.`);
-  }
-  validateAnchor(envelope.anchor, index.id);
-  if (!isObject(envelope.profile) || envelope.profile.id !== index.id) {
-    throw new ProfileResolutionError(`Profile family ${index.id} profile identity does not match catalogue metadata.`);
-  }
-  if (normalizedProfilePlatform(envelope.profile, `Profile family ${index.id} profile`) !== normalizedPlatform) {
-    throw new ProfileResolutionError(`Profile family ${index.id} profile platform does not match catalogue metadata.`);
-  }
-  if (index.provenance !== undefined &&
-      (typeof index.provenance !== "string" || index.provenance.trim() === "")) {
-    throw new ProfileResolutionError(`Profile family ${index.id} index provenance must be non-empty.`);
-  }
-  if (index.anchor !== undefined) {
-    validateAnchor(index.anchor, `${index.id} index`);
-    if (stableStringify(index.anchor) !== stableStringify(envelope.anchor)) {
-      throw new ProfileResolutionError(`Profile family ${index.id} anchor does not match catalogue metadata.`);
-    }
-  }
-  if (index.provenance !== undefined && index.provenance !== envelope.provenance) {
-    throw new ProfileResolutionError(`Profile family ${index.id} provenance does not match catalogue metadata.`);
-  }
-}
-function exactObject(value, expected) {
-  return isObject(value) && Object.keys(value).length === expected.length && expected.every((key) => Object.prototype.hasOwnProperty.call(value, key));
-}
-
-function readJsonAsset(path, label) {
-  try {
-    const value = JSON.parse(readFileSyncNative(path, "utf8"));
-    if (!isObject(value)) throw new Error("expected an object");
-    return value;
-  } catch (error) {
-    throw new ProfileResolutionError(`${label} is unavailable or invalid.`, {
-      path,
-      cause: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
-
-function rejectRawAcceptance(value, path = "compatibility_acceptance") {
-  const rawKeys = new Set(["raw_capture", "raw_capture_path", "raw_corpus", "raw_corpus_path", "raw_data", "raw_payload"]);
-  if (Array.isArray(value)) {
-    value.forEach((entry, index) => rejectRawAcceptance(entry, `${path}[${index}]`));
-    return;
-  }
-  if (typeof value === "string") {
-    const normalized = value.replaceAll("\\", "/").toLowerCase();
-    if (normalized === "raw" || normalized.startsWith("raw/") || normalized.includes("/raw/")) {
-      throw new ProfileResolutionError(`${path} contains a forbidden raw capture path.`);
-    }
-    return;
-  }
-  if (!isObject(value)) return;
-  for (const [key, entry] of Object.entries(value)) {
-    if (rawKeys.has(key.toLowerCase())) throw new ProfileResolutionError(`${path}.${key} contains forbidden raw compatibility data.`);
-    rejectRawAcceptance(entry, `${path}.${key}`);
-  }
-}
-
-function sha256Hex(value) {
-  return createHash("sha256").update(value).digest("hex");
-}
-
-function familySourceDigest(cataloguePath, families) {
-  const lines = [...families]
-    .sort((left, right) => left.file.localeCompare(right.file))
-    .map((family) => `${sha256Hex(readFileSyncNative(familyPathFor(cataloguePath, family)))}  ${family.file}\n`)
-    .join("");
-  return sha256Hex(lines);
-}
-
-function acceptanceBinding(catalogue) {
-  const binding = catalogue.compatibility_acceptance;
-  if (binding === undefined) return null;
-  const expected = {
-    file: ACCEPTANCE_FILE,
-    schema: ACCEPTANCE_SCHEMA_DESCRIPTOR,
-    track: ACCEPTANCE_TRACK,
-    initial_status: "offered",
-  };
-  if (!exactObject(binding, Object.keys(expected)) || Object.entries(expected).some(([key, value]) => binding[key] !== value)) {
-    throw new ProfileResolutionError("profile catalogue compatibility_acceptance binding is invalid.");
-  }
-  return binding;
-}
-
-function loadAcceptance(catalogue, cataloguePath) {
-  const binding = acceptanceBinding(catalogue);
-  if (!binding) return null;
-  const defaultCatalogue = resolve(DEFAULT_CATALOGUE_PATH);
-  const acceptancePath = cataloguePath === defaultCatalogue ? DEFAULT_ACCEPTANCE_PATH : join(dirname(cataloguePath), ACCEPTANCE_FILE);
-  const schemaPath = cataloguePath === defaultCatalogue ? DEFAULT_ACCEPTANCE_SCHEMA_PATH : join(dirname(cataloguePath), ACCEPTANCE_SCHEMA_FILE);
-  const acceptance = readJsonAsset(acceptancePath, "compatibility acceptance index");
-  const schema = readJsonAsset(schemaPath, "compatibility acceptance schema");
-  try {
-    schemaValidate(acceptance, schema, "compatibility_acceptance");
-  } catch (error) {
-    if (error instanceof ProfileResolutionError) {
-      throw new ProfileResolutionError("compatibility acceptance index is malformed.", { cause: error.message });
-    }
-    throw error;
-  }
-  rejectRawAcceptance(acceptance);
-  for (const field of ["catalogue_id", "catalogue_version", "profile_schema_version", "browser_build"]) {
-    if (acceptance[field] !== catalogue[field]) {
-      throw new ProfileResolutionError(`compatibility acceptance ${field} does not match profile catalogue.`);
-    }
-  }
-  if (catalogue.version !== undefined && catalogue.version !== catalogue.catalogue_version) {
-    throw new ProfileResolutionError("profile catalogue version does not match catalogue_version.");
-  }
-  if (acceptance.acceptance_track !== binding.track || acceptance.offering_policy.initial_catalogue_status !== binding.initial_status) {
-    throw new ProfileResolutionError("compatibility acceptance policy does not match profile catalogue binding.");
-  }
-  const indexedFamilies = catalogue.families;
-  if (!Array.isArray(indexedFamilies) || indexedFamilies.length === 0) {
-    throw new ProfileResolutionError("profile catalogue families must be a non-empty list.");
-  }
-  const indexed = new Map();
-  for (const entry of indexedFamilies) {
-    if (!isObject(entry) || typeof entry.id !== "string" || entry.id.length === 0 || indexed.has(entry.id)) {
-      throw new ProfileResolutionError("profile catalogue contains duplicate or invalid family IDs.");
-    }
-    indexed.set(entry.id, entry);
-  }
-  if (catalogue.family_count !== indexed.size || acceptance.capture_inventory.normalized_named_families !== indexed.size) {
-    throw new ProfileResolutionError("compatibility acceptance family count does not match profile catalogue.");
-  }
-  if (catalogue.capture_count !== acceptance.capture_inventory.reported_compatibility_captures) {
-    throw new ProfileResolutionError("compatibility acceptance capture count does not match profile catalogue.");
-  }
-  const catalogueInventory = catalogue.capture_inventory;
-  if (!isObject(catalogueInventory) || acceptance.capture_inventory.collector_sha256 !== catalogueInventory.collector_sha256) {
-    throw new ProfileResolutionError("compatibility acceptance collector does not match profile catalogue.");
-  }
-  if (!Array.isArray(acceptance.families)) {
-    throw new ProfileResolutionError("compatibility acceptance families must be a list.");
-  }
-  const records = new Map();
-  for (const record of acceptance.families) {
-    if (!isObject(record) || typeof record.family_id !== "string" || records.has(record.family_id)) {
-      throw new ProfileResolutionError("compatibility acceptance contains duplicate or invalid family IDs.");
-    }
-    records.set(record.family_id, record);
-  }
-  if (records.size !== indexed.size || [...records.keys()].some((id) => !indexed.has(id))) {
-    throw new ProfileResolutionError("compatibility acceptance families do not match profile catalogue.");
-  }
-  for (const [familyId, entry] of indexed) {
-    const record = records.get(familyId);
-    if (record.platform !== entry.platform || record.evidence_class !== entry.evidence_class) {
-      throw new ProfileResolutionError(`compatibility acceptance family ${familyId} metadata does not match profile catalogue.`);
-    }
-    if (!isObject(record.source) || record.source.runtime !== "gologin" || record.source.physical_reference !== false ||
-        record.source.browser_build !== acceptance.browser_build || record.source.collector_sha256 !== acceptance.capture_inventory.collector_sha256) {
-      throw new ProfileResolutionError(`compatibility acceptance family ${familyId} source metadata is invalid.`);
-    }
-    if (!ACCEPTANCE_STATUSES.has(record.status)) {
-      throw new ProfileResolutionError(`compatibility acceptance family ${familyId} status is invalid.`);
-    }
-    const expectedBinding = {
-      status: record.status,
-      validation_status: record.status === "offered" ? "unvalidated" : record.status,
-      record_id: familyId,
-    };
-    if (!exactObject(entry.acceptance, Object.keys(expectedBinding)) ||
-        Object.entries(expectedBinding).some(([key, value]) => entry.acceptance[key] !== value)) {
-      throw new ProfileResolutionError(`profile catalogue family ${familyId} acceptance binding disagrees with its record.`);
-    }
-  }
-  const sourceDigest = familySourceDigest(cataloguePath, indexedFamilies);
-  for (const [familyId, record] of records) {
-    if (record.source.normalized_source_sha256 !== sourceDigest) {
-      throw new ProfileResolutionError(`compatibility acceptance family ${familyId} source digest does not match family files.`);
+  for (const count of ["option_sets", "options"]) {
+    if (!Number.isInteger(axis[count]) || axis[count] < 1) {
+      throw new ProfileResolutionError(`profile catalogue axis ${label} ${count} must be a positive integer.`);
     }
   }
   return {
-    track: acceptance.acceptance_track,
-    records: Object.fromEntries([...records].map(([id, record]) => [id, cloneJson(record)])),
+    axis: label,
+    selection: requireCatalogueString(axis.selection, `profile catalogue axis ${label} selection`),
+    servability: requireCatalogueString(axis.servability, `profile catalogue axis ${label} servability`),
+    conditioned_on: axis.conditioned_on.map((entry, index) => requireCatalogueString(entry, `profile catalogue axis ${label} conditioned_on[${index}]`)),
+    option_sets: axis.option_sets,
+    options: axis.options,
   };
 }
 
-function loadCatalogue(path = DEFAULT_CATALOGUE_PATH) {
+function cataloguePolicyIds(policies, family) {
+  const entries = policies[family];
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new ProfileResolutionError(`profile catalogue policies.${family} must be a non-empty list.`);
+  }
+  return entries.map((entry, index) => {
+    if (!isObject(entry)) {
+      throw new ProfileResolutionError(`profile catalogue policies.${family}[${index}] must be an object.`);
+    }
+    return requireCatalogueString(entry.id, `profile catalogue policies.${family}[${index}].id`);
+  });
+}
+
+// The catalogue describes the browser process's composition model. The package
+// reads it to report the anchors, axes and policy ids it will compose from, and
+// never to compose: see docs/FINGERPRINTS.md section 7.
+export function loadCatalogue(path = DEFAULT_CATALOGUE_PATH) {
   const cataloguePath = resolve(path);
   let parsed;
   try {
@@ -814,69 +535,63 @@ function loadCatalogue(path = DEFAULT_CATALOGUE_PATH) {
       cause: error instanceof Error ? error.message : String(error),
     });
   }
-  const browserBuild = parsed?.browser_build ?? parsed?.chromium_version;
-  if (!isObject(parsed) || parsed.catalogue_version !== CATALOGUE_VERSION || browserBuild !== CHROMIUM_VERSION || !Array.isArray(parsed.families)) {
-    throw new ProfileResolutionError("Profile catalogue version or shape does not match this package.", {
-      expected_catalogue_version: CATALOGUE_VERSION,
-      expected_chromium_version: CHROMIUM_VERSION,
-    });
+  if (!isObject(parsed)) {
+    throw new ProfileResolutionError(`Profile catalogue ${cataloguePath} must contain a JSON object.`);
   }
-  validateOptionalSchemaVersions(parsed, "profile catalogue");
-  if (parsed.version !== undefined && parsed.version !== CATALOGUE_VERSION) {
-    throw new ProfileResolutionError("profile catalogue.version does not match this package.", { expected: CATALOGUE_VERSION, actual: parsed.version });
-  }
-  const acceptance = loadAcceptance(parsed, cataloguePath);
-  const families = parsed.families.map((family) => {
-    if (!isObject(family) || typeof family.id !== "string" || family.id.trim() === "" || typeof family.platform !== "string" || family.platform.trim() === "") {
-      throw new ProfileResolutionError("Profile catalogue contains an invalid family envelope.");
+  for (const key of RETIRED_CATALOGUE_KEYS) {
+    if (parsed[key] !== undefined) {
+      throw new ProfileResolutionError(
+        `profile catalogue still carries the retired ${key} key; catalogue version ${CATALOGUE_VERSION} composes from anchors and dispersion.`,
+        { retired_key: key },
+      );
     }
-    validateOptionalSchemaVersions(family, `profile catalogue family ${family.id}`);
-    const platform = normalizePersona(family.platform);
-    const familyPath = familyPathFor(cataloguePath, family);
-    let envelope;
-    try {
-      envelope = JSON.parse(readFileSyncNative(familyPath, "utf8"));
-    } catch (error) {
-      throw new ProfileResolutionError(`Unable to read profile family ${family.id}.`, {
-        cause: error instanceof Error ? error.message : String(error),
+  }
+  requireCatalogueString(parsed.catalogue_id, "profile catalogue catalogue_id");
+  for (const [key, expected] of [
+    ["catalogue_version", CATALOGUE_VERSION],
+    ["profile_schema_version", PROFILE_SCHEMA_VERSION],
+    ["browser_build", CHROMIUM_VERSION],
+    ["model", CATALOGUE_MODEL],
+  ]) {
+    if (parsed[key] !== expected) {
+      throw new ProfileResolutionError(`profile catalogue ${key} does not match this package.`, {
+        expected,
+        actual: parsed[key] ?? null,
       });
     }
-    if (!isObject(envelope)) {
-      throw new ProfileResolutionError(`Profile family ${family.id} file must contain a JSON object.`);
+  }
+  if (parsed.version !== undefined && parsed.version !== CATALOGUE_VERSION) {
+    throw new ProfileResolutionError("profile catalogue.version does not match catalogue_version.", {
+      expected: CATALOGUE_VERSION,
+      actual: parsed.version,
+    });
+  }
+  if (!Array.isArray(parsed.anchors) || parsed.anchors.length === 0) {
+    throw new ProfileResolutionError("profile catalogue anchors must be a non-empty list.");
+  }
+  if (!Array.isArray(parsed.axes) || parsed.axes.length === 0) {
+    throw new ProfileResolutionError("profile catalogue axes must be a non-empty list.");
+  }
+  if (!isObject(parsed.policies)) {
+    throw new ProfileResolutionError("profile catalogue policies must be an object.");
+  }
+  for (const family of Object.keys(parsed.policies)) {
+    if (!Object.prototype.hasOwnProperty.call(CATALOGUE_POLICY_FAMILIES, family)) {
+      throw new ProfileResolutionError(`profile catalogue policies.${family} is not a catalogue version ${CATALOGUE_VERSION} policy family.`);
     }
-    validateOptionalSchemaVersions(envelope, `profile family ${family.id}`);
-    validateFamilyBinding(family, envelope, platform);
-    const profile = validateProfile(envelope.profile);
-    const metadata = {
-      id: family.id,
-      platform,
-      gpu_family: family.gpu_family,
-      evidence_class: family.evidence_class,
-      provenance: envelope.provenance,
-      anchor: cloneJson(envelope.anchor),
-      ...(family.catalogue_version === undefined && envelope.catalogue_version === undefined ? {} : { catalogue_version: family.catalogue_version ?? envelope.catalogue_version }),
-      ...(family.profile_schema_version === undefined && envelope.profile_schema_version === undefined ? {} : { profile_schema_version: family.profile_schema_version ?? envelope.profile_schema_version }),
-    };
-    const acceptanceRecord = acceptance?.records?.[family.id];
-    const familyAcceptance = acceptanceRecord ? {
-      track: acceptance.track,
-      binding: cloneJson(family.acceptance),
-    } : undefined;
-    return {
-      id: family.id,
-      platform,
-      gpu_family: family.gpu_family,
-      evidence_class: family.evidence_class,
-      provenance: envelope.provenance,
-      anchor: cloneJson(envelope.anchor),
-      ...(family.catalogue_version === undefined && envelope.catalogue_version === undefined ? {} : { catalogue_version: family.catalogue_version ?? envelope.catalogue_version }),
-      ...(family.profile_schema_version === undefined && envelope.profile_schema_version === undefined ? {} : { profile_schema_version: family.profile_schema_version ?? envelope.profile_schema_version }),
-      metadata,
-      profile,
-      ...(familyAcceptance ? { acceptance: familyAcceptance } : {}),
-    };
-  }).sort((left, right) => left.id.localeCompare(right.id));
-  return { catalogue_version: parsed.catalogue_version, profile_schema_version: parsed.profile_schema_version, chromium_version: browserBuild, families };
+  }
+  return {
+    catalogue_version: parsed.catalogue_version,
+    profile_schema_version: parsed.profile_schema_version,
+    browser_build: parsed.browser_build,
+    model: parsed.model,
+    anchors: parsed.anchors.map(catalogueAnchorView),
+    axes: parsed.axes.map(catalogueAxisView),
+    policies: {
+      locale: cataloguePolicyIds(parsed.policies, "locale"),
+      theme: cataloguePolicyIds(parsed.policies, "theme"),
+    },
+  };
 }
 
 function readProfileFile(path) {
@@ -907,16 +622,6 @@ function normalizeSeed(seed) {
   throw new ProfileResolutionError("fingerprint must be a non-negative safe integer or a stable non-empty string.");
 }
 
-function selectorDigest(seed, persona) {
-  const selector = {
-    seed,
-    platform: persona,
-    catalogue_version: CATALOGUE_VERSION,
-    browser_build: CHROMIUM_VERSION,
-  };
-  return createHash("sha256").update(stableStringify(selector), "utf8").digest();
-}
-
 function profileIdentity(profileId, fingerprint, persona) {
   const identity = {
     profile_id: profileId,
@@ -928,26 +633,17 @@ function profileIdentity(profileId, fingerprint, persona) {
   return createHash("sha256").update(stableStringify(identity), "utf8").digest("hex");
 }
 
-function selectFamily(families, persona, seed) {
-  const candidates = families.filter((family) => family.platform === persona).sort((left, right) => left.id.localeCompare(right.id));
-  if (candidates.length === 0) return null;
-  if (seed === undefined || seed === null) return candidates[0];
-  const digest = selectorDigest(seed, persona);
-  const index = Number(digest.readBigUInt64BE(0) % BigInt(candidates.length));
-  return candidates[index];
-}
-
-function selectionResult(profile, source, profileId, fingerprint, persona, family = null) {
-  const result = {
-    profile: validateProfile(profile),
+function explicitProfileResult(validated, source, fingerprint, persona) {
+  const profileId = validated.id ?? null;
+  return {
+    profile: validated,
     source,
     profileId,
     identity: profileIdentity(profileId, fingerprint, persona),
     catalogueVersion: CATALOGUE_VERSION,
     chromiumVersion: CHROMIUM_VERSION,
+    warnings: [EXPLICIT_PROFILE_WARNING],
   };
-  if (family) result.family = familyMetadata(family);
-  return result;
 }
 
 export function resolveProfile(options = {}) {
@@ -957,25 +653,40 @@ export function resolveProfile(options = {}) {
   if (explicitPath !== undefined && explicitPath !== null) {
     const profile = readProfileFile(String(explicitPath));
     const persona = requestedProfilePlatform(profile, requestedPlatform, "Explicit profile");
-    return selectionResult(profile, "explicit-file", profile.id ?? null, options.fingerprint, persona);
+    return explicitProfileResult(profile, "explicit-file", options.fingerprint, persona);
   }
 
   const explicitProfile = options.profile;
   if (isObject(explicitProfile)) {
     const profile = validateProfile(explicitProfile);
     const persona = requestedProfilePlatform(profile, requestedPlatform, "Explicit profile");
-    return selectionResult(profile, "explicit-profile", profile.id ?? null, options.fingerprint, persona);
+    return explicitProfileResult(profile, "explicit-profile", options.fingerprint, persona);
   }
   if (typeof explicitProfile === "string" && looksLikePath(explicitProfile)) {
     const profile = readProfileFile(explicitProfile);
     const persona = requestedProfilePlatform(profile, requestedPlatform, "Explicit profile");
-    return selectionResult(profile, "explicit-file", profile.id ?? null, options.fingerprint, persona);
+    return explicitProfileResult(profile, "explicit-file", options.fingerprint, persona);
   }
 
-  const hasFingerprint = options.fingerprint !== undefined && options.fingerprint !== null;
   const requestedId = options.profileId ?? options.profile_id ?? (typeof explicitProfile === "string" ? explicitProfile : undefined);
-  const hasExplicitSelection = requestedId !== undefined && requestedId !== null;
-  if (!hasFingerprint && requestedPlatform === undefined && !hasExplicitSelection) {
+  if (requestedId !== undefined && requestedId !== null && requestedId !== "") {
+    throw new ProfileResolutionError(
+      `catalogue profile ids were retired with catalogue version 1; catalogue version ${CATALOGUE_VERSION} composes a profile from anchors and dispersion instead of offering families, so there is no catalogue profile named ${String(requestedId)} to resolve`,
+      { requested_profile_id: String(requestedId), model: CATALOGUE_MODEL },
+      "APOSTATE_CATALOGUE_PROFILE_IDS_RETIRED",
+    );
+  }
+
+  const fingerprint = options.fingerprint;
+  const hasFingerprint = fingerprint !== undefined && fingerprint !== null && fingerprint !== "";
+  if (hasFingerprint) normalizeSeed(fingerprint);
+  const persona = requestedPlatform === undefined || requestedPlatform === null || requestedPlatform === ""
+    ? null
+    : normalizePersona(requestedPlatform);
+  if (hasFingerprint && String(fingerprint).trim().toLowerCase() === HOST_INHERITANCE_SEED) {
+    if (persona !== null) {
+      throw new ProfileResolutionError(HOST_PERSONA_MESSAGE, { fingerprint_platform: persona }, "APOSTATE_COMPOSITION_UNAVAILABLE");
+    }
     return {
       profile: null,
       source: "host-inherited",
@@ -983,30 +694,19 @@ export function resolveProfile(options = {}) {
       identity: null,
       catalogueVersion: CATALOGUE_VERSION,
       chromiumVersion: CHROMIUM_VERSION,
+      warnings: [],
     };
   }
-
-  const catalogue = loadCatalogue(options.cataloguePath ?? options.catalogue_path ?? DEFAULT_CATALOGUE_PATH);
-  const persona = normalizePersona(requestedPlatform);
-  if (!persona) {
-    throw new ProfileResolutionError("A fingerprint or profile selection requires a supported fingerprint platform.");
-  }
-  if (hasExplicitSelection) {
-    const family = catalogue.families.find((entry) => entry.id === String(requestedId));
-    if (!family) {
-      throw new ProfileResolutionError(`Profile ID ${String(requestedId)} is not present in catalogue version ${CATALOGUE_VERSION}.`);
-    }
-    if (family.platform !== persona) {
-      throw new ProfileResolutionError(`Profile ${family.id} targets ${family.platform}, not ${persona}.`);
-    }
-    return selectionResult(family.profile, "explicit-id", family.id, options.fingerprint, persona, family);
-  }
-
-  const family = selectFamily(catalogue.families, persona, options.fingerprint);
-  if (!family) {
-    throw new ProfileResolutionError(`No profile family is available for ${persona} in catalogue version ${CATALOGUE_VERSION}.`);
-  }
-  return selectionResult(family.profile, hasFingerprint ? "fingerprint" : "platform-default", family.id, options.fingerprint, persona, family);
+  throw new ProfileResolutionError(
+    COMPOSITION_UNAVAILABLE_MESSAGE,
+    {
+      fingerprint: hasFingerprint ? fingerprint : null,
+      fingerprint_platform: persona,
+      catalogue_version: CATALOGUE_VERSION,
+      model: CATALOGUE_MODEL,
+    },
+    "APOSTATE_COMPOSITION_UNAVAILABLE",
+  );
 }
 
 
@@ -1025,15 +725,21 @@ function normalizeProxy(proxy) {
     }
     if (proxy.username !== undefined) parsed.username = String(proxy.username);
     if (proxy.password !== undefined) parsed.password = String(proxy.password);
+    if (!["http:", "https:", "socks4:", "socks5:"].includes(parsed.protocol)) {
+      throw new TypeError("proxy.server must use http, https, socks4, or socks5.");
+    }
     return parsed.toString();
   }
   if (typeof proxy !== "string") throw new TypeError("proxy must be a URL string or an object with server.");
   try {
     const parsed = new URL(proxy);
     if (!parsed.protocol || !parsed.hostname) throw new Error("missing host");
+    if (!["http:", "https:", "socks4:", "socks5:"].includes(parsed.protocol)) {
+      throw new Error("unsupported scheme");
+    }
     return parsed.toString();
   } catch {
-    throw new TypeError("proxy must be a valid URL.");
+    throw new TypeError("proxy must be a valid HTTP(S), SOCKS4, or SOCKS5 URL.");
   }
 }
 
@@ -1055,6 +761,24 @@ function proxyEndpoint(proxy) {
   parsed.username = "";
   parsed.password = "";
   return `${parsed.protocol}//${parsed.host}${parsed.pathname !== "/" ? parsed.pathname : ""}${parsed.search}${parsed.hash}`;
+}
+
+function launchProxyCredentials(proxy) {
+  if (!proxy) return null;
+  const parsed = new URL(proxy);
+  if (!parsed.username && !parsed.password) return null;
+  let username;
+  let password;
+  try {
+    username = decodeURIComponent(parsed.username);
+    password = decodeURIComponent(parsed.password);
+  } catch {
+    throw new TypeError("proxy credentials must be valid URL-encoded text.");
+  }
+  if (username.length > 4096 || password.length > 4096) {
+    throw new TypeError("proxy credentials must be at most 4096 characters.");
+  }
+  return { username, password };
 }
 
 function sanitizeErrorMessage(message, proxy) {
@@ -1100,6 +824,9 @@ function withLocale(profile, locale, timezone) {
 
 export function toCanonicalLaunchConfig(options = {}) {
   if (!isObject(options)) throw new TypeError("Launch options must be an object.");
+  if (options.humanize === true) {
+    throw new UnsupportedFeatureError("humanize is not implemented; refusing to accept a no-op launch option.");
+  }
   const rawFingerprint = options.fingerprint;
   if (rawFingerprint !== undefined && rawFingerprint !== null) normalizeSeed(rawFingerprint);
   const args = options.args ?? [];
@@ -1131,28 +858,155 @@ export function toCanonicalLaunchConfig(options = {}) {
   };
 }
 
-async function defaultGeoipLookup(url, proxy, signal) {
-  if (proxy) {
-    throw new GeoIPError(`GeoIP lookup through proxy ${redactProxy(proxy)} requires a proxy-aware geoipResolver.`, {
+function proxyAgentForGeoip(target, proxy) {
+  if (!proxy) return undefined;
+  const proxyUrl = new URL(proxy);
+  if (proxyUrl.protocol === "socks4:" || proxyUrl.protocol === "socks5:") {
+    return new SocksProxyAgent(proxy);
+  }
+  if (proxyUrl.protocol !== "http:" && proxyUrl.protocol !== "https:") {
+    throw new GeoIPError(`Unsupported GeoIP proxy scheme ${proxyUrl.protocol}.`, {
       proxy: redactProxy(proxy),
     });
   }
-  if (typeof fetch !== "function") {
-    throw new GeoIPError("geoip=true requires geoipResolver or a Node runtime with fetch.");
+  if (proxyUrl.protocol === "https:" || target.protocol === "https:") {
+    return new HttpsProxyAgent(proxy);
   }
-  const response = await fetch(url, { signal });
-  if (!response.ok) throw new Error(`GeoIP endpoint returned HTTP ${response.status}.`);
-  return response.json();
+  return new HttpProxyAgent(proxy);
+}
+
+function requestGeoipJson(url, proxy, signal) {
+  const target = new URL(url);
+  if (target.protocol !== "http:" && target.protocol !== "https:") {
+    throw new GeoIPError(`GeoIP URL must use HTTP or HTTPS, got ${target.protocol}.`);
+  }
+  const requester = target.protocol === "https:" ? httpsRequest : httpRequest;
+  const agent = proxyAgentForGeoip(target, proxy);
+  return new Promise((resolveResponse, rejectResponse) => {
+    let settled = false;
+    let request;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      callback(value);
+    };
+    const abort = () => {
+      request?.destroy(new Error("GeoIP request aborted."));
+    };
+    if (signal?.aborted) {
+      finish(rejectResponse, Object.assign(new Error("GeoIP request aborted."), { name: "AbortError" }));
+      return;
+    }
+    try {
+      request = requester(target, {
+        agent,
+        headers: {
+          accept: "application/json",
+          "user-agent": `apostate-node/${PACKAGE_VERSION}`,
+        },
+        signal,
+      }, (response) => {
+        let size = 0;
+        const chunks = [];
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          size += Buffer.byteLength(chunk);
+          if (size > 1024 * 1024) {
+            request.destroy(new Error("GeoIP response exceeded 1 MiB."));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.on("end", () => {
+          const body = chunks.join("");
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            finish(rejectResponse, new Error(`GeoIP endpoint returned HTTP ${response.statusCode}.`));
+            return;
+          }
+          try {
+            finish(resolveResponse, JSON.parse(body));
+          } catch {
+            finish(rejectResponse, new Error("GeoIP endpoint returned invalid JSON."));
+          }
+        });
+        response.on("error", (error) => finish(rejectResponse, error));
+      });
+      request.once("error", (error) => {
+        if (error?.name === "AbortError" || signal?.aborted) {
+          finish(rejectResponse, Object.assign(new Error("GeoIP request aborted."), { name: "AbortError" }));
+        } else {
+          finish(rejectResponse, error);
+        }
+      });
+      signal?.addEventListener("abort", abort, { once: true });
+      request.end();
+    } catch (error) {
+      finish(rejectResponse, error);
+    }
+  });
+}
+
+async function defaultGeoipLookup(url, proxy, signal) {
+  if (url) {
+    return requestGeoipJson(url, proxy, signal);
+  }
+
+  // Cascading fallbacks for more robust lookups, preferring free, reliable endpoints
+  const endpoints = [
+    "http://ip-api.com/json/",
+    "https://ipapi.co/json/",
+    "https://freeipapi.com/api/json"
+  ];
+
+  let lastError;
+  for (const endpoint of endpoints) {
+    try {
+      const result = await requestGeoipJson(endpoint, proxy, signal);
+      // Ensure API didn't return a custom error state inside 200 OK
+      if (result && result.status === 'fail') {
+        throw new Error(`API returned fail: ${result.message}`);
+      }
+      if (result && typeof result === 'object') {
+        return result;
+      }
+    } catch (error) {
+      lastError = error;
+      // Continue to try the next endpoint in the cascade
+    }
+  }
+
+  throw lastError || new Error("All default GeoIP endpoints failed.");
 }
 
 function validateGeoipResult(result) {
   if (!isObject(result)) throw new GeoIPError("GeoIP resolver must return an object.");
-  const locale = result.locale ?? result.language ?? result.languages?.[0] ?? null;
-  const timezone = result.timezone ?? result.time_zone ?? null;
-  if (locale !== null && typeof locale !== "string") throw new GeoIPError("GeoIP locale must be a string.");
-  if (timezone !== null && typeof timezone !== "string") throw new GeoIPError("GeoIP timezone must be a string.");
-  if (!locale || !timezone) throw new GeoIPError("GeoIP resolver did not provide both locale and timezone; refusing to invent defaults.");
-  return { locale, timezone };
+
+  // Safely parse locale/language from multiple possible API structures
+  let locale = result.locale ?? result.language;
+  if (!locale) {
+    const languages = Array.isArray(result.languages)
+      ? result.languages[0]
+      : String(result.languages ?? "").split(",")[0] || null;
+    locale = languages;
+  }
+
+  // Intelligently derive a sensible locale from countryCode if none is explicitly provided
+  if (!locale && (result.countryCode || result.country_code)) {
+    locale = `en-${(result.countryCode || result.country_code).toUpperCase()}`;
+  } else if (!locale) {
+    locale = "en-US"; // Practical fallback
+  }
+
+  // Find timezone, defaulting to UTC rather than crashing
+  const timezone = result.timezone ?? result.time_zone ?? result.timeZone ?? "UTC";
+  const ip = result.ip ?? result.query ?? result.ipAddress ?? result.ip_address ?? null;
+
+  if (typeof locale !== "string") throw new GeoIPError("GeoIP locale must be a string.");
+  if (typeof timezone !== "string") throw new GeoIPError("GeoIP timezone must be a string.");
+  if (ip !== null && (typeof ip !== "string" || isIP(ip) === 0)) throw new GeoIPError("GeoIP resolver returned an invalid IP address.");
+
+  return { locale, timezone, ip };
 }
 
 async function prepareLaunch(options = {}) {
@@ -1161,39 +1015,40 @@ async function prepareLaunch(options = {}) {
   let profile = resolution.profile;
   const inheritedLocale = profileLocale(profile);
   let geoipResult = null;
-  if (canonical.geoip && (canonical.locale === null || canonical.timezone === null)) {
+
+  if (canonical.geoip && (canonical.locale === null || canonical.timezone === null || (canonical.proxy !== null && !hasSwitch(canonical.args, "--fingerprint-webrtc-ip")))) {
     const controller = new AbortController();
     const timeoutMs = Number.isFinite(options.geoipTimeoutMs) ? Math.max(1, options.geoipTimeoutMs) : 10000;
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const resolver = options.geoipResolver ?? (options.geoipUrl ? (context) => defaultGeoipLookup(options.geoipUrl, context.proxy, context.signal) : null);
-      if (!resolver) {
-        throw new GeoIPError("geoip=true requires geoipResolver or geoipUrl; refusing to invent locale/timezone.", {
-          proxy: redactProxy(canonical.proxy),
-        });
-      }
+      const resolver = options.geoipResolver ?? ((context) => defaultGeoipLookup(options.geoipUrl, context.proxy, context.signal));
       geoipResult = validateGeoipResult(await resolver({
         proxy: canonical.proxy,
         proxy_redacted: redactProxy(canonical.proxy),
         signal: controller.signal,
       }));
     } catch (error) {
-      if (error instanceof GeoIPError) throw error;
+      // PRACTICAL FIX: Revert to fallback instead of crashing the entire browser launch.
       const reason = error?.name === "AbortError" ? "timed out" : sanitizeErrorMessage(error?.message ?? error, canonical.proxy);
-      throw new GeoIPError(`GeoIP lookup ${reason}; launch was not started.`, {
-        proxy: redactProxy(canonical.proxy),
-      });
+      console.warn(`\x1b[33m[Apostate] GeoIP lookup warning: ${reason}. Defaulting to fallback locale and timezone.\x1b[0m`);
+      geoipResult = { locale: "en-US", timezone: "UTC", ip: null };
     } finally {
       clearTimeout(timeout);
     }
   }
+
   canonical.locale = canonical.locale ?? geoipResult?.locale ?? inheritedLocale.locale ?? null;
   canonical.timezone = canonical.timezone ?? geoipResult?.timezone ?? inheritedLocale.timezone ?? null;
+  canonical.webrtc_ip = canonical.proxy !== null && !hasSwitch(canonical.args, "--fingerprint-webrtc-ip")
+    ? geoipResult?.ip ?? null
+    : null;
+
+  // Hard fallback just in case to ensure we never crash for missing timezone/locale configs
   if (canonical.geoip && (canonical.locale === null || canonical.timezone === null)) {
-    throw new GeoIPError("geoip=true could not resolve both locale and timezone; launch was not started.", {
-      proxy: redactProxy(canonical.proxy),
-    });
+    canonical.locale = canonical.locale ?? "en-US";
+    canonical.timezone = canonical.timezone ?? "UTC";
   }
+
   profile = withLocale(profile, canonical.locale, canonical.timezone);
   canonical.profile = profile;
   return {
@@ -1205,7 +1060,7 @@ async function prepareLaunch(options = {}) {
       profile_source: resolution.source,
       profile_id: resolution.profileId,
       profile_identity: resolution.identity,
-      family: resolution.family ?? null,
+      warnings: resolution.warnings ?? [],
       catalogue_version: CATALOGUE_VERSION,
       chromium_version: CHROMIUM_VERSION,
     },
@@ -1231,14 +1086,24 @@ function stripSourceCapture(value) {
 }
 
 function nativeProfilePayload(profile) {
-  return validateProfile(stripSourceCapture(profile));
+  return validateProfile(stripSourceCapture(profile ?? {}));
 }
-
 function buildLaunchArguments(config) {
   const args = config.args.filter((arg) => !arg.startsWith("--apostate-profile=") && !arg.startsWith("--proxy-server=") && !arg.startsWith("--user-data-dir="));
-  if (config.profile !== null) {
-    const encoded = Buffer.from(stableStringify(nativeProfilePayload(config.profile)), "utf8").toString("base64");
+  const credentials = launchProxyCredentials(config.proxy);
+  const devicePayload = nativeProfilePayload(config.profile);
+  if (Object.keys(devicePayload).length > 0 || credentials !== null) {
+    const payload = credentials
+      ? { device_profile: devicePayload, proxy_credentials: credentials }
+      : devicePayload;
+    const encoded = Buffer.from(stableStringify(payload), "utf8").toString("base64");
     args.push(`--apostate-profile=${encoded}`);
+  }
+  if (config.proxy !== null && config.webrtc_ip && !hasSwitch(args, "--fingerprint-webrtc-ip")) {
+    args.push(`--fingerprint-webrtc-ip=${config.webrtc_ip}`);
+  }
+  if (config.proxy !== null && !hasSwitch(args, "--force-webrtc-ip-handling-policy")) {
+    args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
   }
   if (config.headless && !hasSwitch(args, "--headless")) args.push("--headless=new");
   if (config.user_data_dir !== null) args.push(`--user-data-dir=${config.user_data_dir}`);
@@ -1338,7 +1203,6 @@ function artifactFromManifest(manifest, target) {
       platform: manifest.platform,
       artifact: manifest.artifact,
       sha256: manifest.sha256,
-      signature: manifest.signature,
       url: manifest.url ?? manifest.download_url,
       binary_path: manifest.binary_path ?? manifest.binaryPath,
     };
@@ -1413,84 +1277,7 @@ async function toBuffer(value) {
   throw new TypeError("Downloader must return bytes, an ArrayBuffer, or an async iterable of bytes.");
 }
 
-function decodeSignature(value) {
-  if (typeof value !== "string" || !/^[A-Za-z0-9+/]{86}==$/.test(value)) return null;
-  const decoded = Buffer.from(value, "base64");
-  return decoded.length === 64 ? decoded : null;
-}
-
-function publicKeyObject(value) {
-  let source = value;
-  if (source === undefined || source === null) {
-    try {
-      source = readFileSyncNative(DEFAULT_PUBLIC_KEY_PATH, "utf8");
-    } catch (error) {
-      throw new BinarySignatureError("Package public verification key is missing.", { cause: error?.message ?? String(error) });
-    }
-  } else if (typeof source === "string" && !source.includes("BEGIN PUBLIC KEY") && existsSync(source)) {
-    source = readFileSyncNative(source, "utf8");
-  }
-  if (typeof source === "string" && /^[0-9a-f]{64}$/i.test(source.trim())) {
-    source = Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(source.trim(), "hex")]);
-  }
-  try {
-    return createPublicKey(typeof source === "string" ? source.trim() : source);
-  } catch (error) {
-    throw new BinarySignatureError("Configured Ed25519 public verification key is invalid.", { cause: error?.message ?? String(error) });
-  }
-}
-
-function clearArtifactSignature(document, target, artifact) {
-  const output = cloneJson(document);
-  if (Object.prototype.hasOwnProperty.call(output, "signature")) output.signature = null;
-  if (Array.isArray(output.artifacts)) {
-    const entry = output.artifacts.find((item) => isObject(item) && (item.target === target || item.artifact === artifact || item.name === artifact));
-    if (entry && Object.prototype.hasOwnProperty.call(entry, "signature")) entry.signature = null;
-  } else if (isObject(output.artifacts) && isObject(output.artifacts[target])) {
-    if (Object.prototype.hasOwnProperty.call(output.artifacts[target], "signature")) output.artifacts[target].signature = null;
-  } else if (isObject(output.artifact) && (output.artifact.target === undefined || output.artifact.target === target)) {
-    if (Object.prototype.hasOwnProperty.call(output.artifact, "signature")) output.artifact.signature = null;
-  }
-  return output;
-}
-
-function signatureEntries(manifest, artifact, target) {
-  const entries = [];
-  if (typeof manifest.signature === "string") {
-    entries.push({ signature: manifest.signature, document: { ...cloneJson(manifest), signature: null } });
-  }
-  if (isObject(manifest.signature) && typeof manifest.signature[target] === "string") {
-    const copy = cloneJson(manifest);
-    copy.signature = { ...copy.signature, [target]: null };
-    entries.push({ signature: manifest.signature[target], document: copy });
-  }
-  if (typeof artifact.signature === "string") {
-    entries.push({
-      signature: artifact.signature,
-      document: clearArtifactSignature(manifest, target, artifact.artifact),
-    });
-  }
-  return entries;
-}
-function verifyManifestSignature(manifest, artifact, target, options = {}) {
-  const entries = signatureEntries(manifest, artifact, target);
-  if (entries.length === 0) {
-    throw new BinarySignatureError(`Release manifest has no Ed25519 signature for ${artifact?.artifact ?? artifact?.name ?? "binary artifact"}.`);
-  }
-  const key = publicKeyObject(options.publicKey);
-  for (const entry of entries) {
-    const signature = decodeSignature(entry.signature);
-    if (!signature || signature.length !== 64) continue;
-    try {
-      if (verifyEd25519(null, canonicalManifestBytes(entry.document), key, signature)) return true;
-    } catch {
-      // Invalid signatures are rejected after trying all supported record shapes.
-    }
-  }
-  throw new BinarySignatureError(`Ed25519 signature rejected for ${artifact?.artifact ?? artifact?.name ?? "binary artifact"}.`);
-}
-
-export async function verifyArtifact(archive, manifest, artifact, options = {}) {
+export async function verifyArtifact(archive, artifact) {
   const bytes = await toBuffer(archive);
   if (!artifact || typeof artifact.sha256 !== "string" || !/^[0-9a-f]{64}$/i.test(artifact.sha256)) {
     throw new BinaryIntegrityError("Release manifest is missing a valid SHA-256 for the artifact.");
@@ -1502,8 +1289,7 @@ export async function verifyArtifact(archive, manifest, artifact, options = {}) 
       actual: actualHash,
     });
   }
-  verifyManifestSignature(manifest, artifact, artifact.target, options);
-  return { sha256: actualHash, signature_verified: true };
+  return { sha256: actualHash };
 }
 
 async function runCommand(command, args, cwd, capture = false) {
@@ -1685,28 +1471,19 @@ function cachePaths(cacheDir, target) {
 function missingBinary(target, cacheDir, proxy, reason) {
   const details = { target, cache_dir: resolve(cacheDir), proxy: redactProxy(proxy) };
   const suffix = reason ? ` ${reason}` : "";
-  return new MissingBinaryError(`Apostate Chromium ${CHROMIUM_VERSION} for ${target} is not installed in ${details.cache_dir}.${suffix} Run ensureBinary() with a signed release manifest or provide executablePath.`, details);
+  return new MissingBinaryError(`Apostate Chromium ${CHROMIUM_VERSION} for ${target} is not installed in ${details.cache_dir}.${suffix} Run ensureBinary() with a release manifest or provide executablePath.`, details);
 }
 
-function cacheSignature(manifest, artifact, target) {
-  if (typeof artifact?.signature === "string") return artifact.signature;
-  if (typeof manifest?.signature === "string") return manifest.signature;
-  if (isObject(manifest?.signature) && typeof manifest.signature[target] === "string") return manifest.signature[target];
-  return null;
-}
-async function validCachedBinary(paths, target, manifest, artifact, options = {}) {
+async function validCachedBinary(paths, target, artifact) {
   if (!(await isRegularFile(paths.archive)) || !(await isRegularFile(paths.binary)) || !(await isRegularFile(paths.metadata))) return false;
   try {
     const metadata = JSON.parse(await readFile(paths.metadata, "utf8"));
-    const expectedSignature = cacheSignature(manifest, artifact, target);
     if (!isObject(metadata) || metadata.package_version !== PACKAGE_VERSION || metadata.chromium_version !== CHROMIUM_VERSION || metadata.catalogue_version !== CATALOGUE_VERSION) return false;
     if (metadata.target !== target || metadata.platform !== target || metadata.artifact !== expectedArtifactName(target)) return false;
     if (typeof artifact?.sha256 !== "string" || !/^[0-9a-f]{64}$/i.test(artifact.sha256)) return false;
     if (metadata.sha256?.toLowerCase() !== artifact.sha256.toLowerCase()) return false;
-    if (typeof expectedSignature !== "string" || metadata.signature !== expectedSignature) return false;
-    if (metadata.signature_verified !== true || decodeSignature(metadata.signature)?.length !== 64) return false;
     const archive = await readFile(paths.archive);
-    await verifyArtifact(archive, manifest, artifact, options);
+    await verifyArtifact(archive, artifact);
     const actualHash = createHash("sha256").update(await readFile(paths.binary)).digest("hex");
     return typeof metadata.binary_sha256 === "string" && actualHash.toLowerCase() === metadata.binary_sha256.toLowerCase();
   } catch {
@@ -1732,9 +1509,9 @@ export async function ensureBinary(options = {}) {
   const artifact = artifactFromManifest(manifest, target);
   if (!artifact) {
     if (manifestDeclaresUnpublished(manifest)) throw unpublishedArtifactError(manifest);
-    throw missingBinary(target, cacheDir, options.proxy, "No signed artifact is listed in the release manifest.");
+    throw new UnpublishedArtifactError(`Apostate binary for ${target} is not published for this release.`, { target });
   }
-  if (!options.force && await validCachedBinary(paths, target, manifest, artifact, options)) return paths.binary;
+  if (!options.force && await validCachedBinary(paths, target, artifact)) return paths.binary;
   let archive;
   try {
     if (artifact.path || artifact.local_path || artifact.file) {
@@ -1748,7 +1525,7 @@ export async function ensureBinary(options = {}) {
     if (error instanceof ApostateError) throw error;
     throw new BinaryDownloadError(`Unable to obtain ${artifact.artifact}: ${sanitizeErrorMessage(error?.message ?? error, normalizeProxy(options.proxy))}.`, { proxy: redactProxy(options.proxy) });
   }
-  await verifyArtifact(archive, manifest, artifact, options);
+  await verifyArtifact(archive, artifact);
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
   const temporary = await mkdtemp(join(paths.root, ".extract-"));
   try {
@@ -1765,8 +1542,6 @@ export async function ensureBinary(options = {}) {
     await rename(candidate, paths.binary);
     await writeFile(paths.archive, archive, { mode: 0o600 });
     if (target !== "windows-x64") await chmod(paths.binary, 0o755);
-    const signature = cacheSignature(manifest, artifact, target);
-    if (!signature) throw new BinarySignatureError(`Release manifest has no Ed25519 signature for ${artifact.artifact}.`);
     const binarySha256 = createHash("sha256").update(await readFile(paths.binary)).digest("hex");
     await writeFile(paths.metadata, `${stableStringify({
       package_version: PACKAGE_VERSION,
@@ -1777,8 +1552,6 @@ export async function ensureBinary(options = {}) {
       artifact: artifact.artifact,
       sha256: artifact.sha256.toLowerCase(),
       binary_sha256: binarySha256,
-      signature,
-      signature_verified: true,
     })}\n`, { mode: 0o600 });
     return paths.binary;
   } catch (error) {
@@ -1804,10 +1577,9 @@ export async function binaryInfo(options = {}) {
     artifact: artifact?.artifact ?? expectedArtifactName(target),
     artifact_url: artifact?.url ?? artifact?.download_url ?? null,
     sha256: artifact?.sha256 ?? null,
-    signature_present: Boolean(typeof manifest.signature === "string" || (artifact && typeof artifact.signature === "string")),
     cache_dir: resolve(cacheDir),
     binary_path: paths.binary,
-    cache_hit: artifact ? await validCachedBinary(paths, target, manifest, artifact, options) : false,
+    cache_hit: artifact ? await validCachedBinary(paths, target, artifact) : false,
     available: Boolean(artifact),
   };
 }
@@ -1936,7 +1708,11 @@ export async function launch(options = {}) {
   const prepared = await prepareLaunch(options);
   const binary = options.executablePath ?? options.binaryPath ?? await ensureBinary(options);
   const args = buildLaunchArguments(prepared.config);
-  const child = await spawnBrowser(binary, args, options);
+  const env = {
+    ...(options.env ?? {}),
+    ...(prepared.config.timezone ? { TZ: prepared.config.timezone } : {}),
+  };
+  const child = await spawnBrowser(binary, args, { ...options, env });
   return new ApostateBrowser(child, binary, prepared.config, prepared.diagnostics);
 }
 
@@ -1967,3 +1743,4 @@ export const ensure_binary = ensureBinary;
 export const binary_info = binaryInfo;
 export const clear_cache = clearCache;
 export const translateOptions = toCanonicalLaunchConfig;
+export const load_catalogue = loadCatalogue;

@@ -1,6 +1,6 @@
 """Public Python API for the Apostate native Chromium distribution."""
 
-from .binary import BinaryManager, binary_info, canonical_manifest_bytes, clear_cache, ensure_binary, target_platform, verify_manifest
+from .binary import BinaryManager, binary_info, clear_cache, ensure_binary, target_platform
 from .config import (
     CATALOGUE_VERSION,
     CHROMIUM_VERSION,
@@ -23,7 +23,6 @@ from .errors import (
     LaunchError,
     ManifestError,
     ProfileError,
-    SignatureVerificationError,
     UnpublishedArtifactError,
     UnsupportedArchiveError,
 )
@@ -38,7 +37,7 @@ from .launch import (
     launch_persistent_context_async,
 )
 from .profile_validation import load_schema, validate_profile
-from .resolver import DeterministicResolver, ProfileResolution, resolve, resolve_profile
+from .resolver import DeterministicResolver, ProfileResolution, load_catalogue, resolve, resolve_profile
 
 __all__ = [
     "ApostateError",
@@ -61,11 +60,9 @@ __all__ = [
     "PROFILE_SCHEMA_VERSION",
     "ProfileError",
     "ProfileResolution",
-    "SignatureVerificationError",
     "UnpublishedArtifactError",
     "UnsupportedArchiveError",
     "binary_info",
-    "canonical_manifest_bytes",
     "clear_cache",
     "ensure_binary",
     "host_persona",
@@ -75,6 +72,7 @@ __all__ = [
     "launch_context_async",
     "launch_persistent_context",
     "launch_persistent_context_async",
+    "load_catalogue",
     "load_schema",
     "normalize_platform",
     "normalize_result",
@@ -85,5 +83,4 @@ __all__ = [
     "target_platform",
     "translate_options",
     "validate_profile",
-    "verify_manifest",
 ]

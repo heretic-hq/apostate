@@ -11,8 +11,9 @@
 # writing a patch and the wrong one for answering "is the series green on this
 # platform". Driven by hand on the one configured target, it reported green for
 # a series whose Linux-only and Windows-only files had never been compiled at
-# all: on macOS, 20 of the 130 translation units the series touches are not in
-# the build graph, so no per-file run on this host could ever have covered them.
+# all: at 152.0.7977.83, 20 of the 130 translation units the series touches are
+# absent from the macOS build graph, so no per-file run on this host could ever
+# have covered them.
 #
 # Three outcomes per translation unit, and the third is why this script exists:
 #
@@ -196,7 +197,7 @@ say "V1 series gate  target=$TARGET  $total translation units from patches/serie
 #
 # So the gate never asks ninja to build an object the graph has not already
 # named, and a file that produces no object is absent by construction rather
-# than by interpretation. One invocation covers all 130 units.
+# than by interpretation. One invocation covers every unit in the series.
 #
 # Passed with -c rather than on stdin, because stdin is the compdb stream.
 PHASE1_PY="$(cat <<'PY'

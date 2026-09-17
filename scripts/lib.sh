@@ -57,7 +57,18 @@ case "$(uname -s)" in
     unset _git_config_next
     ;;
 esac
-export PATH="$DEPOT_TOOLS:$PATH"
+# PATH is colon-separated, so a Windows path with a drive letter becomes two
+# useless entries: C:/runner/... splits into "C" and "/runner/...", which
+# resolves under the MSYS root and does not exist, and gclient is then not on
+# PATH at all. The backslash form survives this only by accident -- a leading
+# \ resolves against the current drive -- which is why the first Windows run
+# got as far as running gclient. Only the PATH entry is converted: $WORKSPACE,
+# $SRC and $OUT stay in the mixed form that gn, ninja and the native python3
+# accept as arguments.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) export PATH="$(cygpath -u "$DEPOT_TOOLS"):$PATH" ;;
+  *) export PATH="$DEPOT_TOOLS:$PATH" ;;
+esac
 
 # Prefer the build tools the checkout pins through DEPS over depot_tools'
 # wrappers. Their versions are then fixed by CHROMIUM_VERSION rather than

@@ -16,6 +16,17 @@ Reference: resources/fingerprints/raw/m4-max-chrome-20260908T163229Z.json and
 same-version native/candidate named-face diagnostics. Candidate requires
 integrated Skia V1, cache tests and native multi-size comparisons before V3.
 
+This patch deliberately does not carry the upstream change's own test update
+to third_party/skia/tests/FontTest.cpp, which extended the flag-coverage loop
+to the new kDesignSpacePaths bit. That file is in skia's test_lib("tests"),
+inside `if (skia_enable_tools)`, and skia.gni defines skia_enable_tools =
+is_skia_dev_build = is_skia_standalone && !is_official_build. Every target in
+build/args sets is_official_build = true, so no configuration this repository
+produces compiles it -- confirmed absent from the macos-arm64 ninja graph. A
+hunk nothing compiles can never be verified at any tier, and it is additive
+coverage rather than a compile fix: the four files that do build compile
+without it. The upstream test exists if anyone rebases against a dev build.
+
 diff --git a/third_party/blink/renderer/platform/fonts/font_platform_data.cc b/third_party/blink/renderer/platform/fonts/font_platform_data.cc
 --- a/third_party/blink/renderer/platform/fonts/font_platform_data.cc
 +++ b/third_party/blink/renderer/platform/fonts/font_platform_data.cc
@@ -216,131 +227,3 @@ diff --git a/third_party/skia/src/ports/SkFontHost_FreeType.cpp b/third_party/sk
      }
  
      uint32_t flags = fLoadGlyphFlags;
-diff --git a/third_party/skia/tests/FontTest.cpp b/third_party/skia/tests/FontTest.cpp
---- a/third_party/skia/tests/FontTest.cpp
-+++ b/third_party/skia/tests/FontTest.cpp
-@@ -7,11 +7,14 @@
- 
- #include "include/core/SkFont.h"
- #include "include/core/SkFontTypes.h"
-+#include "include/core/SkPath.h"
- #include "include/core/SkRefCnt.h"
- #include "include/core/SkTypeface.h"
- #include "include/core/SkTypes.h"
- #include "include/private/SkTo.h"
- #include "src/core/SkAutoMalloc.h"
-+#include "src/core/SkDescriptor.h"
-+#include "src/core/SkScalerContext.h"
- #include "src/core/SkFontPriv.h"
- #include "src/core/SkPtrRecorder.h"
- #include "src/core/SkReadBuffer.h"
-@@ -21,6 +24,15 @@
- #include "tools/fonts/FontToolUtils.h"
- 
- #include <cstddef>
-+#include <initializer_list>
-+#include <utility>
-+
-+#if defined(SK_TYPEFACE_FACTORY_FREETYPE)
-+#include "include/core/SkFontArguments.h"
-+#include "include/core/SkStream.h"
-+#include "src/ports/SkTypeface_FreeType.h"
-+#include "tools/Resources.h"
-+#endif
- 
- static SkFont serialize_deserialize(const SkFont& font, skiatest::Reporter* reporter) {
-     sk_sp<SkRefCntSet> typefaces = sk_make_sp<SkRefCntSet>();
-@@ -59,7 +71,9 @@
-     kEmbolden              = 1 << 4,
-     kBaselineSnap          = 1 << 5,
- 
--    kAllBits = 0x3F,
-+    kDesignSpacePaths      = 1 << 6,
-+
-+    kAllBits = 0x7F,
- };
- 
- static void apply_flags(SkFont* font, unsigned flags) {
-@@ -69,6 +83,7 @@
-     font->setLinearMetrics(   SkToBool(flags & kLinearMetrics));
-     font->setEmbolden(        SkToBool(flags & kEmbolden));
-     font->setBaselineSnap(    SkToBool(flags & kBaselineSnap));
-+    font->setDesignSpacePaths(SkToBool(flags & kDesignSpacePaths));
- }
- 
- DEF_TEST(Font_flatten, reporter) {
-@@ -83,7 +98,7 @@
-     };
-     const unsigned int flags[] = {
-         kForceAutoHinting, kEmbeddedBitmaps, kSubpixel, kLinearMetrics, kEmbolden, kBaselineSnap,
--        kAllBits,
-+        kDesignSpacePaths, kAllBits,
-     };
-     const sk_sp<SkTypeface> typefaces[] = {
-         nullptr, ToolUtils::SampleUserTypeface()
-@@ -114,3 +129,65 @@
-         }
-     }
- }
-+// A geometry policy must not reuse the native strike descriptor, even when
-+// typeface, size, hinting and transform are otherwise identical.
-+DEF_TEST(Font_design_space_identity, reporter) {
-+    SkFont native(ToolUtils::SampleUserTypeface());
-+    REPORTER_ASSERT(reporter, !native.isDesignSpacePaths());
-+    for (float size : {1.5f, 40.f, 64.f, 128.f}) {
-+        native.setSize(size);
-+        SkFont design = native;
-+        design.setDesignSpacePaths(true);
-+        REPORTER_ASSERT(reporter, design != native);
-+        REPORTER_ASSERT(reporter, serialize_deserialize(design, reporter).isDesignSpacePaths());
-+        SkScalerContextRec nativeRec, designRec;
-+        SkScalerContextEffects nativeEffects, designEffects;
-+        SkScalerContext::MakeRecAndEffectsFromFont(native, &nativeRec, &nativeEffects);
-+        SkScalerContext::MakeRecAndEffectsFromFont(design, &designRec, &designEffects);
-+        REPORTER_ASSERT(reporter, !(nativeRec.fFlags & SkScalerContext::kDesignSpacePaths_Flag));
-+        REPORTER_ASSERT(reporter, designRec.fFlags & SkScalerContext::kDesignSpacePaths_Flag);
-+        const auto nativeDescriptor =
-+            SkScalerContext::DescriptorGivenRecAndEffects(nativeRec, nativeEffects);
-+        const auto designDescriptor =
-+            SkScalerContext::DescriptorGivenRecAndEffects(designRec, designEffects);
-+        REPORTER_ASSERT(reporter, *nativeDescriptor != *designDescriptor);
-+        design.setDesignSpacePaths(false);
-+        REPORTER_ASSERT(reporter, design == native);
-+    }
-+}
-+
-+#if defined(SK_TYPEFACE_FACTORY_FREETYPE)
-+// Synthetic bold keeps the original transform-before-embolden producer.
-+// Compare complete real paths, including cold/warm interleaving and fonts
-+// whose local matrix is nonuniform, skewed, reflected or below FreeType's 1px floor.
-+DEF_TEST(Font_design_space_bold_fallback, reporter) {
-+    auto stream = GetResourceAsStream("fonts/Roboto-Regular.ttf");
-+    REPORTER_ASSERT(reporter, stream);
-+    if (!stream) { return; }
-+    auto typeface = SkTypeface_FreeType::MakeFromStream(std::move(stream), SkFontArguments());
-+    REPORTER_ASSERT(reporter, typeface);
-+    if (!typeface) { return; }
-+    SkFont native(typeface);
-+    native.setEmbolden(true);
-+    native.setHinting(SkFontHinting::kNone);
-+    const SkGlyphID glyph = native.unicharToGlyph('A');
-+    REPORTER_ASSERT(reporter, glyph != 0);
-+    for (float size : {1.5f, 18.f, 40.f, 63.5f, 128.f}) {
-+        for (float scale : {0.005f, 0.5f, 1.f, 2.f, -1.f}) {
-+            for (float skew : {-0.75f, 0.f, 0.5f}) {
-+                native.setSize(size);
-+                native.setScaleX(scale);
-+                native.setSkewX(skew);
-+                SkFont design = native;
-+                design.setDesignSpacePaths(true);
-+                auto expected = native.getPath(glyph);
-+                auto actual = design.getPath(glyph);
-+                REPORTER_ASSERT(reporter, expected.has_value());
-+                REPORTER_ASSERT(reporter, actual == expected);
-+                REPORTER_ASSERT(reporter, native.getPath(glyph) == expected);
-+                REPORTER_ASSERT(reporter, design.getPath(glyph) == expected);
-+            }
-+        }
-+    }
-+}
-+#endif

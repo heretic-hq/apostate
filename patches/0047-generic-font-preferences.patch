@@ -50,13 +50,19 @@ Optima, Papyrus and the rest -- measures identically to the serif generic, so
 the standard font there is Times New Roman. IDS_STANDARD_FONT_FAMILY on Linux is
 also Times New Roman, so the two already agree and there is nothing to select.
 
-Those six identities belong in the profile catalogue behind its existing
-requires gate, not in a code default. A Windows profile that names Consolas on
-a host without Consolas is worse than one that names nothing: the fixed
-generic then falls through to the standard font and renders every <pre> and
-every monospace run in Times New Roman, which is both a layout break and a
-louder tell than the host's own monospace face. Presence has to gate the claim,
-and resources/profiles/dispersion/font_packs.json already gates packs that way.
+Those six identities belong in the profile catalogue rather than in a code
+default, and under the project's font policy they are set unconditionally for a
+Windows persona: the user installs the claimed platform's faces into the
+operating system's own font directories, and the browser assumes that has been
+done rather than checking for the files.
+
+The failure mode if they have not is worth knowing, because it is quiet. A
+Windows profile naming Consolas on a host without Consolas does not fall back
+to the host's monospace face -- the fixed generic falls through to the standard
+font, so every <pre> and every monospace run renders in Times New Roman, which
+is a visible layout break as well as a tell. That is an argument for telling
+the user which faces a persona needs, which the documentation does, and not for
+the browser second-guessing whether they did it.
 
 Primary source at Chromium 79460ebecaa5625e57a5fb679a735659e73dc687:
 - chrome/app/resources/locale_settings_{mac,win,linux}.grd: the preferred

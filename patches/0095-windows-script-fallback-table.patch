@@ -35,15 +35,88 @@ fonts.metrics, 76 Latin family names), so there is no captured non-Latin
 advance to compare a chosen family against. That is precisely why the table is
 copied rather than derived: the source is the control.
 
-What remains true afterwards: 28 of the 74 entries name at least one family
-the Windows font packs in resources/profiles/dispersion/font_packs.json can
-provision, which is the CJK group, the Times New Roman scripts (Latin, Greek,
-Cyrillic), Thai, Arabic and the Segoe UI and Segoe UI Symbol scripts. The
-other 46 name families no pack carries -- Nirmala UI, Segoe UI Historic,
-Leelawadee UI, David, Sylfaen, Gadugi, Mongolian Baiti and the rest -- so on a
-host without those files those scripts keep the host's Fontconfig fallback, as
-they did before this patch. Provisioning the files through
-fonts.provisioned_directory is what closes them; no source change can.
+What remains true afterwards: 27 of the 74 entries name at least one family the
+Windows font packs in resources/profiles/dispersion/font_packs.json name,
+drawing on 11 distinct family names. Those are the CJK group, the
+Times New Roman scripts (Latin, Greek, Cyrillic), Thai, Arabic, and the Segoe
+UI and Segoe UI Symbol scripts. The other 47 name families no pack carries --
+Nirmala UI, Segoe UI Historic, Leelawadee UI, David, Sylfaen, Gadugi, Mongolian
+Baiti and the rest -- so on a host without those files those scripts keep the
+host's Fontconfig fallback, as they did before this patch.
+
+What closes those 47 entries is the font files being installed on the host, and
+no source change substitutes for them. The project's policy is that the user
+installs the claimed platform's faces into the operating system's own font
+directories and the browser assumes that has been done rather than checking for
+it, so a script whose Windows families the host lacks keeps the host's
+Fontconfig answer. That is a setup step the user owns, not a defect in this
+function.
+
+Combined with the enumeration check above, the practical effect on a Windows
+persona is worth naming rather than leaving to be inferred: 11 of the 75
+distinct candidate names survive both the pack and the filter, so for most
+scripts the walk skips every candidate and character fallback stays host-driven
+rather than claimed-platform-driven. That is the subtractive bound applied to
+fallback, not a defect, and it is the same prerequisite as everything else here
+-- it becomes claimed-platform-driven when the pack carries the families and
+the files exist.
+
+Two spellings in the copied table are worth naming so they are not read as
+transcription errors. Upstream writes Simplified Han's fourth candidate as
+"simsun" in lower case, which the pack spells SimSun; family comparison here
+and in the enumeration predicate is ASCII-case-insensitive, so that one
+matches. Upstream writes Traditional Han's fourth candidate as "pmingli",
+which is neither the pack's MingLiU nor the real Windows family PMingLiU, so
+that candidate is unreachable here. It should be unreachable on Windows too,
+because that path resolves a candidate through an exact family-name lookup and
+"pmingli" is not a name any face carries -- but that is an inference about a
+platform this session cannot run, not a measurement, and it is stated as one
+so a reader can check it rather than inherit it. Either way, correcting the
+spelling here would be authoring a policy rather than copying one, which is the
+thing this patch exists not to do.
+
+The failure paths matter as much as the success path, so they are explicit.
+Every way a candidate can be rejected -- filtered by the profile, absent,
+substituted by Fontconfig under a different name, or present but not covering
+the character -- continues or breaks out of the loop, and control then reaches
+the pre-existing FontCache::GetFontForCharacter path unchanged. A candidate
+list that is entirely filtered therefore behaves exactly as this function did
+before patch 0044: straight to Fontconfig. FontCache::GetLastResortFallbackFont
+is a different function and is not touched, filtered or consulted here. Nothing
+in this patch can return nullptr where upstream would have returned a face, so
+it cannot produce tofu, which would be both a visible page break and a louder
+tell than the enumeration mismatch the filter check closes.
+
+That reasoning is control flow, not a measurement, and the distinction should
+be recorded rather than blurred. The no-tofu evidence that exists in this wave
+is macOS: an absent family rendering Latin, Han, emoji and Hebrew produced ink
+in every case through the untouched CoreText path, which never consults a named
+candidate table. It does not transfer to this file. The code path that can now
+produce an empty candidate list is the Linux target under a Windows persona,
+which nothing in this session can run and which has never been compiled, so
+"cannot produce tofu" is an argument about this function's branches and is
+unverified at runtime.
+
+And the enumeration check moves a tell rather than removing one. Before it,
+enumeration and measurement could disagree, which is a contradiction no machine
+produces. After it they agree, and a Han run in a persona whose pack lacks the
+CJK families is measured with the host's family instead of the claimed
+platform's -- a machine that renders Han slightly wrong for its OS. The second
+is strictly better because it is a difference rather than an impossibility, but
+the surface is only closed when the pack carries the families, which is the same
+prerequisite patch 0090 already has.
+
+One coherence check is added that 0044 did not need. Patch 0090 filters font
+enumeration, CSS family matching and src:local() against the profile's
+allowlist, but it does not filter FontCache::PlatformFallbackFontForCharacter,
+which asks FontCache directly. Widening the table from one script to 74 widens
+that hole with it: a persona whose pack omits Microsoft YaHei, running on a
+host that has the file, would report the family absent to document.fonts and
+then measure a Han run with it, which is one launch describing a machine that
+cannot exist. So a candidate the profile declares un-enumerable is skipped
+here through the same Profile::FontFamilyEnumerable predicate 0090 added, and
+the walk continues to the next candidate. This makes 0095 depend on 0090 and
+it must stay sequenced after it.
 
 No font file, fontconfig configuration, profile field, schema, switch or
 JavaScript accessor is touched. Without a Windows profile
@@ -55,6 +128,8 @@ Primary source at Chromium 79460ebecaa5625e57a5fb679a735659e73dc687:
   table), GetScript (the unassigned/common/inherited recovery).
 - platform/text/layout_locale.cc: LocaleForHan, GetScriptForHan.
 Paths above are under third_party/blink/renderer/.
+Depends on patch 0090 for Profile::filters_font_enumeration and
+Profile::FontFamilyEnumerable.
 
 Compile-unverified: this cannot be built in this session. The generated table
 was extracted and compiled standalone with clang++ -std=c++20 -Wall -Wextra
@@ -82,7 +157,7 @@ diff --git a/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
  #include "third_party/blink/renderer/platform/text/layout_locale.h"
  #include "third_party/skia/include/core/SkTypeface.h"
  #include "ui/gfx/font_fallback_linux.h"
-@@ -42,24 +44,256 @@
+@@ -42,24 +44,268 @@
  
  namespace {
  
@@ -348,10 +423,22 @@ diff --git a/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
 +  return {};
 +}
 +
++// A family the profile declares un-enumerable must not be reachable through
++// character fallback either. Patch 0090 filters enumeration, CSS family
++// matching and src:local(), but not this path, which asks FontCache directly.
++// Without this check a persona whose pack omits Microsoft YaHei, on a host
++// that has it, reports the family absent to document.fonts and then measures a
++// Han run with it -- one launch describing a machine that cannot exist.
++bool FamilyIsEnumerable(const base::apostate::Profile* profile,
++                        const char* family) {
++  return !profile || !profile->filters_font_enumeration() ||
++         profile->FontFamilyEnumerable(family);
++}
++
  bool TypefaceHasFamily(SkTypeface* face, const char* family) {
    // Fontconfig can substitute a different family for an absent candidate.
    // Check actual localized names before treating it as an available face.
-@@ -135,25 +369,21 @@
+@@ -135,25 +381,25 @@
        return font_data;
    }
  
@@ -376,12 +463,16 @@ diff --git a/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
 +  // Runs only after the requested face and the standard-style fallback have
 +  // both failed to cover the character, which is the same point at which
 +  // Windows consults its script table.
++  const auto* fallback_profile = base::apostate::Profile::Get();
 +  for (const char* family : WindowsFallbackFamilies(font_description, c)) {
++    if (!FamilyIsEnumerable(fallback_profile, family)) {
++      continue;
+     }
 +    const FontPlatformData* data = GetFontPlatformData(
 +        font_description, FontFaceCreationParams(AtomicString(family)));
 +    if (!data || !TypefaceHasFamily(data->Typeface(), family)) {
 +      continue;
-     }
++    }
 +    if (data->FontContainsCharacter(c)) {
 +      return FontDataFromFontPlatformData(data);
 +    }

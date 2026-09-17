@@ -1,0 +1,284 @@
+Subject: fonts: consult the allowlist for the family the platform will match
+
+Patch 0090 tests a page's family name against the profile's enumeration
+allowlist exactly as written. On Windows that is the wrong name to test, because
+Chromium resolves some family names by stripping a recognised suffix and
+matching the base family instead. A host with Arial answers "present" for
+"Arial Narrow" whether or not a narrow face is installed, and the same holds for
+twenty other suffixes: twelve weight names in TypefacesHasWeightSuffix and nine
+stretch names in TypefacesHasStretchSuffix, both in
+win/font_cache_skia_win.cc and both reached from CreateFontPlatformData. So an
+allowlist naming Arial and not Arial Narrow made 0090 hide a family every real
+Windows machine with Arial reports, which is a machine that cannot exist.
+
+The same behaviour exists on Linux and is ours: WindowsStretchSuffix in
+skia/font_cache_skia.cc emulates the stretch table for a Windows persona,
+guarded on the profile's claimed platform. There is no weight emulation there,
+so this mirrors only what is actually emulated. macOS does none of it, and that
+is not an omission: CoreText enumerates "Avenir Next" and "Avenir Next
+Condensed" as separate families, so hiding one while showing the other is a
+claim a Mac can make, and stripping there would decline to hide a family the
+profile legitimately excluded.
+
+Fixing this in the catalogue was considered and rejected. Mirroring twenty-one
+suffixes per family in data multiplies the non-macOS allowlists by twenty-two
+and reopens the hole every time someone adds a family and forgets to add the
+variants. It is a code-shaped problem, and the code-shaped fix is a fixed table
+consulted once.
+
+So the predicate moves to FontCache::ProfileHidesFamily and gains the strip:
+test the name as written, and if that fails, strip one recognised suffix and
+test the base. Weight is tried first and precludes stretch, one level only,
+because that is the order and the depth of the else-if chain being mirrored.
+The suffix strings are duplicated here rather than exported from the platform
+font caches, which keeps the matchers themselves untouched; a suffix added
+upstream and missed here can only make this filter hide a family it should have
+shown, never show one it should have hidden.
+
+Putting it on FontCache also consolidates 0090. The three renderer routes each
+carried their own copy of the profile lookup; now they call one function and the
+profile is reached from one file in Blink. That is not tidiness. A filter
+applied to document.fonts.check() but not to canvas measurement has the two
+contradict each other, and the only way to be sure they agree is for there to be
+one implementation to disagree with.
+
+This stays subtractive, and the suffix strip does not weaken that. Stripping
+decides which allowlist entry to consult; the platform matcher still runs
+afterwards and still has to find a face. A permissive decision here can only
+decline to hide a family, never make an absent one resolve. That is also why it
+cannot introduce a disagreement between routes: both pass the same filter and
+then reach the same matcher.
+
+It satisfies the base-versus-suffix coherence rule by construction rather than
+by catalogue discipline, and in one direction only. A suffixed name can pass
+only by having an allowed base, so an allowed base admits every variant the
+platform resolves by stripping, and a variant can never be allowed while its
+base is hidden.
+
+queryLocalFonts() is unchanged and needs no strip. Its browser-side filter works
+on the platform's enumeration table, whose entries are families that really are
+installed, so there is no suffix-derived request to resolve. A Windows host with
+Arial and no narrow face already reports "Arial Narrow" as matchable while not
+listing it among installed families; that is upstream behaviour and not
+something introduced here.
+
+Compile-unverified: this cannot be built in this session.
+
+--- a/third_party/blink/renderer/platform/fonts/font_cache.h
++++ b/third_party/blink/renderer/platform/fonts/font_cache.h
+@@ -130,6 +130,21 @@
+       const FontDescription&,
+       const AtomicString& unique_font_name);
+ 
++  // Whether the profile's font enumeration allowlist hides `family` from the
++  // families a page is allowed to observe.
++  //
++  // The single predicate every page-visible enumeration route consults, so
++  // that they cannot disagree: a filter applied to document.fonts.check() but
++  // not to canvas measurement would have the two contradict each other, which
++  // is a signal no real machine produces. Lives here because the suffix rules
++  // it has to mirror are the platform font caches' own.
++  //
++  // Subtractive only. A true answer declines to look a family up; it never
++  // makes an absent family resolve, because the platform matcher still has to
++  // find a face afterwards. Generic families are the caller's business and are
++  // not recognised here.
++  static bool ProfileHidesFamily(const AtomicString& family);
++
+   static String FirstAvailableOrFirst(const String&);
+ 
+   void AddClient(FontCacheClient*);
+--- a/third_party/blink/renderer/platform/fonts/font_cache.cc
++++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
+@@ -33,13 +33,18 @@
+ 
+ #include <limits>
+ #include <memory>
++#include <string>
++#include <string_view>
+ 
++#include "base/apostate/profile.h"
+ #include "base/byte_size.h"
++#include "base/containers/span.h"
+ #include "base/debug/alias.h"
+ #include "base/feature_list.h"
+ #include "base/notreached.h"
+ #include "base/numerics/safe_conversions.h"
+ #include "base/strings/escape.h"
++#include "base/strings/string_util.h"
+ #include "base/system/sys_info.h"
+ #include "base/timer/elapsed_timer.h"
+ #include "base/trace_event/process_memory_dump.h"
+@@ -82,6 +87,89 @@
+ const char kColorEmojiLocale[] = "und-Zsye";
+ const char kMonoEmojiLocale[] = "und-Zsym";
+ 
++namespace {
++
++// The family-name suffixes Chromium strips before it re-matches the base
++// family, lowercase, mirroring TypefacesHasWeightSuffix and
++// TypefacesHasStretchSuffix in win/font_cache_skia_win.cc and
++// WindowsStretchSuffix in skia/font_cache_skia.cc. Those live in the platform
++// font caches as file-local statics; duplicating the strings here rather than
++// exporting them keeps the platform matchers untouched, and a suffix added
++// upstream that is missing here can only make this filter hide a family it
++// should have shown, never show one it should have hidden.
++constexpr std::string_view kWeightSuffixes[] = {
++    " thin",      " extralight", " ultralight", " light",
++    " regular",   " medium",     " demibold",   " semibold",
++    " extrabold", " ultrabold",  " black",      " heavy"};
++constexpr std::string_view kStretchSuffixes[] = {
++    " ultracondensed", " extracondensed", " condensed",
++    " narrow",         " semicondensed",  " semiexpanded",
++    " expanded",       " extraexpanded",  " ultraexpanded"};
++
++// Removes one recognised suffix from an already-lowercased name.
++bool StripOneSuffix(std::string_view& name,
++                    base::span<const std::string_view> suffixes) {
++  for (std::string_view suffix : suffixes) {
++    if (name.size() > suffix.size() && name.ends_with(suffix)) {
++      name.remove_suffix(suffix.size());
++      return true;
++    }
++  }
++  return false;
++}
++
++}  // namespace
++
++// static
++bool FontCache::ProfileHidesFamily(const AtomicString& family) {
++  const base::apostate::Profile* profile = base::apostate::Profile::Get();
++  if (!profile || !profile->filters_font_enumeration()) {
++    return false;
++  }
++
++  const std::string lowered = base::ToLowerASCII(family.Utf8());
++  std::string_view name(lowered);
++  if (profile->FontFamilyEnumerable(name)) {
++    return false;
++  }
++
++  // Some family names are resolved by stripping a recognised suffix and
++  // matching the base family instead, so the allowlist has to be consulted
++  // for the name the platform will actually look up. On Windows a host with
++  // Arial reports "Arial Narrow" as present whether or not a narrow face is
++  // installed, and the same holds for twenty other suffixes; an allowlist
++  // naming the base family and not the variants would describe a machine that
++  // cannot exist.
++  //
++  // Weight is tried first and precludes stretch, one level only, because that
++  // is the order and the depth of the else-if chain being mirrored.
++#if BUILDFLAG(IS_WIN)
++  const bool strip_weight = true;
++  const bool strip_stretch = true;
++#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++  // The Linux path emulates only the stretch table, and only for a Windows
++  // persona. There is no weight emulation to mirror.
++  const bool strip_weight = false;
++  const bool strip_stretch =
++      profile->ua_platform() && *profile->ua_platform() == "Windows";
++#else
++  // CoreText does no suffix stripping. A Mac enumerates "Avenir Next" and
++  // "Avenir Next Condensed" as separate families, so hiding one while showing
++  // the other is a claim a Mac can make, and stripping here would decline to
++  // hide a family the profile legitimately excluded.
++  const bool strip_weight = false;
++  const bool strip_stretch = false;
++#endif
++
++  if (strip_weight && StripOneSuffix(name, kWeightSuffixes)) {
++    return !profile->FontFamilyEnumerable(name);
++  }
++  if (strip_stretch && StripOneSuffix(name, kStretchSuffixes)) {
++    return !profile->FontFamilyEnumerable(name);
++  }
++  return true;
++}
++
+ #if BUILDFLAG(IS_ANDROID)
+ extern const char kNotoColorEmojiCompat[] = "Noto Color Emoji Compat";
+ #endif
+--- a/third_party/blink/renderer/platform/fonts/font_fallback_list.cc
++++ b/third_party/blink/renderer/platform/fonts/font_fallback_list.cc
+@@ -28,7 +28,6 @@
+ 
+ #include "third_party/blink/renderer/platform/fonts/font_fallback_list.h"
+ 
+-#include "base/apostate/profile.h"
+ #include "base/timer/elapsed_timer.h"
+ #include "third_party/blink/renderer/platform/font_family_names.h"
+ #include "third_party/blink/renderer/platform/fonts/alternate_font_family.h"
+@@ -66,11 +65,7 @@
+   if (family.FamilyIsGeneric()) {
+     return false;
+   }
+-  const base::apostate::Profile* profile = base::apostate::Profile::Get();
+-  if (!profile || !profile->filters_font_enumeration()) {
+-    return false;
+-  }
+-  return !profile->FontFamilyEnumerable(family.FamilyName().Utf8());
++  return FontCache::ProfileHidesFamily(family.FamilyName());
+ }
+ 
+ }  // namespace
+--- a/third_party/blink/renderer/core/css/css_font_selector_base.cc
++++ b/third_party/blink/renderer/core/css/css_font_selector_base.cc
+@@ -4,7 +4,6 @@
+ 
+ #include "third_party/blink/renderer/core/css/css_font_selector_base.h"
+ 
+-#include "base/apostate/profile.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/renderer/core/css/css_segmented_font_face.h"
+ #include "third_party/blink/renderer/core/frame/web_feature.h"
+@@ -36,12 +35,9 @@
+   //
+   // The page's own spelling is what is tested, not the settings-resolved name:
+   // a probe asks about the family it named.
+-  if (!passed_family.FamilyIsGeneric()) {
+-    const base::apostate::Profile* profile = base::apostate::Profile::Get();
+-    if (profile && profile->filters_font_enumeration() &&
+-        !profile->FontFamilyEnumerable(passed_family.FamilyName().Utf8())) {
+-      return false;
+-    }
++  if (!passed_family.FamilyIsGeneric() &&
++      FontCache::ProfileHidesFamily(passed_family.FamilyName())) {
++    return false;
+   }
+ 
+   AtomicString family = FamilyNameFromSettings(font_description, passed_family);
+--- a/third_party/blink/renderer/core/css/local_font_face_source.cc
++++ b/third_party/blink/renderer/core/css/local_font_face_source.cc
+@@ -6,7 +6,6 @@
+ 
+ #include <string_view>
+ 
+-#include "base/apostate/profile.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/renderer/core/css/css_custom_font_data.h"
+@@ -38,11 +37,7 @@
+ // name still gets it, and a face belonging to a hidden family does not.
+ bool ProfileHidesResolvedFace(const AtomicString& font_name,
+                               const SkTypeface* typeface) {
+-  const base::apostate::Profile* profile = base::apostate::Profile::Get();
+-  if (!profile || !profile->filters_font_enumeration()) {
+-    return false;
+-  }
+-  if (profile->FontFamilyEnumerable(font_name.Utf8())) {
++  if (!FontCache::ProfileHidesFamily(font_name)) {
+     return false;
+   }
+   if (!typeface) {
+@@ -50,8 +45,8 @@
+   }
+   SkString family;
+   typeface->getFamilyName(&family);
+-  return !profile->FontFamilyEnumerable(
+-      std::string_view(family.c_str(), family.size()));
++  return FontCache::ProfileHidesFamily(
++      AtomicString::FromUtf8(std::string_view(family.c_str(), family.size())));
+ }
+ 
+ }  // namespace

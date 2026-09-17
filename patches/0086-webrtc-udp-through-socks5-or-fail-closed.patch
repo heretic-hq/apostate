@@ -148,8 +148,12 @@ behaviour above. `direct` forces direct UDP even under a proxy, which is an
 explicit acceptance that a peer will read this host's real address, and exists
 because a user with an HTTP proxy who needs a call to work should be able to
 have one knowingly. `block` never creates a WebRTC UDP socket at all, with or
-without a proxy. An unrecognised value is treated as `block` rather than as the
-permissive default. The switch is read in the network service, so it joins
+without a proxy. Each of the two values is compared for by name. A value that
+is neither is not quietly rounded to one of them: it is named in an error log
+alongside the two spellings that are accepted, and refused. The two values sit
+on either side of the automatic default, so guessing which one a misspelling
+meant would either leak an address or break a call. The switch is read in the
+network service, so it joins
 `kCommonSwitchNames` in `AppendExtraCommandLineSwitches` next to the switch
 patch 0073 added. It adds no page-readable value: both outcomes it selects are
 states stock Chrome reaches, `direct` being its default and the absence of UDP
@@ -1744,7 +1748,7 @@ Compile-unverified: this cannot be built in this session.
  #include "services/network/proxy_resolving_client_socket_factory.h"
  #include "services/network/public/cpp/p2p_param_traits.h"
  #include "third_party/webrtc/media/base/rtp_utils.h"
-@@ -56,6 +68,168 @@
+@@ -56,6 +68,177 @@
  const size_t kMinRtcpHeaderLength = 8;
  const size_t kDtlsRecordHeaderLength = 13;
  
@@ -1825,8 +1829,17 @@ Compile-unverified: this cannot be built in this session.
 +    if (mode == kWebRtcUdpDirectValue) {
 +      return UdpEgress::kDirect;
 +    }
-+    // Includes an unrecognised value, which is refused rather than silently
-+    // treated as the permissive default.
++    if (mode == kWebRtcUdpBlockValue) {
++      return UdpEgress::kBlocked;
++    }
++    // A misspelling has to say so rather than silently select a behaviour. The
++    // two accepted values sit on either side of the automatic default, so
++    // guessing which one was meant would either leak an address or break a
++    // call, and neither is a guess worth making on the user's behalf.
++    LOG(ERROR) << "Unrecognised --" << kWebRtcUdpSwitch << " value \"" << mode
++               << "\"; accepted values are \"" << kWebRtcUdpDirectValue
++               << "\" and \"" << kWebRtcUdpBlockValue
++               << "\", or omit the switch for automatic. Refusing WebRTC UDP.";
 +    return UdpEgress::kBlocked;
 +  }
 +
@@ -1913,7 +1926,7 @@ Compile-unverified: this cannot be built in this session.
  bool IsDtlsPacket(base::span<const uint8_t> data) {
    return data.size() >= kDtlsRecordHeaderLength &&
           (data[0] > 19 && data[0] < 64);
-@@ -440,11 +614,49 @@
+@@ -440,11 +623,49 @@
      LOG(ERROR) << "Too many sockets created";
      return;
    }

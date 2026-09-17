@@ -41,8 +41,9 @@ that probes font presence by width.
 What the control does not settle: on a host that does have a real narrow face
 installed, Fontconfig returns it for the condensed request and the advances
 differ from the reference, where Windows had nothing narrower to hand back. That
-is an outcome of which font files are provisioned, not a question about this
-policy.
+is an outcome of which font files the host carries, not a question about this
+policy, and it resolves the same way every other font question does -- the user
+installs the claimed platform's set.
 
 V1 compilation and V3 checks remain required, including a real narrow family,
 style/stretch requests and src:local() exclusion. No font files, fontconfig,

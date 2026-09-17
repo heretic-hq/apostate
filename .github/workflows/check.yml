@@ -116,6 +116,15 @@ jobs:
               json.loads(path.read_text(encoding="utf-8"))
               print(f"valid JSON: {path}")
           PY
+          # The pip and npm packages ship copies of config/profile.schema.json
+          # and resources/profiles/catalogue.json so an installed package works
+          # with no checkout. Nothing kept those copies in step, and they were
+          # hand-copied, which went stale twice in one afternoon: the catalogue
+          # went from nine axes to twelve and both packaged copies stayed at
+          # nine, so an installed package validated the new axes against the old
+          # bundled catalogue and CI stayed green. This writes nothing, names
+          # the stale paths, and costs under a second.
+          python3 scripts/sync-packages.py --check
 
   catalogue:
     name: catalogue and resolver validation

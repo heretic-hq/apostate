@@ -38,8 +38,8 @@
     },
     "corpus_coverage": {
       "type": "string",
-      "enum": ["present", "derivable", "absent"],
-      "description": "present: a corpus field holds it directly. derivable: computable from other corpus fields. absent: no ground truth — the row cannot reach V3."
+      "enum": ["present", "derivable", "partial", "absent"],
+      "description": "present: a corpus field holds it directly. derivable: computable from other corpus fields. partial: the collector captures part of the surface and a detector can read more of it, so the row can reach V3 only for the measured part — recorded separately from 'present' because a reference existing is not the same fact as the capture using it, and collapsing the two is how a row gets closed on a probe that could not see its own surface. absent: no ground truth — the row cannot reach V3."
     },
     "process": {
       "type": "string",

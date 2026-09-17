@@ -40,6 +40,45 @@ git -C "$DEPOT_TOOLS" checkout -q --detach "$DEPOT_TOOLS_REVISION"
 actual="$(git -C "$DEPOT_TOOLS" rev-parse HEAD)"
 [ "$actual" = "$DEPOT_TOOLS_REVISION" ] || die "depot_tools is at $actual, expected $DEPOT_TOOLS_REVISION"
 
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    # A fresh depot_tools clone has no git.bat. depot_tools ships its Windows
+    # tool bundle as CIPD packages and generates the .bat entry points from
+    # templates in bootstrap/, and gclient_scm hardcodes git_exe = "git.bat" on
+    # win32 -- so every git operation inside a sync needs a file that only
+    # bootstrap/win_tools.bat creates. Without it the sync dies inside
+    # git_cache.GetCachePath with WinError 2, because that function catches
+    # CalledProcessError but not a missing executable.
+    #
+    # Invoking gclient through the POSIX entry point is what exposes this. The
+    # .bat entry points call win_tools.bat themselves; the shell scripts only
+    # bootstrap .cipd_bin, which is why vpython3 works and git.bat does not.
+    # DEPOT_TOOLS_UPDATE=0 is not implicated: it suppresses the self-update of
+    # the depot_tools checkout, and the tool bundle still has to exist.
+    #
+    # This does not compromise the pin. win_tools.bat installs exactly the
+    # versions in bootstrap/manifest.txt, which is a tracked file at
+    # $DEPOT_TOOLS_REVISION, and it leaves the checkout's own revision alone.
+    # It will not touch global git config either: those writes are gated on
+    # depot-tools.allowGlobalGitConfig, which we never set.
+    #
+    # cmd is given //c rather than /c: MSYS rewrites a lone /c into a Windows
+    # path, and doubling the slash is the documented way to opt out for one
+    # argument. The script path keeps backslashes so it is passed through.
+    say "materialising the depot_tools windows tool bundle"
+    ( cd "$DEPOT_TOOLS" && cmd //c "bootstrap\\win_tools.bat" ) ||
+      die "bootstrap/win_tools.bat failed; depot_tools cannot run git on Windows without it"
+    # Only the two files depot_tools generates. vpython3.bat and cipd.bat are
+    # tracked, so a fresh clone already has them and checking them would assert
+    # nothing; git.bat and python3.bat are in depot_tools' own .gitignore
+    # because bootstrap.py writes them.
+    for stub in git.bat python3.bat; do
+      [ -f "$DEPOT_TOOLS/$stub" ] ||
+        die "bootstrap/win_tools.bat reported success but did not create $stub. depot_tools is half-installed; delete $DEPOT_TOOLS and re-run."
+    done
+    ;;
+esac
+
 # Assert that PATH resolves gclient, not merely that the file exists. A broken
 # PATH entry is invisible to an existence check: the Windows measurement had a
 # perfectly good $DEPOT_TOOLS/gclient on disk and still died 25 minutes into

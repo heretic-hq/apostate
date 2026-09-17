@@ -99,6 +99,18 @@ refused instead of guessed at:
     without UDP support answers: the association fails, `OnEgressReady` calls
     `OnError`, the socket does not exist and again no UDP candidate is emitted.
 
+  - `--use-system-proxy-resolver`, which is the only way to get a resolution
+    service whose static configuration cannot be read: no socket. The proxy
+    then comes from OS settings that are resolved per URL and a datagram has
+    no URL, so this is a configuration whose egress genuinely cannot be
+    determined rather than one that can be shown to be direct. Every launch
+    without that switch builds a `ConfiguredProxyResolutionService` and takes
+    one of the branches above.
+
+Each refusal is logged with its reason and with the three ways out of it,
+because a user has to be able to tell a deliberate refusal apart from WebRTC
+being broken.
+
 Bypass rules are deliberately not consulted. They would send some traffic
 direct, and a datagram has no host to test against them, so the media plane
 takes the proxy unconditionally. That is the safe direction of the two.
@@ -1732,7 +1744,7 @@ Compile-unverified: this cannot be built in this session.
  #include "services/network/proxy_resolving_client_socket_factory.h"
  #include "services/network/public/cpp/p2p_param_traits.h"
  #include "third_party/webrtc/media/base/rtp_utils.h"
-@@ -56,6 +68,164 @@
+@@ -56,6 +68,168 @@
  const size_t kMinRtcpHeaderLength = 8;
  const size_t kDtlsRecordHeaderLength = 13;
  
@@ -1821,8 +1833,12 @@ Compile-unverified: this cannot be built in this session.
 +  net::ConfiguredProxyResolutionService* configured = nullptr;
 +  if (!context->proxy_resolution_service()
 +           ->CastToConfiguredProxyResolutionService(&configured)) {
-+    // A resolution service whose configuration cannot be read cannot be shown
-+    // to be direct.
++    // The only implementations that fail this cast are the Windows and Mac
++    // system proxy resolution services, and they are built only when
++    // --use-system-proxy-resolver was passed. In that configuration the proxy
++    // comes from OS settings that are resolved per URL, and a datagram has no
++    // URL, so this is a configuration whose egress genuinely cannot be
++    // determined here rather than one that can be shown to be direct.
 +    return UdpEgress::kBlocked;
 +  }
 +  const std::optional<net::ProxyConfigWithAnnotation>& config =
@@ -1897,7 +1913,7 @@ Compile-unverified: this cannot be built in this session.
  bool IsDtlsPacket(base::span<const uint8_t> data) {
    return data.size() >= kDtlsRecordHeaderLength &&
           (data[0] > 19 && data[0] < 64);
-@@ -440,11 +610,42 @@
+@@ -440,11 +614,49 @@
      LOG(ERROR) << "Too many sockets created";
      return;
    }
@@ -1927,7 +1943,14 @@ Compile-unverified: this cannot be built in this session.
 +        // No socket, so no UDP host, server-reflexive or relay candidate. A
 +        // call that does not connect is worse for the user than one that does,
 +        // and better than one whose packets carry this host's address to the
-+        // far end while the SDP claims another.
++        // far end while the SDP claims another. Logged because the user has to
++        // be able to tell this apart from WebRTC being broken.
++        LOG(ERROR) << "WebRTC UDP refused: the configured proxy cannot relay "
++                      "a datagram, so no UDP ICE candidate will be produced. "
++                      "Use a single SOCKS5 proxy, or supply a TURN server "
++                      "reachable over TCP or TLS, or pass "
++                      "--fingerprint-webrtc-udp=direct to accept that a remote "
++                      "peer will see this host's real address.";
 +        return;
 +    }
 +  }

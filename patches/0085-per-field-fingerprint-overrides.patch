@@ -61,17 +61,19 @@ map stays as the policy set it, which is correct rather than convenient: all
 four catalogue locale policies carry the same map today, and a locale that does
 not match the physical layout is an ordinary thing on a real machine.
 
---fingerprint=off joins --fingerprint=host as a spelling of host pass-through,
-along with false, 0, disable and disabled, case-insensitively. That is interface
-parity, and it is also the reading a user expects: composing an identity from
-the SHA-256 of the word "off" is the wrong answer to --fingerprint=off. Under
-any of those spellings nothing is composed, so there is no profile for a
-persona, a pinned anchor or a per-field override to land on, and combining them
-refuses the launch instead. Refusing rather than ignoring is the whole point of
-this patch: an operator who mistypes a switch and is not told runs an entire
-session believing a field was spoofed when it was their own hardware, and that
-is indistinguishable from success until a site has already clustered the real
-device. --fingerprint-explain still works with host mode.
+Host pass-through interacts with all of this, and the interaction is settled
+here. The reserved --fingerprint spellings -- host, off, false, 0, disable,
+disabled, case-insensitively -- are decided in seed.cc, which patch 0081 owns;
+this patch adds no host-value handling of its own and its diff touches only
+compose.h and compose.cc. What it adds is the consequence: under any of those
+spellings nothing is composed, so there is no profile for a persona, a pinned
+anchor or a per-field override to land on, and combining them refuses the
+launch instead of half-applying. Refusing rather than ignoring is the whole
+point of this patch. An operator who mistypes a switch and is not told runs an
+entire session believing a field was spoofed when it was their own hardware,
+and that is indistinguishable from success until a site has already clustered
+the real device. --fingerprint-explain still works with host mode, which is why
+it is not in the refused set.
 
 Every refusal writes to stderr and exits non-zero. An override that is honoured
 but is not one of the catalogue's buckets is honoured and reported: the explain

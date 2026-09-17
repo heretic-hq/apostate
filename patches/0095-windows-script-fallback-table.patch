@@ -56,7 +56,13 @@ Primary source at Chromium 79460ebecaa5625e57a5fb679a735659e73dc687:
 - platform/text/layout_locale.cc: LocaleForHan, GetScriptForHan.
 Paths above are under third_party/blink/renderer/.
 
-Ledger: fonts.fallback-fonts.
+Compile-unverified: this cannot be built in this session. The generated table
+was extracted and compiled standalone with clang++ -std=c++20 -Wall -Wextra
+-Wglobal-constructors, which passed with no warnings and confirmed the entries
+are constant-initialized, but that is the table's shape and not this
+translation unit.
+
+Ledger: fonts.fallback-font.
 diff --git a/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc b/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
 --- a/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
 +++ b/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc

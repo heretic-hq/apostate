@@ -26,11 +26,13 @@ permission at all, then ask for the permission it was going to ask for anyway,
 and learn that hardware the browser advertised does not exist. Enumeration and
 capture are the same surface to a detector; only the number of steps differs.
 
-That the plumbing works at this layer was also measured rather than assumed:
-the same binary run with --use-fake-device-for-media-stream=device-count=2
-enumerates two cameras created by a VideoCaptureDeviceFactory, and
-getUserMedia with an exact deviceId opens either of them and delivers frames.
-That is the identical layer this patch adds a device at.
+That getUserMedia can reach a device created at this layer at all was measured
+rather than assumed: the same binary run with
+--use-fake-device-for-media-stream=device-count=2 enumerates two cameras
+created by a VideoCaptureDeviceFactory, and getUserMedia with an exact
+deviceId opens either of them and delivers frames. That is the identical layer
+this patch adds a device at. It establishes that the layer is reachable. It is
+not evidence that this patch works, and nothing below is either.
 
 Where the devices come from now. A camera is added by wrapping the platform
 VideoCaptureDeviceFactory, and a microphone by
@@ -154,6 +156,16 @@ Compile-unverified: this cannot be built in this session. The generator
 measurements above were taken by compiling the frame and sample generators
 standalone with the surrounding Chromium types replaced by plain arrays; the
 generator bodies are the same code.
+
+So the honest description of this patch is written and applying, and nothing
+more. The before-state failure is measured on the shipped binary; the
+after-state is not, because that needs a build. What a page gets from a
+claimed device after this patch has never been observed. The claim to check
+first, once it builds, is the one this patch exists to make: that
+getUserMedia on a profile-claimed camera returns a stream whose getSettings()
+frame size is the size getCapabilities() advertised, and that the same call
+on a profile-claimed microphone returns a stream at 48 kHz mono rather than
+NotReadableError.
 
 Ledger: media.device-counts, media.capture-open.
 --- a/base/apostate/profile.h

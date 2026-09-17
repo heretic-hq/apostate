@@ -57,26 +57,42 @@ no blocking I/O and runs on the startup path. access() carries no blocking-call
 assertion. R_OK|W_OK because the GPU process opens the node read-write, so a
 node it cannot open is not a device it can use.
 
-What happens next is patch 0081's existing policy, unchanged: no anchor in the
-compiled catalogue was captured through SwiftShader, so the draw finds nothing
-servable, says so, and inherits the host. That is honest but not yet coherent --
-the fallback is absent rather than modest -- and it is a catalogue gap, not a
-code one. A swiftshader-backend anchor is constructible from T0 evidence already
-in the tree: resources/fingerprints/raw/stock-linux-20260907T150627Z.json is a
-stock Chromium 152 Linux capture through SwiftShader, with the full parameter
-tables, extension lists and precision values. With that anchor present this
-change selects it and the GPU-less host gets a coherent software identity.
+What happens next was patch 0081's existing policy: no anchor in the compiled
+catalogue was captured through SwiftShader, so the draw finds nothing servable,
+says so, and returns nothing -- which means host inheritance for the whole
+profile. I judged that a catalogue gap rather than a code one and left it alone.
+Patch 0093, immediately after this one in the series, shows that half of it was
+a code gap after all, and keeps every non-GPU axis instead of discarding the
+profile. The remaining half is still data: a swiftshader-backend anchor is
+constructible from T0 evidence already in the tree, since
+resources/fingerprints/raw/stock-linux-20260907T150627Z.json is a stock
+Chromium 152 Linux capture through SwiftShader with the full parameter tables,
+extension lists and precision values. With that anchor present this change
+selects it, and a GPU-less host gets a composed software identity rather than
+an inherited one.
 
-The three fields the report prints now say which inference was made rather than
-asserting the platform default, because after this change the platform default
-is no longer the only one. The explain line reads "swiftshader (no DRM render
-node on this host, not probed)" where it used to read "vulkan (platform
-default, not probed)" on the same machine.
+The report now says which inference was made rather than asserting the platform
+default, because after this change the platform default is no longer the only
+one. On a Linux host with no render node the explain line becomes "swiftshader
+(no DRM render node on this host, not probed)". Measured before the change, on
+this Mac, it reads "metal (platform default, not probed)"; a Linux server with
+no GPU would have read "vulkan (platform default, not probed)" while rendering
+in software, which is the whole bug.
 
-No new switch, no new page-visible value, no change on a host with a GPU: this
-machine still composes macos-metal-apple-850a91233555 headed and headless, and
-the probe confirms the renderer string, the limits and all four readback digests
-are identical before and after.
+No new switch and no new page-visible value. Nothing changes on a host with a
+GPU, and that is structural rather than measured: HostHasNoGpuDevice() compiles
+to `return false` off Linux, and on Linux it returns false as soon as one render
+node opens, so a host with a GPU reaches exactly the branch it reached before.
+Measured before the change on this Mac, every default configuration -- headed,
+--headless=new, composed, and --fingerprint=host -- selects ANGLE/Metal,
+composes macos-metal-apple-850a91233555, and agrees on the renderer string, the
+limit tables and all four readback digests.
+
+Compile-unverified: this cannot be built in this session. What is established is
+that it applies, that the behaviour it changes was measured on the shipped
+binary before it, and that the branch it adds is unreachable on a host with a
+GPU by inspection. Whether it compiles, and what a Linux server composes under
+it, are V1 and V3 and neither has been run.
 
 Ledger: headless.gpu-stack, gpuinfo.gl-renderer, gpu.angle-backend.
 --- a/base/apostate/host_capability.h

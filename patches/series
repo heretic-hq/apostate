@@ -92,3 +92,8 @@
 0092-synthetic-capture-devices-produce-frames.patch
 0095-windows-script-fallback-table.patch
 0096-socks5-auth-netlog-events.patch
+
+# 0084 and 0085 come last because they are authored on top of the compose.cc
+# chain above: 0085 was verified to apply both before and after 0091 and 0093.
+0084-compose-the-profile-at-browser-startup.patch
+0085-per-field-fingerprint-overrides.patch

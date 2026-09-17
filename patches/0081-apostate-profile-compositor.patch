@@ -108,6 +108,22 @@ carries it, and where it outlives the clear-everything a user believes clears
 their identity. The returning-visitor argument for persistence is real, and
 --fingerprint=<seed> serves it without state.
 
+--fingerprint=off, and false, 0, disable and disabled, are accepted here as
+spellings of --fingerprint=host, case-insensitively. `host` stays the canonical
+one. They are in this patch rather than in the switch-surface patch because
+this is the file that decides what a --fingerprint value means, and because
+composing an identity from the SHA-256 of the word "off" is the wrong answer to
+--fingerprint=off -- a user carrying that flag across from another tool would
+otherwise get a silently different device and no error, which is worse than
+either pass-through or a refusal.
+
+An unusable --fingerprint now refuses the launch rather than inheriting the
+host. Empty, longer than 512 bytes, or not printable ASCII used to log a line
+and fall through to the host, which means a typo presented the operator's real
+machine while the browser came up looking fine. That is the failure mode this
+whole codebase exists to prevent, so it exits non-zero with the reason and the
+two ways to fix it.
+
 ResolveSeed is therefore pure: no filesystem, no globals, nothing to undo if
 the process turns out to be a second instance and exits immediately. The only
 remaining use of the user data directory is asking whether a font family was

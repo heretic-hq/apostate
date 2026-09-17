@@ -97,3 +97,10 @@
 # chain above: 0085 was verified to apply both before and after 0091 and 0093.
 0084-compose-the-profile-at-browser-startup.patch
 0085-per-field-fingerprint-overrides.patch
+
+# 0097 needs the whole compose.cc chain ahead of it (0091, 0093, 0085); 0099
+# edits three of 0090's files and needs 0090 ahead of it. Neither depends on
+# the other. 0098 is deliberately unused: the capability audit it was reserved
+# for closed without a patch.
+0097-compose-assumes-font-provisioning.patch
+0099-font-enumeration-suffix-aware-matching.patch

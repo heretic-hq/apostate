@@ -8,7 +8,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # into it. This avoids relying on a hidden Docker network exception.
 source "$REPO_ROOT/scripts/lib.sh"
 
-target="${1:-${TARGET:-$(target_default)}}"
+target="${1:-${APOSTATE_TARGET:-$(target_default)}}"
 case "$target" in
   linux-x64) arch=amd64; sysroot_dir=debian_bullseye_amd64-sysroot ;;
   linux-arm64) arch=arm64; sysroot_dir=debian_bullseye_arm64-sysroot ;;

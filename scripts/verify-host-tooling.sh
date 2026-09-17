@@ -14,7 +14,7 @@
 # Usage: scripts/verify-host-tooling.sh <target>
 set -uo pipefail
 
-target="${1:-${TARGET:-}}"
+target="${1:-${APOSTATE_TARGET:-}}"
 [ -n "$target" ] || { echo "usage: scripts/verify-host-tooling.sh <target>" >&2; exit 2; }
 
 problems=()

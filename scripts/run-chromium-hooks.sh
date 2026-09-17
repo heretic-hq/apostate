@@ -6,7 +6,7 @@ if [ "$(uname -s)" = Linux ] && [ -z "${APOSTATE_BUILD_IMAGE_ID:-}" ]; then
   exec bash "$REPO_ROOT/scripts/in-linux-build-container.sh" scripts/run-chromium-hooks.sh "$@"
 fi
 source "$REPO_ROOT/scripts/lib.sh"
-target="${1:-${TARGET:-$(target_default)}}"
+target="${1:-${APOSTATE_TARGET:-$(target_default)}}"
 case "$target" in
   linux-x64|linux-arm64|macos-arm64|windows-x64) ;;
   *) die "unsupported target: $target" ;;

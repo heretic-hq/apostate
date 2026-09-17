@@ -155,7 +155,7 @@ jobs:
         run: bash scripts/bootstrap.sh
       - name: Fetch pinned Chromium
         shell: bash
-        run: bash scripts/fetch-sources.sh windows-x64
+        run: bash scripts/fetch-sources.sh
       - name: Measure the checkout
         if: ${{ always() }}
         shell: bash

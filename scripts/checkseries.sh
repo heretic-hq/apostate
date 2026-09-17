@@ -255,11 +255,18 @@ print(f"  {records} graph edges read, {mapped}/{len(units)} units produce object
 PY
 )"
 say "phase 1: build-graph membership (ninja -t compdb)"
+COMPDB_ERR="$WORK/compdb.err"
 set +e
-( cd "$OUT" && "$NINJA" -t compdb ) 2>/dev/null | python3 -c "$PHASE1_PY" "$UNITS" > "$MAP"
+( cd "$OUT" && "$NINJA" -t compdb ) 2>"$COMPDB_ERR" | python3 -c "$PHASE1_PY" "$UNITS" > "$MAP"
 phase1=("${PIPESTATUS[@]}")
 set -e
-[ "${phase1[0]}" -eq 0 ] || die "ninja -t compdb failed in $OUT"
+if [ "${phase1[0]}" -ne 0 ]; then
+  # ninja's own message, not a summary of it: a malformed build.ninja names
+  # the file and line, and "compdb failed" alone would send the reader back
+  # here to find that out.
+  cat "$COMPDB_ERR" >&2
+  die "ninja -t compdb failed in $OUT"
+fi
 [ "${phase1[1]}" -eq 0 ] || exit "${phase1[1]}"
 
 # Out-dir-relative spelling of a source path, as ninja itself writes it. Taken

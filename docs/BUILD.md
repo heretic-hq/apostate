@@ -282,6 +282,22 @@ hours later:
 - `<VS>/DIA SDK/bin/amd64/msdia140.dll`, copied unconditionally and located
   through `vswhere`.
 
+Measured on the image: `dbghelp.dll` is absent, so the Debugging Tools feature
+is not installed. `scripts/verify-host-tooling.sh` reports it in about a
+minute, and `.github/workflows/probe-runners.yml` runs that check on the
+smallest instance of each family — instance size changes compute, not image
+contents or the storage figure, so the cheapest runner is equivalent evidence.
+
+If that feature is ever installed by the build rather than supplied by the
+image, pin it. `winsdksetup.exe` behind a "latest SDK" link installs a second
+SDK version under `Windows Kits\10`, and `vs_toolchain.py` autodetection may
+then select it over `win_sdk_version`. That is the same silent-input drift the
+macOS SDK pin exists to prevent, arriving by a different door. Such a step has
+to name the 10.0.26100 installer specifically, record that URL in `build/`
+beside the other pins, and afterwards assert both that
+`Debuggers/x64/dbghelp.dll` exists and that no SDK version other than the
+pinned one appeared under `Windows Kits\10\bin`.
+
 Windows has 130 GB of storage at every instance size, the least of the four
 targets. A complete `macos-arm64` build measures 66 GB — 49 GB checkout, 16 GB
 output, 0.7 GB depot_tools — so 130 GB carries a full build with headroom.

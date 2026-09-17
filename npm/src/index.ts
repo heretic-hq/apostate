@@ -1157,7 +1157,13 @@ function nativeProfilePayload(profile) {
 // profile delivered through --apostate-profile.
 const NATIVE_SELECTION = { "host-inherited": true, "native-composed": true };
 
-function buildLaunchArguments(config, resolution) {
+// `driverOwnsProfile` omits --user-data-dir because both Playwright and
+// Puppeteer take the profile directory as an option and emit the switch
+// themselves; passing it in argv too hands the browser the same switch twice.
+// launchProcess() spawns the binary directly, so there it must be emitted.
+// The Python package has always done this via `_native_args(persistent=True)`;
+// this branch was the inconsistency between the two implementations.
+function buildLaunchArguments(config, resolution, { driverOwnsProfile = false } = {}) {
   checkFingerprintSwitches(config.args);
   const args = config.args.filter((arg) => !arg.startsWith("--apostate-profile=") && !arg.startsWith("--proxy-server=") && !arg.startsWith("--user-data-dir="));
   if (NATIVE_SELECTION[resolution?.profileId] === true && !hasSwitch(args, "--fingerprint")) {
@@ -1182,7 +1188,7 @@ function buildLaunchArguments(config, resolution) {
     args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
   }
   if (config.headless && !hasSwitch(args, "--headless")) args.push("--headless=new");
-  if (config.user_data_dir !== null) args.push(`--user-data-dir=${config.user_data_dir}`);
+  if (config.user_data_dir !== null && !driverOwnsProfile) args.push(`--user-data-dir=${config.user_data_dir}`);
   if (config.proxy !== null) args.push(`--proxy-server=${proxyEndpoint(config.proxy)}`);
   if (config.locale !== null && !hasSwitch(args, "--lang")) args.push(`--lang=${config.locale.split(",")[0]}`);
   return args;
@@ -1898,17 +1904,42 @@ export class ApostateProcess {
   }
 }
 
-// Drivers in preference order. Patchright is the hardened Playwright fork this
-// API was shaped against; puppeteer-core is last because it ships no browser of
-// its own, which is exactly what is wanted here.
-const DRIVER_MODULES = ["patchright", "playwright", "playwright-core", "puppeteer", "puppeteer-core"];
+// Driver preference order, Patchright first. Stated at the strength it has been
+// measured to: the browser owns what a page can observe about the browser, and a
+// driver's remaining job is to avoid CREATING artifacts -- main-world
+// addInitScript/exposeFunction bindings, Runtime.addBinding, evaluation-script
+// names in stack traces, its automation argv. Patchright is the hardened fork of
+// that family.
+//
+// What is NOT claimed: that Patchright beats Playwright here. Nobody has
+// measured it on this project, and plain Playwright measured clean on both
+// artifacts expected to separate them. Nor is patch 0087's neutralisation of
+// Runtime.enable settled: it has compiled and never run.
+//
+// Puppeteer is last on a measured basis: its stack traces from driver-evaluated
+// code carry the operator's absolute filesystem path, and exposeFunction installs
+// a puppeteer___-prefixed global alongside the requested name.
+export const DRIVERS = ["patchright", "playwright", "playwright-core", "puppeteer", "puppeteer-core"];
+const DRIVER_MODULES = DRIVERS;
 const DRIVER_HINT = "no Playwright-compatible or Puppeteer driver is installed. Run one of:\n"
   + "    npm install patchright\n"
   + "    npm install playwright-core\n"
   + "    npm install puppeteer-core\n"
   + "None of them needs to download a browser: Apostate supplies its own.";
 
-async function loadDriver(requested) {
+async function loadDriver(requested, injected) {
+  if (injected) {
+    // Test seam: lets the Puppeteer and Playwright branches be exercised without
+    // installing five optional peers in CI.
+    const api = injected?.default ?? injected;
+    const chromium = api?.chromium ?? injected?.chromium;
+    if (chromium && typeof chromium.launch === "function") return { name: requested ?? "injected", kind: "playwright", chromium };
+    if (typeof api?.launch === "function") return { name: requested ?? "injected", kind: "puppeteer", puppeteer: api };
+    throw new BrowserLaunchError("Injected driver exposes neither chromium.launch nor launch.");
+  }
+  if (requested !== undefined && requested !== null && !DRIVERS.includes(requested)) {
+    throw new BrowserLaunchError(`Unknown driver ${JSON.stringify(requested)}; supported: ${DRIVERS.join(", ")}.`, { driver: requested });
+  }
   const names = requested ? [requested] : DRIVER_MODULES;
   const failures = [];
   for (const name of names) {
@@ -1934,6 +1965,26 @@ async function loadDriver(requested) {
   throw new BrowserLaunchError(failures.length > 0 ? `${DRIVER_HINT}\n${failures.join("\n")}` : DRIVER_HINT);
 }
 
+// A silent driver choice makes a support conversation impossible, so the
+// selection is inspectable without starting a browser.
+export async function driverInfo() {
+  const installed = [];
+  for (const name of DRIVERS) {
+    try {
+      // Same runtime-registry reason as loadDriver: every driver is an optional
+      // peer and normally absent.
+      await import(name);
+      installed.push(name);
+    } catch { /* not installed */ }
+  }
+  return {
+    preference_order: [...DRIVERS],
+    installed,
+    selected: installed[0] ?? null,
+    recommended: DRIVERS[0],
+  };
+}
+
 function playwrightProxy(proxy) {
   if (!proxy) return undefined;
   const parsed = new URL(proxy);
@@ -1941,6 +1992,52 @@ function playwrightProxy(proxy) {
   if (parsed.username) result.username = decodeURIComponent(parsed.username);
   if (parsed.password) result.password = decodeURIComponent(parsed.password);
   return result;
+}
+
+// Stop the driver's default viewport overwriting the composed geometry.
+// Playwright's default context is 1280x720 and reports screen == inner == avail
+// with devicePixelRatio flattened to 1. No real desktop has avail == screen:
+// there is always a menu bar or a taskbar. Puppeteer's default is worse --
+// outer 756x556 against inner 800x600, an inner viewport larger than the window
+// containing it, which no machine reports.
+//
+// Measured on the shipped macos-arm64 build with --fingerprint=42:
+//   Playwright default          screen/inner/avail all 1280x720, dpr 1
+//   Playwright viewport null    screen 1710x1112, avail 1710x1079, dpr 2
+//   Puppeteer default           outer 756x556, inner 800x600, avail==screen, dpr 1
+//   Puppeteer defaultViewport null  outer 756x556, inner 756x469, avail<screen, dpr 2
+//
+// Three observables per driver, plus the profile's own geometry. A caller who
+// asks for a viewport still gets it.
+function coherentViewport(target) {
+  for (const name of ["newPage", "newContext"]) {
+    const original = target?.[name];
+    if (typeof original !== "function") continue;
+    target[name] = async (options = {}, ...rest) => {
+      const merged = isObject(options) && !("viewport" in options)
+        ? { ...options, viewport: null }
+        : options;
+      return original.call(target, merged, ...rest);
+    };
+  }
+  return target;
+}
+
+// launchContext returns a context, not the browser it came from, and closing a
+// non-persistent context does not close its browser. Without this the browser
+// and its driver outlive the context.
+function contextOwnsBrowser(context, browser) {
+  const original = context?.close;
+  if (typeof original !== "function") return context;
+  context.close = async (...args) => {
+    try {
+      return await original.call(context, ...args);
+    } finally {
+      await browser.close().catch(() => {});
+    }
+  };
+  context.apostateBrowser = browser;
+  return context;
 }
 
 // Returns a real browser object from whichever driver is installed: a
@@ -1952,9 +2049,9 @@ export async function launch(options = {}) {
   // Driver first on purpose. Acquisition is a ~150 MB download; failing
   // afterwards with "no driver installed" spends the user's bandwidth to tell
   // them something knowable up front.
-  const driver = await loadDriver(options.driver);
+  const driver = await loadDriver(options.driver, options._driverModule);
   const binary = options.executablePath ?? options.binaryPath ?? await ensureBinary(options);
-  const args = buildLaunchArguments(prepared.config, prepared.resolution);
+  const args = buildLaunchArguments(prepared.config, prepared.resolution, { driverOwnsProfile: true });
   const env = {
     ...(options.env ?? {}),
     ...(prepared.config.timezone ? { TZ: prepared.config.timezone } : {}),
@@ -1972,19 +2069,24 @@ export async function launch(options = {}) {
     if (driver.kind === "playwright") {
       const proxy = playwrightProxy(prepared.config.proxy);
       const browser = prepared.config.user_data_dir
-        ? await driver.chromium.launchPersistentContext(prepared.config.user_data_dir, { ...common, ...(proxy ? { proxy } : {}) })
-        : await driver.chromium.launch({ ...common, ...(proxy ? { proxy } : {}) });
+        ? await driver.chromium.launchPersistentContext(prepared.config.user_data_dir, { ...common, viewport: null, ...(proxy ? { proxy } : {}) })
+        : coherentViewport(await driver.chromium.launch({ ...common, ...(proxy ? { proxy } : {}) }));
       browser.apostateDiagnostics = prepared.diagnostics;
       browser.apostateExecutablePath = binary;
+      browser.apostateDriverName = driver.name;
       return browser;
     }
     const browser = await driver.puppeteer.launch({
       ...common,
+      // null rather than Puppeteer's 800x600 default, which reports an inner
+      // viewport larger than its own window. See coherentViewport above.
+      defaultViewport: options.defaultViewport ?? null,
       // Puppeteer takes the user data dir as an option, not a switch.
       ...(prepared.config.user_data_dir ? { userDataDir: prepared.config.user_data_dir } : {}),
     });
     browser.apostateDiagnostics = prepared.diagnostics;
     browser.apostateExecutablePath = binary;
+    browser.apostateDriverName = driver.name;
     return browser;
   } catch (error) {
     if (error instanceof ApostateError) throw error;
@@ -2011,8 +2113,12 @@ export async function launchContext(options = {}) {
   const browser = await launch(options);
   try {
     // A Playwright persistent context is already a context; Puppeteer has none.
-    if (typeof browser.newContext === "function") return await browser.newContext();
-    if (typeof browser.createBrowserContext === "function") return await browser.createBrowserContext();
+    if (typeof browser.newContext === "function") {
+      return contextOwnsBrowser(await browser.newContext(), browser);
+    }
+    if (typeof browser.createBrowserContext === "function") {
+      return contextOwnsBrowser(await browser.createBrowserContext(), browser);
+    }
     return browser;
   } catch (error) {
     await browser.close();

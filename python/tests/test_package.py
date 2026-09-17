@@ -565,7 +565,8 @@ print(catalogue['browser_build'])
         fake = _FakeSyncPlaywright()
         with tempfile.NamedTemporaryFile() as executable:
             os.chmod(executable.name, 0o755)
-            with mock.patch.object(launch_module, "_load_sync_backend", return_value=lambda: fake):
+            with mock.patch.object(launch_module, "_load_sync_backend",
+                                      return_value=launch_module.DriverSelection("patchright", lambda: fake)):
                 launch(geoip=False, binary_path=executable.name, fingerprint="host")
         assert fake.chromium.options is not None
         self.assertIn("--disable-component-update", fake.chromium.options["ignore_default_args"])
@@ -577,19 +578,96 @@ print(catalogue['browser_build'])
         fake = _FakeSyncPlaywright()
         with tempfile.NamedTemporaryFile() as executable:
             os.chmod(executable.name, 0o755)
-            with mock.patch.object(launch_module, "_load_sync_backend", return_value=lambda: fake):
+            with mock.patch.object(launch_module, "_load_sync_backend",
+                                      return_value=launch_module.DriverSelection("patchright", lambda: fake)):
                 launch(geoip=False, binary_path=executable.name, fingerprint="host",
                        args=["--disable-component-update"])
         assert fake.chromium.options is not None
         self.assertIsNone(fake.chromium.options["ignore_default_args"])
         self.assertIn("--disable-component-update", fake.chromium.options["args"])
 
+    def test_patchright_is_the_default_driver_and_the_choice_is_inspectable(self) -> None:
+        # The driver default is the package's to choose and is most of the point
+        # of shipping a package rather than a bare binary: the browser patches
+        # close the protocol-side tells, but nothing in the browser can remove
+        # what a driver CREATES -- main-world bindings, Runtime.addBinding,
+        # evaluation-script names in stack traces, its automation argv.
+        launch_module = importlib.import_module("apostate.launch")
+        self.assertEqual(launch_module.DRIVERS[0], "patchright")
+        info = launch_module.driver_info()
+        self.assertEqual(info["recommended"], "patchright")
+        self.assertEqual(info["preference_order"], list(launch_module.DRIVERS))
+        # Whatever is installed, the selection must be the first preference
+        # present, never an arbitrary one.
+        if info["installed"]:
+            self.assertEqual(info["selected"], info["installed"][0])
+            self.assertEqual(
+                info["installed"],
+                [name for name in launch_module.DRIVERS if name in info["installed"]],
+            )
+        else:
+            self.assertIsNone(info["selected"])
+
+    def test_an_unknown_driver_is_refused_by_name(self) -> None:
+        launch_module = importlib.import_module("apostate.launch")
+        with self.assertRaisesRegex(ConfigurationError, "unknown driver"):
+            launch_module._load_sync_backend("selenium")
+
+    def test_driver_default_viewport_is_not_allowed_to_overwrite_the_geometry(self) -> None:
+        # Playwright's default context reports screen == inner == avail with
+        # devicePixelRatio flattened to 1, and Puppeteer's reports an inner
+        # viewport LARGER than its own window. No real machine does either.
+        # Measured on macos-arm64 with --fingerprint=42: letting the real window
+        # size through restored avail 1710x1079 against screen 1710x1112 and a
+        # dpr of 2, on both drivers.
+        launch_module = importlib.import_module("apostate.launch")
+        recorded: dict[str, Any] = {}
+
+        class _Browser:
+            def new_page(self, **kwargs: Any) -> dict[str, Any]:
+                recorded.update(kwargs)
+                return kwargs
+
+            def close(self) -> None:
+                return None
+
+        wrapped = launch_module._coherent_viewport(_Browser())
+        wrapped.new_page()
+        self.assertTrue(recorded["no_viewport"])
+        # An explicit request is the caller's decision and must survive.
+        recorded.clear()
+        wrapped.new_page(viewport={"width": 1024, "height": 768})
+        self.assertNotIn("no_viewport", recorded)
+        self.assertEqual(recorded["viewport"], {"width": 1024, "height": 768})
+
+    def test_a_context_closes_the_browser_it_was_created_from(self) -> None:
+        # launch_context hands back a context, and closing a non-persistent
+        # context does not close its browser. Without this the browser and its
+        # driver outlive the context, and the driver's installed event loop
+        # makes the next sync launch fail with "Sync API inside the asyncio
+        # loop" -- found by exercising this path for the first time.
+        launch_module = importlib.import_module("apostate.launch")
+        closed = []
+
+        class _Browser:
+            def close(self) -> None:
+                closed.append("browser")
+
+        class _Context:
+            def close(self) -> None:
+                closed.append("context")
+
+        context = launch_module._context_owns_browser(_Context(), _Browser())
+        context.close()
+        self.assertEqual(closed, ["context", "browser"])
+
     def test_async_launch_delegates_to_async_backend(self) -> None:
         launch_module = importlib.import_module("apostate.launch")
         fake = _FakeAsyncPlaywright()
         with tempfile.NamedTemporaryFile() as executable:
             os.chmod(executable.name, 0o755)
-            with mock.patch.object(launch_module, "_load_async_backend", return_value=lambda: fake):
+            with mock.patch.object(launch_module, "_load_async_backend",
+                                      return_value=launch_module.DriverSelection("patchright", lambda: fake)):
                 result = asyncio.run(
                     launch_async(
                         profile={"id": "async-explicit", "platform": {"name": "macOS"}},
@@ -622,7 +700,8 @@ print(catalogue['browser_build'])
             profile_path = Path(temporary) / "profile"
             with tempfile.NamedTemporaryFile() as executable:
                 os.chmod(executable.name, 0o755)
-                with mock.patch.object(launch_module, "_load_sync_backend", return_value=lambda: fake):
+                with mock.patch.object(launch_module, "_load_sync_backend",
+                                      return_value=launch_module.DriverSelection("patchright", lambda: fake)):
                     context = launch_persistent_context(
                         profile_path,
                         geoip=False,

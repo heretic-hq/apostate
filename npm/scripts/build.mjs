@@ -146,6 +146,13 @@ export declare function provisionWidevine(options?: {
   installed: string | null;
 }>;
 export declare const provision_widevine: typeof provisionWidevine;
+export declare const DRIVERS: string[];
+export declare function driverInfo(): Promise<{
+  preference_order: string[];
+  installed: string[];
+  selected: string | null;
+  recommended: string;
+}>;
 export declare const launch_context: typeof launchContext;
 export declare const launch_persistent_context: typeof launchPersistentContext;
 export declare const launch_process: typeof launchProcess;

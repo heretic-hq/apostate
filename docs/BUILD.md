@@ -70,6 +70,8 @@ The build scripts share workspace and tool paths through `scripts/lib.sh`.
 | `scripts/smoke-binary.sh` | Run the native binary's version command, or check the cross-built ARM64 ELF machine type |
 | `scripts/package-artifact.sh` | Stage the runtime payload and write the archive and release manifest |
 | `scripts/checkfile.sh` | Recompile one translation unit using generated compilation commands |
+| `scripts/series-translation-units.py` | List every translation unit the patch series touches, in series order |
+| `scripts/checkseries.sh` | Compile all of them for one target and classify each as compiling, failing or absent from that build graph |
 | `scripts/verify-reproducible.sh` | Compare clean-build output hashes |
 
 On Linux, `scripts/fetch-sources.sh` treats a failed Chromium build-dependency
@@ -217,6 +219,72 @@ profile catalogue and resolver, GeoIP, and Python and Node packages.
 its body. Incorrect counts can cause patch application to omit lines, so CI
 runs the validator read-only. Use its `--fix` option locally when repairing a
 patch, then rebuild to refresh the manifest's patch-content hash.
+
+### Cross-platform compile gate
+
+`scripts/checkfile.sh` gates one translation unit against one configured build
+directory. That covers the platform being worked on and nothing else, and the
+only build directory on the development machine is `macos-arm64`, so the
+series' Linux-only and Windows-only files had never been compiled anywhere.
+`base/apostate/explain.cc` is the recorded cost: it called
+`base::WriteFileDescriptor(STDOUT_FILENO, ...)`, which is POSIX-only, in a
+file `base/BUILD.gn` compiles on every platform, and it was found by reading.
+
+`scripts/series-translation-units.py` derives the gate's coverage from
+`patches/series`: every `+++ b/<path>` in every listed patch, filtered to
+translation units, de-duplicated, in series order. It is derived rather than
+maintained because a list that has to be updated by hand stops covering files
+silently, which is the failure this gate exists to remove. At Chromium
+152.0.7977.83 the series touches 130 translation units.
+
+`scripts/checkseries.sh` compiles them for one target and classifies each
+result. Membership comes from `ninja -t compdb`, a query against the build
+graph ninja itself builds from, and the gate never asks ninja to build an
+object the graph has not already named — asking and reading the error cannot
+work, because `ninja` answers "unknown target" and a failed compile with the
+same exit status.
+
+| Classification | Meaning |
+| --- | --- |
+| `compiles` | ninja produced every object the graph derives from the file |
+| `fails` | an object was not produced; the gate reports the error and exits non-zero |
+| `absent` | this platform's build graph produces no object from the file |
+
+`absent` is legitimate and is never folded into a pass: on `macos-arm64`, 20 of
+the 130 are absent, including
+`third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc`. Each run
+writes a JSON report, and `scripts/checkseries.sh --merge` puts the
+per-platform reports side by side. A file absent from every platform is a
+defect rather than a platform fact — a patch edits it and nothing compiles it —
+and the merge reports that only once the reports it was given cover Linux,
+macOS and Windows.
+
+`.github/workflows/series-gate.yml` runs the gate on `linux-x64` and
+`windows-x64` by default, weekly and on dispatch. It needs bootstrap, sync,
+patch application and `gn gen` before it can compile anything, and compiling is
+not the expensive part: on the `macos-arm64` graph the prerequisite closure of
+the series' 123 objects is 15,586 other objects and 20,804 generated files,
+about a fifth of that graph, because Chromium links a host tool to generate
+each family of headers. A run is therefore roughly 80 minutes on Linux and 120
+on Windows, about $5 and $15 at Blacksmith's per-vCPU-minute rates, against $42
+to build those two platforms outright and about $100 for a four-target build
+that finds the same error hours in.
+
+Nothing is cached. The checkout is 28-50 GB against a 10 GB Actions cache
+ceiling, and a checkout trimmed with `custom_deps` to fit would change the
+build graph the gate reports on, turning a missing dependency into a file
+reported as absent.
+
+`macos-arm64` is deliberately not in the default pair, and not only because
+the development machine already covers it. The series touches
+`chrome/app/chrome_main_delegate.cc`, which on macOS also compiles into
+`//chrome/app:test_support`, whose GN hard dependencies include
+`phony/chrome/chrome_framework`. Ninja therefore builds the framework bundle
+before it will compile that object — 277 planned edges ending in
+`SOLINK 'Chromium Framework'`, against 63 codegen edges for the `chrome_dll`
+object of the same file — which takes the closure from 53,670 prerequisites to
+112,086. A cold macOS gate run costs about what a macOS build costs. Run it
+against the local build directory, where that work is already done.
 
 ### Packaging
 

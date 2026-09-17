@@ -104,3 +104,7 @@
 # for closed without a patch.
 0097-compose-assumes-font-provisioning.patch
 0099-font-enumeration-suffix-aware-matching.patch
+
+# 0100 is independent of everything above it: local_dom_window.cc is touched by
+# no other patch in the series.
+0100-blink-no-empty-root-window-rect.patch

@@ -282,9 +282,17 @@ def contradictions(surfaces, built):
         if (status == "resolved" and r.get("verdict") == "spoof"
                 and r.get("corpus_coverage") == "absent" and req in ("V3", "V4")):
             out.append(f"{rid}: status 'resolved' at required {req} with corpus_coverage 'absent'")
-        if ai is not None and ai > 0 and built and patch and patch not in built:
+        # The tiers have different prerequisites and the check has to follow them.
+        # V1 is a compile, available for a patch that will not be in the built
+        # prefix until the next full build — every patch after the prefix is in
+        # exactly that position, so flagging V1 here cried wolf on fifteen correct
+        # rows. V2 and above claim a binary was built and shipped with the change,
+        # which the prefix is what establishes; claiming it from outside the prefix
+        # says a shipped binary contains something no binary was built with.
+        if ai is not None and ai >= TIERS.index("V2") and built and patch and patch not in built:
             out.append(f"{rid}: achieved {ach} recorded but patch '{patch}' is not in the built "
-                       f"prefix of patches/series (built through {BUILT_THROUGH})")
+                       f"prefix of patches/series (built through {BUILT_THROUGH}) \u2014 V2 and above "
+                       f"claim a built binary")
     return sorted(out)
 
 
@@ -348,6 +356,10 @@ def reconcile(root: pathlib.Path, full: bool):
         print(f"    - {i}")
 
     print(f"  {len(bad_status)} row(s) whose status contradicts their own evidence:")
+    print("    (review items, not proven errors. 'resolved below required' means closed on T0/T1 evidence "
+          "without the depth of check the verdict asks for; 'meets required but open' can be legitimate, "
+          "because a tier is a class of check while a row's verification is a specific observation at that "
+          "class — both rows in that state carry the reason in their notes)")
     for c in bad_status:
         print(f"    - {c}")
 

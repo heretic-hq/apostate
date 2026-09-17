@@ -10,8 +10,41 @@ Free and open source. No licence key, no account, no telemetry, no paid tier.
 
 ```sh
 npm install @heretic-hq/apostate
-npm install patchright   # or: playwright-core, or puppeteer-core
+npm install patchright        # recommended
 ```
+
+Patchright is the default driver. `playwright`, `playwright-core`, `puppeteer`
+and `puppeteer-core` all work and Apostate falls back to them in that order.
+
+The division of labour is that the browser handles what a page can observe about
+the browser, and the driver's remaining job is to avoid *creating* artifacts of
+its own — main-world `addInitScript` and `exposeFunction` bindings,
+`Runtime.addBinding`, evaluation-script names visible in stack traces, and its
+automation argv. Patchright is the hardened fork of that family, which is why it
+is the default.
+
+Be aware of what has and has not been measured here. The classic sentinels
+(`$cdc_`, `__webdriver_evaluate`, `__playwright` and eight others) were **absent
+under every driver tested**, and the `window` key set was byte-identical between
+a bare launch and a driven page — so the folklore checks are not what
+distinguishes these drivers. Patchright's advantage over Playwright has not been
+measured on this project, and the default reflects the fork's intent rather than
+a result. Treat any claim otherwise, including ours, as unverified.
+
+Two things about Puppeteer *are* measured, and are why it sits last in the order.
+Stack traces from driver-evaluated code carry your **absolute filesystem path**
+(`at pptr:evaluate;file%3A%2F%2F%2FUsers%2F...`), where Playwright's equivalent
+names no driver, scheme or path. And `exposeFunction` installs
+`puppeteer___yourName` alongside the name you asked for. Both are driver-side;
+nothing in the browser can remove them. Choose Puppeteer knowing that.
+
+```javascript
+import { driverInfo } from "@heretic-hq/apostate";
+console.log(await driverInfo());
+```
+
+Pass `driver: "puppeteer-core"` to force one, and read
+`browser.apostateDriverName` to see what was used.
 
 The browser is not bundled. On first use the package downloads the ~150 MB
 archive for your platform from the GitHub release, checks its SHA-256 against a
@@ -24,6 +57,9 @@ Supported hosts: `macos-arm64`, `linux-x64`, `linux-arm64`, `windows-x64`.
 
 `launch()` returns whatever driver you installed: a Playwright `Browser` or a
 Puppeteer `Browser`. An existing script works with only the import changed.
+
+Verified against the macos-arm64 build for Patchright, Playwright and
+puppeteer-core, including `launchPersistentContext` and `launchContext`.
 
 ```javascript
 import { launch } from "@heretic-hq/apostate";
@@ -51,6 +87,18 @@ const browser = await launch({ fingerprint: 42 });
 Same seed, same fingerprint, on every launch and on every machine. This is the
 only thing that makes an identity persist; a persistent `userDataDir` keeps
 cookies but does not pin the device.
+
+Viewport geometry is handled for you: the drivers' default viewports report
+impossible values (Playwright: `screen == inner == avail` with
+`devicePixelRatio` flattened to 1; Puppeteer: an inner viewport *larger* than
+its own window), so Apostate lets the real window size through and the composed
+profile's geometry survives. Pass a viewport explicitly and yours wins.
+
+One case Apostate cannot fix: `fingerprint: "host"` under `headless: true` has no
+display to inherit, so headless Chrome reports its synthetic 800x600 with
+`availHeight == height`. No real desktop looks like that. Use a seed — any
+composed profile supplies coherent geometry, measured at screen 1710x1112
+against avail 1710x1079 with `devicePixelRatio` 2 — or run headful.
 
 ### Other options
 

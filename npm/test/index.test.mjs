@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
 import { chmod, lstat, mkdir, readFile, readdir, readlink, writeFile } from "node:fs/promises";
 import { mkdtemp, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import {
@@ -15,6 +15,8 @@ import {
   ensureBinary,
   launch,
   launchProcess,
+  launchContext,
+  launchPersistentContext,
   provisionWidevine,
   WidevineError,
   loadCatalogue,
@@ -660,5 +662,68 @@ test("Widevine provisioning refuses a directory with no library", async () => {
     );
   } finally {
     await rm(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test("drives the Puppeteer branch: launch, userDataDir and createBrowserContext", async () => {
+  // The README promises an existing Puppeteer script works by changing only the
+  // import. That claim had no coverage: no test reached driver.puppeteer.launch,
+  // the userDataDir option branch, or createBrowserContext. Verified for real
+  // against the local macos-arm64 binary with puppeteer-core 25.x before this
+  // fake was written: launch()+newPage() read hardwareConcurrency 14 and
+  // version Chrome/152.0.7977.83; launchPersistentContext wrote a 30-entry
+  // profile containing Default; launchContext returned a CdpBrowserContext
+  // whose newPage() worked. This pins the wiring so it cannot silently rot.
+  const calls = [];
+  const page = { async setContent() {}, async evaluate() { return 14; } };
+  const context = { async newPage() { calls.push("context.newPage"); return page; }, async close() {} };
+  const browser = {
+    async newPage() { calls.push("browser.newPage"); return page; },
+    async createBrowserContext() { calls.push("createBrowserContext"); return context; },
+    async close() { calls.push("browser.close"); },
+  };
+  let seen = null;
+  const fakePuppeteer = {
+    default: {
+      async launch(options) {
+        seen = options;
+        calls.push("puppeteer.launch");
+        return browser;
+      },
+    },
+  };
+
+  const root = await mkdtemp(join(tmpdir(), "apostate-node-pptr-"));
+  try {
+    const executable = join(root, "browser");
+    await writeFile(executable, "#!/bin/sh\nexit 0\n");
+    await chmod(executable, 0o755);
+    const base = {
+      executablePath: executable,
+      geoip: false,
+      fingerprint: "host",
+      driver: "puppeteer-core",
+      _driverModule: fakePuppeteer,
+    };
+
+    const b = await launch(base);
+    assert.equal(b.apostateDriverName, "puppeteer-core", "the selected driver must be visible");
+    await b.newPage();
+
+    // Puppeteer takes the profile directory as an option, not a switch.
+    const userDataDir = join(root, "profile");
+    await launchPersistentContext(userDataDir, base);
+    assert.equal(resolve(seen.userDataDir), resolve(userDataDir));
+    assert.ok(!seen.args.some((a) => a.startsWith("--user-data-dir=")),
+      "the switch must not be duplicated as an argv entry for Puppeteer");
+
+    // launchContext has no Playwright newContext here, so it must fall through.
+    await launchContext(base);
+    assert.ok(calls.includes("createBrowserContext"));
+
+    // The component-update switch is stripped for Puppeteer too.
+    assert.ok(seen.ignoreDefaultArgs.includes("--disable-component-update"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

@@ -10,8 +10,37 @@ Free and open source. No licence key, no account, no telemetry, no paid tier.
 
 ```sh
 pip install apostate
-pip install patchright   # or: pip install playwright
+pip install patchright        # recommended
 ```
+
+Patchright is the default driver. Playwright works too (`pip install playwright`)
+and Apostate uses it if Patchright is absent.
+
+The division of labour is that the browser handles what a page can observe about
+the browser, and the driver's remaining job is to avoid *creating* artifacts of
+its own — main-world `addInitScript` and `exposeFunction` bindings,
+`Runtime.addBinding`, evaluation-script names visible in stack traces, and its
+automation argv. Patchright is the hardened fork of that family, which is why it
+is the default.
+
+Be aware of what has and has not been measured here. The classic sentinels
+(`$cdc_`, `__webdriver_evaluate`, `__playwright` and eight others) were **absent
+under every driver tested**, and the `window` key set was byte-identical between
+a bare launch and a driven page — so the folklore checks are not what
+distinguishes these drivers. Patchright's advantage over Playwright has not been
+measured on this project, and the default reflects the fork's intent rather than
+a result. Treat any claim otherwise, including ours, as unverified.
+
+```python
+from apostate import driver_info
+print(driver_info())
+# {'preference_order': ['patchright', 'playwright'],
+#  'installed': ['patchright'], 'selected': 'patchright',
+#  'recommended': 'patchright'}
+```
+
+Pass `driver="playwright"` to force one, and read `browser.apostate_driver_name`
+to see what was used.
 
 The browser is not bundled. On first use the package downloads the ~150 MB
 archive for your platform from the GitHub release, checks its SHA-256 against a
@@ -51,6 +80,18 @@ browser = launch(fingerprint=42)
 Same seed, same fingerprint, on every launch and on every machine. This is the
 only thing that makes an identity persist; a persistent `user_data_dir` keeps
 cookies but does not pin the device.
+
+Viewport geometry is handled for you: the drivers' default viewports report
+impossible values (Playwright: `screen == inner == avail` with
+`devicePixelRatio` flattened to 1; Puppeteer: an inner viewport *larger* than
+its own window), so Apostate lets the real window size through and the composed
+profile's geometry survives. Pass a viewport explicitly and yours wins.
+
+One case Apostate cannot fix: `fingerprint="host"` under `headless=True` has no
+display to inherit, so headless Chrome reports its synthetic 800x600 with
+`availHeight == height`. No real desktop looks like that. Use a seed — any
+composed profile supplies coherent geometry, measured at screen 1710x1112
+against avail 1710x1079 with `devicePixelRatio` 2 — or run headful.
 
 ### Other options
 

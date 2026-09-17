@@ -28,7 +28,10 @@ from .errors import (
 )
 from .geoip import GeoIPProvider, GeoIPResult, normalize_result, redact_proxy, resolve_geoip
 from .launch import (
+    DRIVERS,
+    DriverSelection,
     LaunchPlan,
+    driver_info,
     launch,
     launch_async,
     launch_context,
@@ -55,7 +58,10 @@ __all__ = [
     "IntegrityError",
     "LaunchConfig",
     "LaunchError",
+    "DRIVERS",
+    "DriverSelection",
     "LaunchPlan",
+    "driver_info",
     "ManifestError",
     "PACKAGE_VERSION",
     "PROFILE_SCHEMA_VERSION",

@@ -10,7 +10,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, NamedTuple
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from .binary import ensure_binary
@@ -216,36 +216,93 @@ def _has_switch(args: Any, name: str) -> bool:
     return any(item == name or item.startswith(name + "=") for item in args)
 
 
-#: What to install when no Playwright-compatible driver is importable. Patchright
-#: is listed first because it is the hardened fork this API was shaped against.
+#: Driver preference order, Patchright first. The reasoning, stated at the
+#: strength it has been measured to: the browser owns what a page can observe
+#: about the browser, and a driver's remaining job is to avoid CREATING
+#: artifacts -- main-world ``addInitScript``/``exposeFunction`` bindings,
+#: ``Runtime.addBinding``, evaluation-script names in stack traces, its
+#: automation argv. Patchright is the hardened fork of that family.
+#:
+#: What is NOT claimed: that Patchright beats Playwright here. Nobody has
+#: measured it on this project, and plain Playwright measured clean on both
+#: artifacts expected to separate them -- the classic sentinels were absent
+#: under every driver tried, and ``window`` key sets were byte-identical
+#: between a bare launch and a driven page. Nor is patch 0087's neutralisation
+#: of ``Runtime.enable`` settled: it has compiled and never run, so that is
+#: design intent until the throw-cost ratio is re-measured on a built binary.
+#: Choosing the default is still the package's job; asserting an unmeasured
+#: advantage is not.
+DRIVERS = ("patchright", "playwright")
+
+#: What to install when no driver is importable.
 _DRIVER_HINT = (
     "no Playwright-compatible driver is installed. Run one of:\n"
-    "    pip install patchright && patchright install-deps\n"
+    "    pip install patchright && patchright install-deps   (recommended)\n"
     "    pip install playwright\n"
     "Neither needs `playwright install`: Apostate supplies its own browser."
 )
 
 
-def _load_sync_backend() -> Any:
-    for module_name in ("patchright.sync_api", "playwright.sync_api"):
+class DriverSelection(NamedTuple):
+    """Which driver was chosen, and the entry point to start it."""
+
+    name: str
+    factory: Any
+
+
+def _load_backend(kind: str, requested: str | None = None) -> DriverSelection:
+    """Import the first available driver, or the one the caller named."""
+    if requested is not None:
+        if requested not in DRIVERS:
+            raise ConfigurationError(
+                f"unknown driver {requested!r}; supported: {', '.join(DRIVERS)}"
+            )
+        candidates: tuple[str, ...] = (requested,)
+    else:
+        candidates = DRIVERS
+    for name in candidates:
         try:
-            return importlib.import_module(module_name).sync_playwright
+            module = importlib.import_module(f"{name}.{kind}_api")
         except ModuleNotFoundError:
             continue
         except ImportError as exc:
-            raise LaunchError(f"unable to import the {module_name.split('.')[0]} sync API") from exc
+            raise LaunchError(f"unable to import the {name} {kind} API") from exc
+        factory = getattr(module, f"{kind}_playwright")
+        return DriverSelection(name=name, factory=factory)
+    if requested is not None:
+        raise LaunchError(f"driver {requested!r} is not installed. {_DRIVER_HINT}")
     raise LaunchError(_DRIVER_HINT)
 
 
-def _load_async_backend() -> Any:
-    for module_name in ("patchright.async_api", "playwright.async_api"):
+def _load_sync_backend(requested: str | None = None) -> DriverSelection:
+    return _load_backend("sync", requested)
+
+
+def _load_async_backend(requested: str | None = None) -> DriverSelection:
+    return _load_backend("async", requested)
+
+
+def driver_info() -> dict[str, Any]:
+    """Report which driver a launch would use, and what is installed.
+
+    A silent driver choice makes a support conversation impossible, so the
+    selection is inspectable without starting a browser.
+    """
+    installed = []
+    for name in DRIVERS:
         try:
-            return importlib.import_module(module_name).async_playwright
+            importlib.import_module(name)
         except ModuleNotFoundError:
             continue
-        except ImportError as exc:
-            raise LaunchError(f"unable to import the {module_name.split('.')[0]} async API") from exc
-    raise LaunchError(_DRIVER_HINT)
+        except ImportError:
+            continue
+        installed.append(name)
+    return {
+        "preference_order": list(DRIVERS),
+        "installed": installed,
+        "selected": installed[0] if installed else None,
+        "recommended": DRIVERS[0],
+    }
 
 
 def _backend_error(exc: Exception) -> LaunchError:
@@ -308,7 +365,64 @@ def _ignore_default_args(requested: Any, args: Any) -> Any:
     return merged
 
 
-def _own_driver(target: Any, driver: Any) -> Any:
+def _coherent_viewport(target: Any) -> Any:
+    """Stop the driver's default viewport overwriting the composed geometry.
+
+    Playwright's default context is 1280x720 and reports ``screen == inner ==
+    avail`` with ``devicePixelRatio`` flattened to 1. No real desktop has
+    ``avail == screen``: there is always a menu bar or a taskbar. Puppeteer's
+    default is worse -- outer 756x556 against inner 800x600, an inner viewport
+    larger than the window containing it, which no machine reports.
+
+    Measured on the shipped macos-arm64 build with ``--fingerprint=42``:
+
+    =========================  ============================================
+    Playwright default         screen/inner/avail all 1280x720, dpr 1
+    Playwright ``no_viewport`` screen 1710x1112, avail 1710x1079, dpr 2
+    Puppeteer default          outer 756x556, inner 800x600, avail==screen, dpr 1
+    Puppeteer ``null``         outer 756x556, inner 756x469, avail<screen, dpr 2
+    =========================  ============================================
+
+    So the driver default costs three observables and the profile's own
+    geometry; letting the real window size through restores all of them. A
+    caller who asks for a viewport still gets it.
+    """
+    for name in ("new_page", "new_context"):
+        original = getattr(target, name, None)
+        if not callable(original):
+            continue
+
+        def wrapper(*args: Any, _original: Any = original, **kwargs: Any) -> Any:
+            if "viewport" not in kwargs and "no_viewport" not in kwargs:
+                kwargs["no_viewport"] = True
+            return _original(*args, **kwargs)
+
+        try:
+            setattr(target, name, wrapper)
+        except (AttributeError, TypeError):
+            pass
+    return target
+
+
+async def _coherent_viewport_async(target: Any) -> Any:
+    for name in ("new_page", "new_context"):
+        original = getattr(target, name, None)
+        if not callable(original):
+            continue
+
+        async def wrapper(*args: Any, _original: Any = original, **kwargs: Any) -> Any:
+            if "viewport" not in kwargs and "no_viewport" not in kwargs:
+                kwargs["no_viewport"] = True
+            return await _original(*args, **kwargs)
+
+        try:
+            setattr(target, name, wrapper)
+        except (AttributeError, TypeError):
+            pass
+    return target
+
+
+def _own_driver(target: Any, driver: Any, name: str = "") -> Any:
     """Make *target* stop the Playwright driver it was created from.
 
     ``sync_playwright().start()`` installs an event loop in this thread and
@@ -338,12 +452,14 @@ def _own_driver(target: Any, driver: Any) -> Any:
         target.close = close
         # Hold a reference so the driver is not collected while the browser lives.
         target.apostate_driver = driver
+        # Which driver started this, so a support conversation is possible.
+        target.apostate_driver_name = name
     except (AttributeError, TypeError):
         return target
     return target
 
 
-async def _own_driver_async(target: Any, driver: Any) -> Any:
+async def _own_driver_async(target: Any, driver: Any, name: str = "") -> Any:
     original = getattr(target, "close", None)
     if not callable(original):
         return target
@@ -360,6 +476,7 @@ async def _own_driver_async(target: Any, driver: Any) -> Any:
     try:
         target.close = close
         target.apostate_driver = driver
+        target.apostate_driver_name = name
     except (AttributeError, TypeError):
         return target
     return target
@@ -391,6 +508,7 @@ def launch(*, fingerprint: int | str | None = None, fingerprint_platform: str | 
            manifest: Mapping[str, Any] | str | Path | None = None,
            downloader: Callable[[str], Any] | None = None, resolver: Any = None,
            catalogue: Any = None, geoip_provider: Any = None, geoip_timeout: float = 10.0,
+           driver: str | None = None,
            **playwright_options: Any) -> Any:
     """Launch the native browser through a Patchright-compatible sync API."""
     config = translate_options(fingerprint=fingerprint, fingerprint_platform=fingerprint_platform,
@@ -401,10 +519,10 @@ def launch(*, fingerprint: int | str | None = None, fingerprint_platform: str | 
     # The driver check comes first on purpose. Acquisition is a ~150 MB
     # download; failing afterwards with "no driver installed" spends the
     # user's bandwidth to tell them something knowable up front.
-    sync_playwright = _load_sync_backend()
+    selection = _load_sync_backend(driver)
     binary = _resolve_executable(binary_path, cache_dir=cache_dir, manifest=manifest,
                                  downloader=downloader)
-    playwright = sync_playwright().start()
+    playwright = selection.factory().start()
     launch_options = dict(playwright_options)
     launch_options.update(executable_path=str(binary), headless=config.headless, args=_native_args(plan))
     launch_options["ignore_default_args"] = _ignore_default_args(
@@ -412,13 +530,45 @@ def launch(*, fingerprint: int | str | None = None, fingerprint_platform: str | 
     if config.proxy is not None and "proxy" not in launch_options:
         launch_options["proxy"] = _playwright_proxy(config.proxy)
     try:
-        return _own_driver(playwright.chromium.launch(**launch_options), playwright)
+        return _own_driver(_coherent_viewport(playwright.chromium.launch(**launch_options)),
+                           playwright, selection.name)
     except Exception as exc:
         try:
             playwright.stop()
         except Exception:
             pass
         raise _backend_error(exc) from exc
+
+
+def _context_owns_browser(context: Any, browser: Any) -> Any:
+    """Close the browser when the context the caller was handed is closed.
+
+    ``launch_context`` returns a context, not the browser it came from, and
+    closing a non-persistent context does not close its browser. Without this
+    the browser and its driver outlive the context, and the driver's installed
+    event loop makes the next sync launch in the same process fail with "Sync
+    API inside the asyncio loop" -- the same leak as an unowned driver, reached
+    through the one entry point that hands back something other than a browser.
+    """
+    original = getattr(context, "close", None)
+    if not callable(original):
+        return context
+
+    def close(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return original(*args, **kwargs)
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
+
+    try:
+        context.close = close
+        context.apostate_browser = browser
+    except (AttributeError, TypeError):
+        return context
+    return context
 
 
 def launch_context(*, context_options: Mapping[str, Any] | None = None, **options: Any) -> Any:
@@ -428,7 +578,7 @@ def launch_context(*, context_options: Mapping[str, Any] | None = None, **option
     # cannot accidentally become page-visible context configuration.
     browser = launch(**options)
     try:
-        return browser.new_context(**context_options)
+        return _context_owns_browser(browser.new_context(**context_options), browser)
     except Exception as exc:
         try:
             browser.close()
@@ -456,7 +606,7 @@ def launch_persistent_context(user_data_dir: str | Path, *, context_options: Map
                          geoip_timeout=options.pop("geoip_timeout", 10.0))
     # Driver first: see launch(). A missing driver is knowable before spending
     # a ~150 MB download to discover it.
-    sync_playwright = _load_sync_backend()
+    selection = _load_sync_backend(options.pop("driver", None))
     binary = _resolve_executable(options.pop("binary_path", None),
                                  cache_dir=options.pop("cache_dir", None),
                                  manifest=options.pop("manifest", None),
@@ -470,9 +620,11 @@ def launch_persistent_context(user_data_dir: str | Path, *, context_options: Map
                           args=_native_args(plan, persistent=True), user_data_dir=str(path))
     launch_options["ignore_default_args"] = _ignore_default_args(
         launch_options.get("ignore_default_args"), config.args)
+    if "viewport" not in launch_options and "no_viewport" not in launch_options:
+        launch_options["no_viewport"] = True
     if config.proxy is not None and "proxy" not in launch_options:
         launch_options["proxy"] = _playwright_proxy(config.proxy)
-    playwright = sync_playwright().start()
+    playwright = selection.factory().start()
     try:
         context = playwright.chromium.launch_persistent_context(**launch_options)
     except Exception as exc:
@@ -481,7 +633,7 @@ def launch_persistent_context(user_data_dir: str | Path, *, context_options: Map
         except Exception:
             pass
         raise _backend_error(exc) from exc
-    return _own_driver(context, playwright)
+    return _own_driver(context, playwright, selection.name)
 
 
 async def launch_async(**options: Any) -> Any:
@@ -495,12 +647,12 @@ async def launch_async(**options: Any) -> Any:
     plan = _resolve_plan(config, resolver=options.pop("resolver", None), catalogue=options.pop("catalogue", None),
                          geoip_provider=options.pop("geoip_provider", None), geoip_timeout=options.pop("geoip_timeout", 10.0))
     # Driver first: see launch().
-    async_playwright = _load_async_backend()
+    selection = _load_async_backend(options.pop("driver", None))
     binary = _resolve_executable(options.pop("binary_path", None),
                                  cache_dir=options.pop("cache_dir", None),
                                  manifest=options.pop("manifest", None),
                                  downloader=options.pop("downloader", None))
-    playwright = await async_playwright().start()
+    playwright = await selection.factory().start()
     launch_options = dict(options)
     launch_options.update(executable_path=str(binary), headless=config.headless, args=_native_args(plan))
     launch_options["ignore_default_args"] = _ignore_default_args(
@@ -508,7 +660,9 @@ async def launch_async(**options: Any) -> Any:
     if config.proxy is not None and "proxy" not in launch_options:
         launch_options["proxy"] = _playwright_proxy(config.proxy)
     try:
-        return await _own_driver_async(await playwright.chromium.launch(**launch_options), playwright)
+        return await _own_driver_async(
+            await _coherent_viewport_async(await playwright.chromium.launch(**launch_options)),
+            playwright, selection.name)
     except Exception as exc:
         try:
             await playwright.stop()
@@ -517,10 +671,33 @@ async def launch_async(**options: Any) -> Any:
         raise _backend_error(exc) from exc
 
 
+async def _context_owns_browser_async(context: Any, browser: Any) -> Any:
+    original = getattr(context, "close", None)
+    if not callable(original):
+        return context
+
+    async def close(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await original(*args, **kwargs)
+        finally:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+
+    try:
+        context.close = close
+        context.apostate_browser = browser
+    except (AttributeError, TypeError):
+        return context
+    return context
+
+
 async def launch_context_async(*, context_options: Mapping[str, Any] | None = None, **options: Any) -> Any:
     browser = await launch_async(**options)
     try:
-        return await browser.new_context(**dict(context_options or {}))
+        return await _context_owns_browser_async(
+            await browser.new_context(**dict(context_options or {})), browser)
     except Exception as exc:
         try:
             await browser.close()
@@ -543,23 +720,26 @@ async def launch_persistent_context_async(user_data_dir: str | Path, *, context_
     plan = _resolve_plan(config, resolver=options.pop("resolver", None), catalogue=options.pop("catalogue", None),
                          geoip_provider=options.pop("geoip_provider", None), geoip_timeout=options.pop("geoip_timeout", 10.0))
     # Driver first: see launch().
-    async_playwright = _load_async_backend()
+    selection = _load_async_backend(options.pop("driver", None))
     binary = _resolve_executable(options.pop("binary_path", None),
                                  cache_dir=options.pop("cache_dir", None),
                                  manifest=options.pop("manifest", None),
                                  downloader=options.pop("downloader", None))
-    playwright = await async_playwright().start()
+    playwright = await selection.factory().start()
     launch_options = dict(context_options or {})
     launch_options.update(options)
     launch_options.update(executable_path=str(binary), headless=config.headless,
                           args=_native_args(plan, persistent=True), user_data_dir=str(path))
     launch_options["ignore_default_args"] = _ignore_default_args(
         launch_options.get("ignore_default_args"), config.args)
+    if "viewport" not in launch_options and "no_viewport" not in launch_options:
+        launch_options["no_viewport"] = True
     if config.proxy is not None and "proxy" not in launch_options:
         launch_options["proxy"] = _playwright_proxy(config.proxy)
     try:
         return await _own_driver_async(
-            await playwright.chromium.launch_persistent_context(**launch_options), playwright)
+            await playwright.chromium.launch_persistent_context(**launch_options),
+            playwright, selection.name)
     except Exception as exc:
         try:
             await playwright.stop()
@@ -569,6 +749,6 @@ async def launch_persistent_context_async(user_data_dir: str | Path, *, context_
 
 
 __all__ = [
-    "LaunchPlan", "launch", "launch_async", "launch_context", "launch_context_async",
+    "DRIVERS", "DriverSelection", "LaunchPlan", "driver_info", "launch", "launch_async", "launch_context", "launch_context_async",
     "launch_persistent_context", "launch_persistent_context_async",
 ]

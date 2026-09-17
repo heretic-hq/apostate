@@ -21,6 +21,14 @@ trivially checked server-side and invisible from inside the renderer.
 Falls through to the host's real memory when no profile carries the field, per
 the loader's contract: an absent field stays inherited rather than defaulted.
 
+The claim is clamped to the host's installed memory, mirroring the core-count
+clamp in patch 0004. deviceMemory is falsifiable by allocation — a page can
+allocate until it fails — so a figure above the host's is contradicted by
+measurement whatever the accessor reports, while a figure at or below it is
+not. Clamping the input rather than the output keeps the reported value inside
+the bucket set Chromium's own rounding can produce, and never above the bucket
+the host itself would report.
+
 Ledger: navigator.device-memory, http.device-memory-header,
 coh.device-memory-header-vs-js.
 
@@ -28,7 +36,7 @@ diff --git a/third_party/blink/common/device_memory/approximated_device_memory.c
 index 7fd53eb..284ab1d 100644
 --- a/third_party/blink/common/device_memory/approximated_device_memory.cc
 +++ b/third_party/blink/common/device_memory/approximated_device_memory.cc
-@@ -4,12 +4,15 @@
+@@ -4,12 +4,16 @@
  
  #include "third_party/blink/public/common/device_memory/approximated_device_memory.h"
  
@@ -39,12 +47,13 @@ index 7fd53eb..284ab1d 100644
  #include "base/system/sys_info.h"
  #include "third_party/blink/public/common/features.h"
  
++#include <algorithm>
 +#include <optional>
 +
  namespace blink {
  
  // static
-@@ -21,7 +24,31 @@ void ApproximatedDeviceMemory::Initialize() {
+@@ -21,7 +25,38 @@ void ApproximatedDeviceMemory::Initialize() {
    if (approximated_device_memory_gb_ > 0.0)
      return;
    DCHECK_EQ(0, physical_memory_mb_);
@@ -68,10 +77,17 @@ index 7fd53eb..284ab1d 100644
 +  const ::base::apostate::Profile* profile = ::base::apostate::Profile::Get();
 +  std::optional<uint64_t> claimed =
 +      profile ? profile->memory_total_bytes() : std::nullopt;
++  const int64_t host_memory_mb =
++      ::base::SysInfo::AmountOfTotalPhysicalMemory().InMiB();
 +  if (claimed.has_value()) {
-+    physical_memory_mb_ = static_cast<int64_t>(*claimed / 1024 / 1024);
++    // Capacity is only ever reduced. A page can allocate until allocation
++    // fails, so a claim above the host is contradicted by measurement whatever
++    // this reports, while a claim at or below it survives the probe. Clamping
++    // the input keeps the result inside the host's own bucket.
++    physical_memory_mb_ =
++        std::min(static_cast<int64_t>(*claimed / 1024 / 1024), host_memory_mb);
 +  } else {
-+    physical_memory_mb_ = ::base::SysInfo::AmountOfTotalPhysicalMemory().InMiB();
++    physical_memory_mb_ = host_memory_mb;
 +  }
 +
    CalculateAndSetApproximatedDeviceMemory();

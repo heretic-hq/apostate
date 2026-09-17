@@ -66,7 +66,7 @@ new file mode 100644
 index 0000000..2d479a8
 --- /dev/null
 +++ b/base/apostate/profile.cc
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,113 @@
 +// Copyright 2026 The Apostate Authors
 +// Use of this source code is governed by a GPL-3.0 license that can be
 +// found in the LICENSE file.
@@ -442,3 +442,63 @@ index 5460a7f..a77c353 100644
  }
  #endif  // !BUILDFLAG(IS_OPENBSD)
  
+diff --git a/base/system/sys_info_win.cc b/base/system/sys_info_win.cc
+index ddfe639..e293067 100644
+--- a/base/system/sys_info_win.cc
++++ b/base/system/sys_info_win.cc
+@@ -15,8 +15,10 @@
+ #include <type_traits>
+ #include <vector>
+ 
++#include "base/apostate/profile.h"
+ #include "base/byte_size.h"
+ #include "base/check.h"
+ #include "base/compiler_specific.h"
+ #include "base/files/file_path.h"
++#include "base/logging.h"
+ #include "base/not_fatal_until.h"
+@@ -127,9 +129,44 @@
+ namespace base {
+ 
+ // static
+ int SysInfo::NumberOfProcessors() {
++  // Apostate: the Windows half of the same clamp. Without it a Windows build
++  // ignores cpu.logical_cores entirely and reports the host's count, so one
++  // profile would describe a different machine depending on which OS built
++  // the binary — and sys_info.h would declare NumberOfProcessorsImpl with no
++  // definition on this platform.
++  //
++  // Same rule as the POSIX emitter: the claim is only ever reduced. A count
++  // above the host's is contradicted by any parallel-throughput measurement
++  // whatever this function returns, so an over-claim is served as the host's
++  // real count rather than refused.
++  if (const apostate::Profile* profile = apostate::Profile::Get()) {
++    if (std::optional<int> claimed = profile->cpu_logical_cores()) {
++      static int clamped = [claimed] {
++        const int real = NumberOfProcessorsImpl();
++        if (*claimed > real) {
++          LOG(WARNING) << "apostate: profile claims " << *claimed
++                       << " logical cores but the host has " << real
++                       << "; clamping, since measured parallelism cannot "
++                          "exceed the host";
++          return real;
++        }
++        return *claimed;
++      }();
++      return clamped;
++    }
++  }
++
++  return NumberOfProcessorsImpl();
++}
++
++// Apostate: the host's real logical processor count, split out so the clamp
++// above can consult it without re-entering the override. Mirrors the split in
++// sys_info_posix.cc.
++// static
++int SysInfo::NumberOfProcessorsImpl() {
+   return win::OSInfo::GetInstance()->processors();
+ }
+ 
+ // static
+ int SysInfo::NumberOfEfficientProcessorsImpl() {

@@ -1,0 +1,1041 @@
+Subject: [PATCH] base: compositor unit tests
+
+Tests for the properties the composition model depends on, not for the data it
+happens to ship today. Every option table here is written in the test file: the
+catalogue is data that changes weekly, and a test that read the shipped tables
+would start asserting today's option list instead of the contract.
+
+What each group defends:
+
+Golden vectors. The root and the per-label substreams for a fixed tuple, as
+bytes. These were produced by an independent implementation of FINGERPRINTS.md
+§5 and agree with scripts/profile_resolver.py's seed_root() for the same tuple.
+If this fails, either the derivation changed or one of the six identity
+components is being fed in differently -- and every seed already in the world
+now means a different machine.
+
+ScaleToRange. The 128-bit high half is computed from 32-bit halves, so the
+cases that matter are the top of the range, the exact half, and a range at the
+32-bit boundary; a naive implementation is wrong at all three. The result is
+always strictly inside the range, which is why no modulo and no rejection loop
+are needed.
+
+WeightedPick boundaries and distribution. The boundary test pins the index at
+each cumulative-weight edge, where an off-by-one lives. The distribution test
+draws 60000 seeds against weights 70/20/10 and requires the realised split
+within one percentage point: a pick that is deterministic but biased is still
+deterministic, so determinism alone does not make a weight mean anything. This
+is §9.4 as a unit test.
+
+Label independence. Composing the same seed over a table set, then over the
+same set with an axis inserted, must leave every other axis's choice identical.
+This is the property that lets the catalogue grow without invalidating shipped
+seeds, and it is the reason each axis keys its own substream.
+
+Servability. A claim never exceeds host capability, over 200 seeds rather than
+one, because the point is that no draw can exceed it. And the measured failure
+that the exhaustion rule exists to prevent: on a host below every bucket a
+table knows, keeping the table's lowest option ships a claim *above* host
+capability, so the surface is left host-inherited and the gap is reported.
+
+The GPU cluster. A Windows persona on a host that can only serve an Apple Metal
+cluster keeps the Metal cluster and reports the mismatch; a host whose backend
+no compiled anchor was captured through composes nothing at all, because
+presenting another backend's cluster is precisely the retired catalogue's
+failure.
+
+Merging. fonts.enumeration_allowlist accumulates and de-duplicates in option
+file order, which is what makes a font pack additive; every other array
+replaces, which is what lets a later axis correct an earlier one instead of
+accumulating contradictions.
+
+Conditioning. Option-set matching is exact and total: a value the table does
+not carry is a miss rather than a nearest match, and so is a tuple of the wrong
+arity. The language projection is computed before the draw, so an unmeasured
+accept-languages list lands on the empty-string set -- whose value carries no
+speech section, leaving the host's real providers in effect rather than listing
+a voice that cannot speak.
+
+Work area. availLeft is panel-relative: the Windows reference capture ran on a
+second monitor at x=1920 and reported availLeft 1920 with a zero inset. And an
+inherited panel with furniture insets drops the screen section rather than
+emitting an empty one, because an empty section is not a claim.
+
+Compile-unverified: these cannot be built or run in this session. The golden
+vectors and every derived expectation in them were computed by an independent
+implementation of the same spec and cross-checked against
+scripts/profile_resolver.py.
+
+diff --git a/base/BUILD.gn b/base/BUILD.gn
+index f29dfe9..9f09235 100644
+--- a/base/BUILD.gn
++++ b/base/BUILD.gn
+@@ -3674,6 +3674,8 @@ test("base_unittests") {
+     "allocator/dispatcher/testing/observer_mock.h",
+     "allocator/dispatcher/testing/tools.h",
+     "allocator/dispatcher/tls_unittest.cc",
++    "apostate/compose_unittest.cc",
++    "apostate/host_capability_unittest.cc",
+     "at_exit_unittest.cc",
+     "atomicops_unittest.cc",
+     "auto_reset_unittest.cc",
+diff --git a/base/apostate/compose_unittest.cc b/base/apostate/compose_unittest.cc
+new file mode 100644
+--- /dev/null
++++ b/base/apostate/compose_unittest.cc
+@@ -0,0 +1,832 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#include "base/apostate/compose.h"
++
++#include <array>
++#include <cstdint>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "base/apostate/dispersion_table.h"
++#include "base/apostate/host_capability.h"
++#include "base/containers/span.h"
++#include "base/json/json_writer.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/values.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace base::apostate {
++namespace {
++
++// Every table here is written in the test rather than taken from the compiled
++// catalogue. The catalogue is data that changes; these properties are the
++// contract the compositor has to keep whatever the data says, and a test that
++// reads the shipped tables would start asserting today's option list instead.
++
++constexpr std::string_view kUnionPaths[] = {"fonts.enumeration_allowlist"};
++
++// ---- os_release: single / none, conditioned on platform ----
++constexpr ConditionKey kOsReleaseWindowsKey[] = {{"platform", "windows"}};
++constexpr DispersionOption kOsReleaseWindowsOptions[] = {
++    {"windows-11", 68, "catalogue-value", "", PackKind::kNotAPack, nullptr,
++     R"({"platform":{"name":"Windows","version":"19.0.0"}})"},
++    {"windows-10", 32, "catalogue-value", "", PackKind::kNotAPack, nullptr,
++     R"({"platform":{"name":"Windows","version":"10.0.0"}})"},
++};
++constexpr DispersionOptionSet kOsReleaseSets[] = {
++    {span<const ConditionKey>(kOsReleaseWindowsKey),
++     span<const DispersionOption>(kOsReleaseWindowsOptions)},
++};
++constexpr std::string_view kPlatformOnly[] = {"platform"};
++constexpr DispersionAxis kOsReleaseAxis = {
++    "os_release",
++    "os_release",
++    span<const std::string_view>(kPlatformOnly),
++    Selection::kSingle,
++    Servability::kNone,
++    span<const DispersionOptionSet>(kOsReleaseSets),
++};
++
++// ---- cpu: single / clamp-down, conditioned on platform ----
++constexpr Requirement kCores4 = {4, 0, 0, 0, {}, {}};
++constexpr Requirement kCores8 = {8, 0, 0, 0, {}, {}};
++constexpr Requirement kCores16 = {16, 0, 0, 0, {}, {}};
++constexpr DispersionOption kCpuWindowsOptions[] = {
++    {"cores-4", 20, "catalogue-value", "", PackKind::kNotAPack, &kCores4,
++     R"({"cpu":{"logical_cores":4}})"},
++    {"cores-8", 50, "catalogue-value", "", PackKind::kNotAPack, &kCores8,
++     R"({"cpu":{"logical_cores":8}})"},
++    {"cores-16", 30, "catalogue-value", "", PackKind::kNotAPack, &kCores16,
++     R"({"cpu":{"logical_cores":16}})"},
++};
++constexpr DispersionOptionSet kCpuSets[] = {
++    {span<const ConditionKey>(kOsReleaseWindowsKey),
++     span<const DispersionOption>(kCpuWindowsOptions)},
++};
++constexpr DispersionAxis kCpuAxis = {
++    "cpu",
++    "cpu",
++    span<const std::string_view>(kPlatformOnly),
++    Selection::kSingle,
++    Servability::kClampDown,
++    span<const DispersionOptionSet>(kCpuSets),
++};
++
++// ---- font_packs: core-plus-subset / none, root axis ----
++constexpr DispersionOption kFontOptions[] = {
++    {"core", 100, "catalogue-value", "", PackKind::kCore, nullptr,
++     R"({"fonts":{"enumeration_allowlist":["Arial","Consolas"]}})"},
++    {"office", 100, "catalogue-value", "", PackKind::kOptional, nullptr,
++     R"({"fonts":{"enumeration_allowlist":["Calibri","Arial"]}})"},
++    {"developer", 100, "catalogue-value", "", PackKind::kOptional, nullptr,
++     R"({"fonts":{"enumeration_allowlist":["Cascadia Code"]},)"
++     R"("theme":{"system_fonts":{"caption":"Cascadia Code"}}})"},
++};
++constexpr DispersionOptionSet kFontSets[] = {
++    {{}, span<const DispersionOption>(kFontOptions)},
++};
++constexpr DispersionAxis kFontAxis = {
++    "font_packs",
++    "font_packs",
++    {},
++    Selection::kCorePlusSubset,
++    Servability::kNone,
++    span<const DispersionOptionSet>(kFontSets),
++};
++
++// ---- a root axis carrying the number shapes the profile really uses ----
++//
++// 8589934592 and 4294967294 are above INT32_MAX, so base::Value holds them as
++// doubles; 1.25 is a real device scale factor. Both shapes have to survive
++// serialisation as the schema declares them.
++constexpr DispersionOption kNumberOptions[] = {
++    {"numbers", 100, "catalogue-value", "", PackKind::kNotAPack, nullptr,
++     R"({"gl_limits":{"MAX_ELEMENT_INDEX":4294967294},)"
++     R"("memory":{"total_bytes":8589934592},)"
++     R"("screen":{"device_pixel_ratio":1.25}})"},
++};
++constexpr DispersionOptionSet kNumberSets[] = {
++    {{}, span<const DispersionOption>(kNumberOptions)},
++};
++constexpr DispersionAxis kNumberAxis = {
++    "memory", "memory", {}, Selection::kSingle, Servability::kNone,
++    span<const DispersionOptionSet>(kNumberSets),
++};
++
++// ---- an extra root axis, used only to prove label independence ----
++constexpr DispersionOption kExtraOptions[] = {
++    {"extra-a", 50, "catalogue-value", "", PackKind::kNotAPack, nullptr,
++     R"({"audio":{"hardware_buffer_frames":512}})"},
++    {"extra-b", 50, "catalogue-value", "", PackKind::kNotAPack, nullptr,
++     R"({"audio":{"hardware_buffer_frames":256}})"},
++};
++constexpr DispersionOptionSet kExtraSets[] = {
++    {{}, span<const DispersionOption>(kExtraOptions)},
++};
++constexpr DispersionAxis kExtraAxis = {
++    "extra", "extra", {}, Selection::kSingle, Servability::kNone,
++    span<const DispersionOptionSet>(kExtraSets),
++};
++
++// ---- voices: single / none, conditioned on languages ----
++constexpr ConditionKey kVoicesEnUsKey[] = {{"languages", "en-US,en"}};
++constexpr ConditionKey kVoicesAnyKey[] = {{"languages", ""}};
++constexpr DispersionOption kVoicesEnUsOptions[] = {
++    {"en-us", 100, "catalogue-value", "", PackKind::kNotAPack, nullptr,
++     R"({"speech":{"voices":[{"lang":"en-US","name":"David"}]}})"},
++};
++constexpr DispersionOption kVoicesAnyOptions[] = {
++    {"unmeasured", 100, "host-inherited", "", PackKind::kNotAPack, nullptr,
++     R"({})"},
++};
++constexpr DispersionOptionSet kVoicesSets[] = {
++    {span<const ConditionKey>(kVoicesEnUsKey),
++     span<const DispersionOption>(kVoicesEnUsOptions)},
++    {span<const ConditionKey>(kVoicesAnyKey),
++     span<const DispersionOption>(kVoicesAnyOptions)},
++};
++constexpr std::string_view kLanguagesOnly[] = {"languages"};
++constexpr DispersionAxis kVoicesAxis = {
++    "voices",
++    "voices",
++    span<const std::string_view>(kLanguagesOnly),
++    Selection::kSingle,
++    Servability::kNone,
++    span<const DispersionOptionSet>(kVoicesSets),
++};
++
++// ---- one anchor, and the policies Compose() always resolves ----
++//
++// Two members, deliberately asymmetric: one measured a WebGPU adapter and one
++// measured none. That is the real shape of the Linux/Vulkan anchor, where two
++// Ada cards report an adapter and the RTX 3090 and RTX PRO 4000 returned none.
++constexpr AnchorMember kAnchorMembers[] = {
++    {"with-adapter", "Google Inc. (Test)", "ANGLE (Test, Renderer With Adapter)",
++     R"({"webgpu":{"info":{"architecture":"test-3","vendor":"test"}}})"},
++    {"no-adapter", "Google Inc. (Test)", "ANGLE (Test, Renderer No Adapter)",
++     ""},
++};
++constexpr Anchor kAnchors[] = {
++    {"test-metal", "macos", "metal", "Test", "physical-ground-truth", "aa",
++     "bb", "cc", 1, span<const AnchorMember>(kAnchorMembers),
++     R"({"gl_limits":{"MAX_TEXTURE_SIZE":16384}})"},
++};
++
++// ---- gpu_identity: single / anchor-member, conditioned on anchor ----
++//
++// One axis per member so each branch is reached deterministically rather than
++// depending on which identity the draw happens to pick.
++constexpr ConditionKey kAnchorKey[] = {{"anchor", "test-metal"}};
++constexpr std::string_view kAnchorOnly[] = {"anchor"};
++constexpr Requirement kOnTestMetal = {0, 0, 0, 0, "test-metal", {}};
++
++constexpr DispersionOption kIdentityWithAdapter[] = {
++    {"with-adapter", 100, "physical-ground-truth", "", PackKind::kNotAPack,
++     &kOnTestMetal,
++     R"fp({"gpu":{"unmasked_renderer":"ANGLE (Test, Renderer With Adapter)",)fp"
++     R"fp("unmasked_vendor":"Google Inc. (Test)"}})fp"},
++};
++constexpr DispersionOptionSet kIdentityWithAdapterSets[] = {
++    {span<const ConditionKey>(kAnchorKey),
++     span<const DispersionOption>(kIdentityWithAdapter)},
++};
++constexpr DispersionAxis kGpuIdentityWithAdapterAxis = {
++    "gpu_identity",
++    "gpu_identity",
++    span<const std::string_view>(kAnchorOnly),
++    Selection::kSingle,
++    Servability::kAnchorMember,
++    span<const DispersionOptionSet>(kIdentityWithAdapterSets),
++};
++
++constexpr DispersionOption kIdentityNoAdapter[] = {
++    {"no-adapter", 100, "physical-ground-truth", "", PackKind::kNotAPack,
++     &kOnTestMetal,
++     R"fp({"gpu":{"unmasked_renderer":"ANGLE (Test, Renderer No Adapter)",)fp"
++     R"fp("unmasked_vendor":"Google Inc. (Test)"}})fp"},
++};
++constexpr DispersionOptionSet kIdentityNoAdapterSets[] = {
++    {span<const ConditionKey>(kAnchorKey),
++     span<const DispersionOption>(kIdentityNoAdapter)},
++};
++constexpr DispersionAxis kGpuIdentityNoAdapterAxis = {
++    "gpu_identity",
++    "gpu_identity",
++    span<const std::string_view>(kAnchorOnly),
++    Selection::kSingle,
++    Servability::kAnchorMember,
++    span<const DispersionOptionSet>(kIdentityNoAdapterSets),
++};
++
++constexpr PolicyOption kLocalePolicies[] = {
++    {"en-us", "all", "catalogue-value",
++     R"({"locale":{"accept_languages":"en-US,en","timezone":"America/New_York"}})"},
++};
++constexpr PolicyOption kThemePolicies[] = {
++    {"light", "all", "catalogue-value", R"({"theme":{"prefers_dark":false}})"},
++};
++
++HostCapability CapableHost() {
++  HostCapability host;
++  host.logical_cores = 32;
++  host.total_memory_bytes = uint64_t{64} * 1024 * 1024 * 1024;
++  host.graphics_backend = "metal";
++  host.graphics_backend_is_inferred = false;
++  host.platform = "macos";
++  return host;
++}
++
++ComposeRequest RequestFor(std::string seed,
++                          span<const DispersionAxis> axes,
++                          const HostCapability& host) {
++  ComposeRequest request;
++  request.seed = std::move(seed);
++  request.platform = "windows";
++  request.host = host;
++  request.axes = axes;
++  request.anchors = span<const Anchor>(kAnchors);
++  request.locale_policies = span<const PolicyOption>(kLocalePolicies);
++  request.theme_policies = span<const PolicyOption>(kThemePolicies);
++  request.union_array_paths = span<const std::string_view>(kUnionPaths);
++  request.profile_schema_version = "3";
++  request.catalogue_version = "2";
++  request.chromium_version = "152.0.7977.83";
++  request.catalogue_digest = "test-digest";
++  request.default_accept_languages = "en-US,en";
++  return request;
++}
++
++std::string ChosenId(const Composition& composition, std::string_view surface) {
++  for (const SurfaceRecord& record : composition.surfaces) {
++    if (record.surface == surface) {
++      return record.value;
++    }
++  }
++  return "(absent)";
++}
++
++const SurfaceRecord* Record(const Composition& composition,
++                            std::string_view surface) {
++  for (const SurfaceRecord& record : composition.surfaces) {
++    if (record.surface == surface) {
++      return &record;
++    }
++  }
++  return nullptr;
++}
++
++// The same serialisation the entry point ships, so these comparisons reflect
++// the bytes a launch actually carries.
++std::string ProfileJson(const Composition& composition) {
++  return WriteJsonWithOptions(composition.profile,
++                              JSONWriter::OPTIONS_OMIT_DOUBLE_TYPE_PRESERVATION)
++      .value_or("<unserialisable>");
++}
++
++// ---------------------------------------------------------------------------
++// The derivation itself
++// ---------------------------------------------------------------------------
++
++// The golden vector. These bytes are the contract: they were produced by an
++// independent implementation of FINGERPRINTS.md §5 and they agree with
++// scripts/profile_resolver.py's seed_root() for the same tuple. If this test
++// fails, either the derivation changed or one of the six identity components
++// is being fed in differently -- and every existing seed now means a different
++// machine.
++TEST(ApostateComposeTest, RootIsTheDeclaredDerivation) {
++  const RootInputs inputs = {
++      .profile_schema_version = "3",
++      .catalogue_version = "2",
++      .chromium_version = "152.0.7977.83",
++      .fingerprint_platform = "windows",
++      .seed = "12345",
++  };
++  EXPECT_EQ(
++      "b0b97b3a3531b65ee50f45fc56ea165e625bc8e6a8248f1afccb25d6308db8c8",
++      HexEncodeLower(ComputeRoot(inputs)));
++  EXPECT_EQ(uint64_t{0xb0b97b3a3531b65e}, High64(ComputeRoot(inputs)));
++}
++
++TEST(ApostateComposeTest, SubstreamsAreTheDeclaredDerivation) {
++  const RootInputs inputs = {
++      .profile_schema_version = "3",
++      .catalogue_version = "2",
++      .chromium_version = "152.0.7977.83",
++      .fingerprint_platform = "windows",
++      .seed = "12345",
++  };
++  const Digest root = ComputeRoot(inputs);
++
++  EXPECT_EQ(
++      "eaac0baebcf1d72b281ce4440131b4c17ab866f05f7185cf008c8d5b2274e0ce",
++      HexEncodeLower(Draw(root, "os_release", 0)));
++  EXPECT_EQ(
++      "19d1abcfc04392c7d6a03b9d1c625769d92e5810e6070464fa4c8c9d0ff6b45b",
++      HexEncodeLower(Draw(root, "cpu", 0)));
++  EXPECT_EQ(
++      "99a136f2980c2237b73ea4ae77838a446786c91a59ecc9fe09ee834e1b3591a6",
++      HexEncodeLower(Draw(root, "anchor", 0)));
++  // The index is a big-endian uint32, so index 1 and index 2 of the same label
++  // are unrelated streams rather than adjacent bytes.
++  EXPECT_EQ(
++      "79012f1b1421e7cc38dced78ddca8db41447221cdbc26e3a7641107e17751392",
++      HexEncodeLower(Draw(root, "font_packs", 1)));
++  EXPECT_EQ(
++      "c568bbd3ff0158dc36999dd9824276f29842ed1a62ab1ae3009e70fc7926a781",
++      HexEncodeLower(Draw(root, "font_packs", 2)));
++}
++
++// ScaleToRange is implemented from 32-bit halves because C++ has no portable
++// 128-bit multiply. These are the cases where a naive implementation is wrong:
++// the top of the range, the exact half, and a range at the 32-bit boundary.
++TEST(ApostateComposeTest, ScaleToRangeIsTheHighHalfOfTheProduct) {
++  EXPECT_EQ(0u, ScaleToRange(0, 100));
++  EXPECT_EQ(99u, ScaleToRange(0xFFFFFFFFFFFFFFFFu, 100));
++  EXPECT_EQ(50u, ScaleToRange(0x8000000000000000u, 100));
++  EXPECT_EQ(49u, ScaleToRange(0x7FFFFFFFFFFFFFFFu, 100));
++  EXPECT_EQ(4294967294u, ScaleToRange(0xFFFFFFFFFFFFFFFFu, 0xFFFFFFFFu));
++  EXPECT_EQ(305419896u, ScaleToRange(0x123456789ABCDEF0u, 0xFFFFFFFFu));
++  EXPECT_EQ(6u, ScaleToRange(0xFFFFFFFF00000000u, 7));
++  EXPECT_EQ(0u, ScaleToRange(0x00000000FFFFFFFFu, 0xFFFFFFFFu));
++  // The result is always strictly inside the range, which is why no modulo and
++  // no rejection loop are needed.
++  EXPECT_EQ(0u, ScaleToRange(0xFFFFFFFFFFFFFFFFu, 1));
++}
++
++TEST(ApostateComposeTest, WeightedPickResolvesAgainstCumulativeWeights) {
++  constexpr uint32_t kWeights[] = {10, 1, 89};
++  // Position 0..9 -> index 0, 10 -> index 1, 11..99 -> index 2. The boundary
++  // between the first and second option is the one an off-by-one moves.
++  EXPECT_EQ(0u, WeightedPick(0, kWeights));
++  EXPECT_EQ(0u, WeightedPick(0x1999999999999999u, kWeights));  // position 9
++  EXPECT_EQ(1u, WeightedPick(0x199999999999999Au, kWeights));  // position 10
++  EXPECT_EQ(2u, WeightedPick(0x1C28F5C28F5C28F6u, kWeights));  // position 11
++  EXPECT_EQ(2u, WeightedPick(0xFFFFFFFFFFFFFFFFu, kWeights));  // position 99
++}
++
++// §9.4: the realised distribution must match the table weights. This is the
++// property that makes a weight mean something -- a pick that is deterministic
++// but biased would still be deterministic.
++TEST(ApostateComposeTest, WeightedPickReproducesTheDeclaredDistribution) {
++  constexpr std::array<uint32_t, 3> kWeights = {70, 20, 10};
++  constexpr int kSeeds = 60000;
++
++  std::array<int, 3> counts = {0, 0, 0};
++  for (int i = 0; i < kSeeds; ++i) {
++    const std::string seed = "seed-" + NumberToString(i);
++    const RootInputs inputs = {
++        .profile_schema_version = "3",
++        .catalogue_version = "2",
++        .chromium_version = "152.0.7977.83",
++        .fingerprint_platform = "windows",
++        .seed = seed,
++    };
++    const Digest root = ComputeRoot(inputs);
++    counts[WeightedPick(High64(Draw(root, "distribution", 0)),
++                        span<const uint32_t>(kWeights))] += 1;
++  }
++
++  for (size_t i = 0; i < 3; ++i) {
++    const double realised = 100.0 * counts[i] / kSeeds;
++    EXPECT_NEAR(kWeights[i], realised, 1.0)
++        << "option " << i << " realised " << realised << "% of " << kSeeds
++        << " seeds against a declared weight of " << kWeights[i];
++  }
++}
++
++TEST(ApostateComposeTest, SubsetInclusionFollowsThePercentWeight) {
++  // A pack at 0% is never taken and a pack at 100% always is, whatever the
++  // draw says. Everything between is decided by the substream.
++  EXPECT_FALSE(SubsetIncluded(0, 0));
++  EXPECT_FALSE(SubsetIncluded(0xFFFFFFFFFFFFFFFFu, 0));
++  EXPECT_TRUE(SubsetIncluded(0, 100));
++  EXPECT_TRUE(SubsetIncluded(0xFFFFFFFFFFFFFFFFu, 100));
++  EXPECT_TRUE(SubsetIncluded(0x7FFFFFFFFFFFFFFFu, 50));   // position 49
++  EXPECT_FALSE(SubsetIncluded(0x8000000000000000u, 50));  // position 50
++}
++
++// ---------------------------------------------------------------------------
++// Composition
++// ---------------------------------------------------------------------------
++
++TEST(ApostateComposeTest, TheSameTupleComposesTheSameProfile) {
++  constexpr DispersionAxis kAxes[] = {kOsReleaseAxis, kCpuAxis, kFontAxis};
++  const HostCapability host = CapableHost();
++
++  const std::optional<Composition> first =
++      Compose(RequestFor("stable-seed", kAxes, host));
++  const std::optional<Composition> second =
++      Compose(RequestFor("stable-seed", kAxes, host));
++
++  ASSERT_TRUE(first.has_value());
++  ASSERT_TRUE(second.has_value());
++  EXPECT_EQ(ProfileJson(*first), ProfileJson(*second));
++  EXPECT_EQ(HexEncodeLower(first->root), HexEncodeLower(second->root));
++}
++
++// `id` is not a private diagnostic: patch 0004's loader reads it into
++// source_id_, so it is a field a consumer observes, and
++// scripts/profile_resolver.py now derives it identically. It is derived from
++// the root rather than from a digest of the profile, because a field inside the
++// profile cannot depend on a hash of the profile.
++TEST(ApostateComposeTest, TheProfileIdIsDerivedFromTheRoot) {
++  constexpr DispersionAxis kAxes[] = {kOsReleaseAxis};
++  // RequestFor pins the identity tuple to the golden one, so this is the same
++  // root as RootIsTheDeclaredDerivation above.
++  const std::optional<Composition> composition =
++      Compose(RequestFor("12345", kAxes, CapableHost()));
++  ASSERT_TRUE(composition.has_value());
++
++  const std::string* id = composition->profile.FindString("id");
++  ASSERT_TRUE(id);
++  EXPECT_EQ("fp-b0b97b3a3531b65ee50f45fc", *id);
++  EXPECT_EQ("fp-" + HexEncodeLower(composition->root).substr(0, 24), *id);
++}
++
++TEST(ApostateComposeTest, ADifferentSeedComposesADifferentProfile) {
++  constexpr DispersionAxis kAxes[] = {kOsReleaseAxis, kCpuAxis, kFontAxis};
++  const HostCapability host = CapableHost();
++
++  const std::optional<Composition> first =
++      Compose(RequestFor("seed-one", kAxes, host));
++  const std::optional<Composition> second =
++      Compose(RequestFor("seed-two", kAxes, host));
++
++  ASSERT_TRUE(first.has_value());
++  ASSERT_TRUE(second.has_value());
++  EXPECT_NE(HexEncodeLower(first->root), HexEncodeLower(second->root));
++  EXPECT_NE(ProfileJson(*first), ProfileJson(*second));
++}
++
++// The property that lets the catalogue grow. Every axis draws from a substream
++// keyed by its own label, so inserting an axis must leave every other axis's
++// choice exactly where it was -- otherwise every shipped seed silently means a
++// different machine after a catalogue update.
++TEST(ApostateComposeTest, AddingAnAxisDoesNotShiftAnotherAxisChoice) {
++  constexpr DispersionAxis kBefore[] = {kOsReleaseAxis, kCpuAxis, kFontAxis};
++  constexpr DispersionAxis kAfter[] = {kOsReleaseAxis, kExtraAxis, kCpuAxis,
++                                       kFontAxis};
++  const HostCapability host = CapableHost();
++
++  const std::optional<Composition> before =
++      Compose(RequestFor("growth-seed", kBefore, host));
++  const std::optional<Composition> after =
++      Compose(RequestFor("growth-seed", kAfter, host));
++  ASSERT_TRUE(before.has_value());
++  ASSERT_TRUE(after.has_value());
++
++  EXPECT_EQ(ChosenId(*before, "os_release"), ChosenId(*after, "os_release"));
++  EXPECT_EQ(ChosenId(*before, "cpu"), ChosenId(*after, "cpu"));
++  EXPECT_EQ(ChosenId(*before, "anchor"), ChosenId(*after, "anchor"));
++  EXPECT_EQ(ChosenId(*before, "locale"), ChosenId(*after, "locale"));
++  EXPECT_EQ(ChosenId(*before, "theme"), ChosenId(*after, "theme"));
++  // And the new axis did resolve, so this is not passing by doing nothing.
++  EXPECT_NE("(absent)", ChosenId(*after, "extra"));
++}
++
++// ---------------------------------------------------------------------------
++// Servability
++// ---------------------------------------------------------------------------
++
++TEST(ApostateComposeTest, ADrawnClaimNeverExceedsHostCoreCount) {
++  constexpr DispersionAxis kAxes[] = {kOsReleaseAxis, kCpuAxis};
++
++  HostCapability host = CapableHost();
++  host.logical_cores = 6;
++
++  // Every seed, not one: the point is that no draw can produce a claim above
++  // the host, not that this particular draw did not.
++  for (int i = 0; i < 200; ++i) {
++    const std::optional<Composition> composition =
++        Compose(RequestFor("host-seed-" + NumberToString(i), kAxes, host));
++    ASSERT_TRUE(composition.has_value());
++    const DictValue* cpu = composition->profile.FindDict("cpu");
++    ASSERT_TRUE(cpu);
++    const std::optional<int> claimed = cpu->FindInt("logical_cores");
++    ASSERT_TRUE(claimed.has_value());
++    EXPECT_LE(*claimed, host.logical_cores);
++    // 4 is the only bucket a 6-core host can serve, so the dispersion has been
++    // reduced to one point. That is correct behaviour and it is reported.
++    EXPECT_EQ("cores-4", ChosenId(*composition, "cpu"));
++  }
++}
++
++// The measured failure this rule exists to prevent: on a host below every
++// bucket the table knows, keeping the table's lowest option ships a claim
++// *above* host capability. Host inheritance is servable by definition, because
++// it is the host's own value.
++TEST(ApostateComposeTest, AnExhaustedCapacityAxisLeavesTheSurfaceInherited) {
++  constexpr DispersionAxis kAxes[] = {kOsReleaseAxis, kCpuAxis};
++
++  HostCapability host = CapableHost();
++  host.logical_cores = 2;
++
++  const std::optional<Composition> composition =
++      Compose(RequestFor("tiny-host", kAxes, host));
++  ASSERT_TRUE(composition.has_value());
++
++  EXPECT_FALSE(composition->profile.contains("cpu"));
++
++  const SurfaceRecord* record = Record(*composition, "cpu");
++  ASSERT_TRUE(record);
++  EXPECT_EQ("host-inherited", record->layer);
++  EXPECT_FALSE(record->limitation.empty());
++
++  bool reported = false;
++  for (const std::string& limitation : composition->limitations) {
++    reported = reported || limitation.find("cpu:") == 0;
++  }
++  EXPECT_TRUE(reported) << "an exhausted axis must be reported, not hidden";
++}
++
++TEST(ApostateComposeTest, ClampsNeverRaiseAClaim) {
++  EXPECT_EQ(4, ClampLogicalCores(4, 8));
++  EXPECT_EQ(8, ClampLogicalCores(8, 8));
++  EXPECT_EQ(8, ClampLogicalCores(16, 8));
++  // An unknown host capability cannot justify reducing anything.
++  EXPECT_EQ(16, ClampLogicalCores(16, 0));
++
++  EXPECT_EQ(1024u, ClampMemoryBytes(1024, 2048));
++  EXPECT_EQ(2048u, ClampMemoryBytes(4096, 2048));
++  EXPECT_EQ(4096u, ClampMemoryBytes(4096, 0));
++}
++
++// §4: --fingerprint-platform does not move the GPU cluster, and the mismatch is
++// reported rather than hidden.
++TEST(ApostateComposeTest, TheGpuClusterDoesNotFollowThePersona) {
++  constexpr DispersionAxis kAxes[] = {kOsReleaseAxis};
++  const std::optional<Composition> composition =
++      Compose(RequestFor("persona-seed", kAxes, CapableHost()));
++  ASSERT_TRUE(composition.has_value());
++
++  // The persona is windows and the only servable anchor is a macOS/Metal one.
++  EXPECT_EQ("windows", composition->platform);
++  EXPECT_EQ("test-metal", ChosenId(*composition, "anchor"));
++
++  const SurfaceRecord* record = Record(*composition, "anchor");
++  ASSERT_TRUE(record);
++  EXPECT_NE(std::string::npos, record->limitation.find("does not move the GPU"))
++      << "actual limitation: " << record->limitation;
++}
++
++TEST(ApostateComposeTest, AnAnchorIsRequiredToBeServableByTheHostBackend) {
++  constexpr DispersionAxis kAxes[] = {kOsReleaseAxis};
++  HostCapability host = CapableHost();
++  host.graphics_backend = "d3d11";
++
++  // The only compiled anchor is Metal. Presenting its cluster through D3D11 is
++  // the retired catalogue's exact failure, so there is nothing to fall back to
++  // and composition declines rather than inventing a cluster.
++  EXPECT_FALSE(Compose(RequestFor("no-anchor", kAxes, host)).has_value());
++}
++
++// WebGPU is the one part of a capability cluster that is not anchor-wide.
++// `capability_cluster.webgpu.uniform` is false for the Linux/Vulkan anchor: two
++// members report nvidia/lovelace and two returned no adapter at all. Handing
++// the adapter-less members a sibling's adapter would be an unmeasured
++// assertion, so it stays host-inherited.
++TEST(ApostateComposeTest, WebGpuComesFromTheResolvedMemberNotTheAnchor) {
++  constexpr DispersionAxis kWithAdapter[] = {kGpuIdentityWithAdapterAxis};
++  const std::optional<Composition> present =
++      Compose(RequestFor("webgpu-seed", kWithAdapter, CapableHost()));
++  ASSERT_TRUE(present.has_value());
++  const DictValue* webgpu = present->profile.FindDict("webgpu");
++  ASSERT_TRUE(webgpu);
++  EXPECT_EQ("test-3", *webgpu->FindDict("info")->FindString("architecture"));
++  // The anchor-wide GL cluster arrives either way.
++  EXPECT_EQ(16384, present->profile.FindDict("gl_limits")
++                       ->FindInt("MAX_TEXTURE_SIZE"));
++
++  constexpr DispersionAxis kNoAdapter[] = {kGpuIdentityNoAdapterAxis};
++  const std::optional<Composition> absent =
++      Compose(RequestFor("webgpu-seed", kNoAdapter, CapableHost()));
++  ASSERT_TRUE(absent.has_value());
++  EXPECT_FALSE(absent->profile.contains("webgpu"));
++  // The same anchor, so the same GL cluster: it is the WebGPU section alone
++  // that differs between members.
++  EXPECT_EQ(16384, absent->profile.FindDict("gl_limits")
++                       ->FindInt("MAX_TEXTURE_SIZE"));
++
++  const SurfaceRecord* record = Record(*absent, "webgpu");
++  ASSERT_TRUE(record);
++  EXPECT_EQ("host-inherited", record->layer);
++  EXPECT_FALSE(record->limitation.empty());
++}
++
++// ---------------------------------------------------------------------------
++// Merging
++// ---------------------------------------------------------------------------
++
++TEST(ApostateComposeTest, UnionedArrayPathsAccumulateAndOthersReplace) {
++  DictValue target;
++  {
++    DictValue fonts;
++    fonts.Set("enumeration_allowlist",
++              ListValue().Append("Arial").Append("Consolas"));
++    target.Set("fonts", std::move(fonts));
++    DictValue media;
++    media.Set("hw_decode_codecs", ListValue().Append("h264"));
++    target.Set("media", std::move(media));
++  }
++
++  DictValue overlay;
++  {
++    DictValue fonts;
++    fonts.Set("enumeration_allowlist",
++              ListValue().Append("Calibri").Append("Arial"));
++    overlay.Set("fonts", std::move(fonts));
++    DictValue media;
++    media.Set("hw_decode_codecs", ListValue().Append("vp9"));
++    overlay.Set("media", std::move(media));
++  }
++
++  MergeFragment(target, std::move(overlay),
++                span<const std::string_view>(kUnionPaths));
++
++  const ListValue* families =
++      target.FindDict("fonts")->FindList("enumeration_allowlist");
++  ASSERT_TRUE(families);
++  // Appended in option file order, de-duplicated: a font pack is additive.
++  ASSERT_EQ(3u, families->size());
++  EXPECT_EQ("Arial", (*families)[0].GetString());
++  EXPECT_EQ("Consolas", (*families)[1].GetString());
++  EXPECT_EQ("Calibri", (*families)[2].GetString());
++
++  // Every other array replaces, which is what lets a later axis correct an
++  // earlier one instead of accumulating contradictions.
++  const ListValue* codecs =
++      target.FindDict("media")->FindList("hw_decode_codecs");
++  ASSERT_TRUE(codecs);
++  ASSERT_EQ(1u, codecs->size());
++  EXPECT_EQ("vp9", (*codecs)[0].GetString());
++}
++
++TEST(ApostateComposeTest, CorePacksAlwaysLandAndOptionalPacksUnionIntoThem) {
++  constexpr DispersionAxis kAxes[] = {kFontAxis};
++  const std::optional<Composition> composition =
++      Compose(RequestFor("font-seed", kAxes, CapableHost()));
++  ASSERT_TRUE(composition.has_value());
++
++  const ListValue* families =
++      composition->profile.FindDict("fonts")->FindList(
++          "enumeration_allowlist");
++  ASSERT_TRUE(families);
++  // The core pack's two families are always present whatever the optional
++  // packs did: a machine claiming a platform without its core faces is not
++  // that platform.
++  EXPECT_TRUE(families->contains("Arial"));
++  EXPECT_TRUE(families->contains("Consolas"));
++  EXPECT_NE("(absent)", ChosenId(*composition, "font_packs/core"));
++}
++
++// base::Value has no 64-bit integer type, so every profile field above
++// INT32_MAX is held as a double. The default JSON writer appends ".0" to an
++// integral double, which would emit 8589934592.0 for a field the schema
++// declares as an integer -- the binary's own output would then fail the schema
++// the packages validate against. Six real fields are affected, so this is the
++// serialisation contract and not a formatting preference.
++TEST(ApostateComposeTest, LargeIntegralValuesSerialiseAsIntegers) {
++  constexpr DispersionAxis kAxes[] = {kNumberAxis};
++  HostCapability host = CapableHost();
++  host.total_memory_bytes = uint64_t{16} * 1024 * 1024 * 1024;
++
++  const std::optional<Composition> composition =
++      Compose(RequestFor("number-seed", kAxes, host));
++  ASSERT_TRUE(composition.has_value());
++
++  const std::string json = ProfileJson(*composition);
++  EXPECT_NE(std::string::npos, json.find("\"total_bytes\":8589934592"))
++      << json;
++  EXPECT_EQ(std::string::npos, json.find("8589934592.0")) << json;
++  EXPECT_NE(std::string::npos, json.find("\"MAX_ELEMENT_INDEX\":4294967294"))
++      << json;
++  EXPECT_EQ(std::string::npos, json.find("4294967294.0")) << json;
++
++  // A genuinely fractional value is untouched: the flag only collapses doubles
++  // that have no fractional part.
++  EXPECT_NE(std::string::npos, json.find("\"device_pixel_ratio\":1.25"))
++      << json;
++}
++
++// ---------------------------------------------------------------------------
++// Conditioning
++// ---------------------------------------------------------------------------
++
++TEST(ApostateComposeTest, OptionSetMatchingIsExactAndTotal) {
++  constexpr ConditionKey kWindows[] = {{"platform", "windows"}};
++  constexpr ConditionKey kMacos[] = {{"platform", "macos"}};
++  constexpr ConditionKey kTooMany[] = {{"platform", "windows"},
++                                       {"os_release", "windows-11"}};
++
++  EXPECT_TRUE(kOsReleaseAxis.FindOptionSet(kWindows));
++  // A value the table does not carry is a miss, not a nearest match.
++  EXPECT_FALSE(kOsReleaseAxis.FindOptionSet(kMacos));
++  // And so is a tuple of the wrong arity: matching is total, so a superset
++  // does not satisfy a one-name key.
++  EXPECT_FALSE(kOsReleaseAxis.FindOptionSet(kTooMany));
++}
++
++// The projection is computed before the draw, so option-set matching stays
++// exact and total and there is never a failed match to recover from.
++TEST(ApostateComposeTest, AnUnmeasuredLanguageListProjectsOntoTheEmptyKey) {
++  constexpr DispersionAxis kAxes[] = {kVoicesAxis};
++
++  // The locale policy sets en-US,en, which the table has measured.
++  const std::optional<Composition> measured =
++      Compose(RequestFor("lang-seed", kAxes, CapableHost()));
++  ASSERT_TRUE(measured.has_value());
++  EXPECT_EQ("en-us", ChosenId(*measured, "voices"));
++  EXPECT_TRUE(measured->profile.contains("speech"));
++
++  // A locale policy naming a list nobody measured projects onto "", whose
++  // value carries no speech section, so the host's real providers stay in
++  // effect. A listed voice that cannot speak is the alternative.
++  constexpr PolicyOption kSwahili[] = {
++      {"sw-ke", "all", "catalogue-value",
++       R"({"locale":{"accept_languages":"sw-KE,sw","timezone":"Africa/Nairobi"}})"},
++  };
++  ComposeRequest request = RequestFor("lang-seed", kAxes, CapableHost());
++  request.locale_policies = span<const PolicyOption>(kSwahili);
++
++  const std::optional<Composition> unmeasured = Compose(request);
++  ASSERT_TRUE(unmeasured.has_value());
++  EXPECT_EQ("unmeasured", ChosenId(*unmeasured, "voices"));
++  EXPECT_FALSE(unmeasured->profile.contains("speech"));
++}
++
++// ---------------------------------------------------------------------------
++// Work area
++// ---------------------------------------------------------------------------
++
++TEST(ApostateComposeTest, WorkAreaIsDerivedFromThePanelAndTheInsets) {
++  DictValue profile;
++  DictValue screen;
++  screen.Set("width", 1536);
++  screen.Set("height", 864);
++  screen.Set("avail_inset_left", 0);
++  screen.Set("avail_inset_top", 0);
++  screen.Set("avail_inset_right", 0);
++  screen.Set("avail_inset_bottom", 40);
++  profile.Set("screen", std::move(screen));
++
++  std::vector<std::string> limitations;
++  DeriveWorkArea(profile, /*panel_resolved=*/true, &limitations);
++
++  const DictValue* result = profile.FindDict("screen");
++  ASSERT_TRUE(result);
++  EXPECT_EQ(0, result->FindInt("avail_left"));
++  EXPECT_EQ(0, result->FindInt("avail_top"));
++  EXPECT_EQ(1536, result->FindInt("avail_width"));
++  EXPECT_EQ(824, result->FindInt("avail_height"));
++  // The insets are an input to the derivation, not a profile field.
++  EXPECT_FALSE(result->contains("avail_inset_left"));
++  EXPECT_FALSE(result->contains("avail_inset_bottom"));
++}
++
++// availLeft is panel-relative: the Windows reference capture ran on a second
++// monitor at x=1920 and reported availLeft 1920 with a zero inset.
++TEST(ApostateComposeTest, WorkAreaOriginFollowsThePanelOrigin) {
++  DictValue profile;
++  DictValue screen;
++  screen.Set("left", 1920);
++  screen.Set("top", 0);
++  screen.Set("width", 1920);
++  screen.Set("height", 1080);
++  screen.Set("avail_inset_left", 0);
++  screen.Set("avail_inset_top", 0);
++  screen.Set("avail_inset_right", 0);
++  screen.Set("avail_inset_bottom", 48);
++  profile.Set("screen", std::move(screen));
++
++  DeriveWorkArea(profile, /*panel_resolved=*/true, nullptr);
++
++  const DictValue* result = profile.FindDict("screen");
++  ASSERT_TRUE(result);
++  EXPECT_EQ(1920, result->FindInt("avail_left"));
++  EXPECT_EQ(1032, result->FindInt("avail_height"));
++}
++
++TEST(ApostateComposeTest, AnInheritedPanelDropsTheEmptyScreenSection) {
++  DictValue profile;
++  DictValue screen;
++  // Furniture contributed insets, but the panel axis was exhausted, so there
++  // is no panel for them to apply to.
++  screen.Set("avail_inset_left", 0);
++  screen.Set("avail_inset_top", 0);
++  screen.Set("avail_inset_right", 0);
++  screen.Set("avail_inset_bottom", 40);
++  profile.Set("screen", std::move(screen));
++
++  std::vector<std::string> limitations;
++  DeriveWorkArea(profile, /*panel_resolved=*/false, &limitations);
++
++  // An empty section is not a claim.
++  EXPECT_FALSE(profile.contains("screen"));
++  EXPECT_EQ(1u, limitations.size());
++}
++
++}  // namespace
++}  // namespace base::apostate
+
+diff --git a/base/apostate/host_capability_unittest.cc b/base/apostate/host_capability_unittest.cc
+new file mode 100644
+index 0000000..d563f4c
+--- /dev/null
++++ b/base/apostate/host_capability_unittest.cc
+@@ -0,0 +1,116 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#include "base/apostate/host_capability.h"
++
++#include <cstdint>
++#include <limits>
++#include <string>
++#include <vector>
++
++#include "base/command_line.h"
++#include "build/build_config.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace base::apostate {
++namespace {
++
++CommandLine Launch(std::vector<std::string> switches) {
++  CommandLine command_line(CommandLine::NO_PROGRAM);
++  for (const std::string& argument : switches) {
++    const size_t separator = argument.find('=');
++    command_line.AppendSwitchASCII(argument.substr(0, separator),
++                                   argument.substr(separator + 1));
++  }
++  return command_line;
++}
++
++// The probe is what every servability clamp is measured against, so a probe
++// that silently returns nothing would make every clamp a no-op and every claim
++// unfalsifiable-by-accident.
++TEST(ApostateHostCapabilityTest, ProbeReportsRealHostCapacity) {
++  const HostCapability host = ProbeHostCapability(Launch({}));
++
++  EXPECT_GT(host.logical_cores, 0);
++  EXPECT_GT(host.total_memory_bytes, 0u);
++
++#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX)
++  EXPECT_FALSE(host.platform.empty());
++  EXPECT_FALSE(host.graphics_backend.empty());
++  // Nothing named the backend, so it is the platform default and the probe
++  // must say so rather than implying a measurement happened. A real backend
++  // probe needs the GPU process, and the GPU process is a child: the profile
++  // is materialised before the first child starts.
++  EXPECT_TRUE(host.graphics_backend_is_inferred);
++#endif
++}
++
++TEST(ApostateHostCapabilityTest, UseAngleMakesTheBackendAnObservedFact) {
++  const HostCapability vulkan =
++      ProbeHostCapability(Launch({"use-angle=vulkan"}));
++  EXPECT_EQ("vulkan", vulkan.graphics_backend);
++  EXPECT_FALSE(vulkan.graphics_backend_is_inferred);
++
++  const HostCapability metal = ProbeHostCapability(Launch({"use-angle=metal"}));
++  EXPECT_EQ("metal", metal.graphics_backend);
++  EXPECT_FALSE(metal.graphics_backend_is_inferred);
++
++  // d3d11on12 is D3D11 as far as a capability cluster is concerned.
++  EXPECT_EQ("d3d11",
++            ProbeHostCapability(Launch({"use-angle=d3d11on12"})).graphics_backend);
++
++  // "default" names no backend, and neither do the null/warp test backends.
++  // Treating them as a real one would make an anchor selectable that the host
++  // cannot actually produce, which is the failure the anchor model exists to
++  // stop -- so they fall through to the platform default and stay inferred.
++  const HostCapability defaulted =
++      ProbeHostCapability(Launch({"use-angle=default"}));
++  EXPECT_TRUE(defaulted.graphics_backend_is_inferred);
++  const HostCapability null_backend =
++      ProbeHostCapability(Launch({"use-angle=d3d11-null"}));
++  EXPECT_TRUE(null_backend.graphics_backend_is_inferred);
++}
++
++TEST(ApostateHostCapabilityTest, WindowBoundsComeFromTheLaunch) {
++  const HostCapability sized =
++      ProbeHostCapability(Launch({"window-size=1280,720"}));
++  EXPECT_EQ(1280, sized.window_width);
++  EXPECT_EQ(720, sized.window_height);
++
++  // Unconstrained until something constrains it: a zero bound drops no panel.
++  EXPECT_EQ(0, ProbeHostCapability(Launch({})).window_width);
++
++  // Garbage is not a constraint either. Half-parsing "1280" into a width with
++  // no height would silently drop every panel narrower than 1280.
++  EXPECT_EQ(0, ProbeHostCapability(Launch({"window-size=1280"})).window_width);
++  EXPECT_EQ(0, ProbeHostCapability(Launch({"window-size=a,b"})).window_width);
++  EXPECT_EQ(0, ProbeHostCapability(Launch({"window-size=-5,-5"})).window_width);
++}
++
++// §3: capacity is only ever reduced. A claim below host capability survives
++// every probe a page can run; a claim above it fails the first.
++TEST(ApostateHostCapabilityTest, ClampsReduceAndNeverRaise) {
++  EXPECT_EQ(1, ClampLogicalCores(1, 64));
++  EXPECT_EQ(8, ClampLogicalCores(8, 8));
++  EXPECT_EQ(8, ClampLogicalCores(9, 8));
++  EXPECT_EQ(1, ClampLogicalCores(64, 1));
++
++  constexpr uint64_t kGib = uint64_t{1} << 30;
++  EXPECT_EQ(8 * kGib, ClampMemoryBytes(8 * kGib, 32 * kGib));
++  EXPECT_EQ(32 * kGib, ClampMemoryBytes(64 * kGib, 32 * kGib));
++  EXPECT_EQ(std::numeric_limits<uint64_t>::max(),
++            ClampMemoryBytes(std::numeric_limits<uint64_t>::max(), 0));
++}
++
++// An unknown host capability is not evidence of a small host, so it cannot
++// justify reducing a claim. Reducing on unknown would quietly shrink every
++// profile on any platform whose probe is not implemented.
++TEST(ApostateHostCapabilityTest, AnUnknownHostCapacityReducesNothing) {
++  EXPECT_EQ(12, ClampLogicalCores(12, 0));
++  EXPECT_EQ(12, ClampLogicalCores(12, -1));
++  EXPECT_EQ(4096u, ClampMemoryBytes(4096, 0));
++}
++
++}  // namespace
++}  // namespace base::apostate

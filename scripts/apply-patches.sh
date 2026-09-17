@@ -1,80 +1,146 @@
 #!/usr/bin/env bash
-# Apply patches/series in order.
-#
-# git apply matches context exactly and never fuzzes, which is the property we
-# want: a patch that applied at an offset would have landed somewhere nobody
-# verified, and here a patch in the wrong place is a wrong value shipped
-# silently.
-source "$(dirname "$0")/lib.sh"
+# Apply the patch series to the pinned Chromium checkout, or verify that it
+# already is. Works against the persistent workspace resolved by lib.sh.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-MODE="${1:-apply}"
-case "$MODE" in apply|--check|--reset-only) ;; *) die "usage: apply-patches.sh [--check|--reset-only]" ;; esac
-CHECK_ONLY=0
-[ "$MODE" = "--check" ] && CHECK_ONLY=1
+check_only=0
+if [ "${1:-}" = "--check" ]; then
+  check_only=1
+fi
 
-SERIES="$REPO_ROOT/patches/series"
-python3 "$REPO_ROOT/scripts/validate-release-baseline.py" --root "$REPO_ROOT" --series-only
-[ -d "$SRC" ] || die "blocked: no pinned Chromium checkout at $SRC; run scripts/fetch-sources.sh"
-MTIME_SNAPSHOT="$(mktemp /tmp/apostate-patch-times.XXXXXX)"
-cleanup_check() {
-  [ "$CHECK_ONLY" -eq 1 ] || return 0
-  git -C "$SRC" reset -q --hard || true
-  git -C "$SRC" checkout -q --detach "refs/tags/$CHROMIUM_VERSION" || true
-  git -C "$SRC" clean -qfd || true
-  git -C "$SRC" reset -q --hard || true
-  while read -r sub; do
-    [ -d "$SRC/$sub/.git" ] || continue
-    git -C "$SRC/$sub" reset -q --hard || true
-    git -C "$SRC/$sub" clean -qfd || true
-  done < <(grep -h "^+++ b/" "$REPO_ROOT"/patches/*.patch 2>/dev/null \
-         | sed "s|^+++ b/||" | cut -d/ -f1-2 | sort -u)
+SERIES_FILE="$REPO_ROOT/patches/series"
+[ -f "$SERIES_FILE" ] || die "missing patch series at $SERIES_FILE"
+
+# The checkout must be a real git worktree before anything else touches it.
+[ -d "$SRC" ] || die "no checkout at $SRC; run scripts/fetch-sources.sh"
+git -C "$SRC" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || die "$SRC is not a git worktree; run scripts/fetch-sources.sh"
+
+# Patch paths are absolute (not ../../patches) because the workspace may live
+# outside this repo, where a relative path from the checkout would not resolve.
+patches=()
+while read -r patch_line; do
+  # Strip comments and whitespace
+  patch_file="$(echo "$patch_line" | sed -e 's/[[:space:]]*#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  [[ -z "$patch_file" ]] && continue
+  patch_path="$REPO_ROOT/patches/$patch_file"
+  [ -f "$patch_path" ] || die "missing patch file: $patch_path"
+  patches+=("$patch_path")
+done < "$SERIES_FILE"
+
+[ "${#patches[@]}" -gt 0 ] || die "patch series is empty"
+
+# Identity of the applied series: every patch name and its bytes. A reverse
+# --check cannot answer "is this applied?" — reversing patch N is tested against
+# a tree that patches N+1.. have since edited, so any two patches touching one
+# file make it report "not applied" forever. That turned every run into a full
+# reset and reapply, which rewrote mtimes and forced ninja to rebuild the world
+# on an otherwise unchanged tree.
+STAMP="$SRC/.apostate-patches"
+series_digest() {
+  python3 - "$REPO_ROOT" <<'PY'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+digest = hashlib.sha256()
+for line in (root / "patches/series").read_text(encoding="utf-8").splitlines():
+    name = line.partition("#")[0].strip()
+    if name:
+        digest.update(name.encode() + b"\0" + (root / "patches" / name).read_bytes() + b"\0")
+print(digest.hexdigest())
+PY
 }
-trap 'cleanup_check; rm -f "$MTIME_SNAPSHOT"' EXIT
-python3 "$REPO_ROOT/scripts/preserve-patch-mtimes.py" snapshot --src "$SRC" \
-  --patches "$REPO_ROOT/patches" --state "$MTIME_SNAPSHOT"
+digest="$(series_digest)"
 
-say "resetting checkout to pristine $CHROMIUM_VERSION"
-git -C "$SRC" rev-parse --verify "refs/tags/$CHROMIUM_VERSION^{commit}" >/dev/null
-git -C "$SRC" reset -q --hard
-git -C "$SRC" checkout -q --detach "refs/tags/$CHROMIUM_VERSION"
-git -C "$SRC" clean -qfd
-git -C "$SRC" reset -q --hard
-
-# DEPS-managed directories are their own git checkouts, so the reset above
-# does not touch them. A patch that edits one — third_party/swiftshader, for
-# instance — would survive a reset and then be applied a second time, leaving
-# the tree in a state no series describes. Reset every sub-repo any patch in
-# the series writes to.
-while read -r sub; do
-  [ -d "$SRC/$sub/.git" ] || continue
-  git -C "$SRC/$sub" reset -q --hard
-  git -C "$SRC/$sub" clean -qfd
-done < <(grep -h "^+++ b/" "$REPO_ROOT"/patches/*.patch 2>/dev/null \
-         | sed "s|^+++ b/||" | cut -d/ -f1-2 | sort -u)
-
-if [ "$MODE" = "--reset-only" ]; then
-  say "checkout reset; patches not applied"
+if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$digest" ]; then
+  echo "patch series already applied"
   exit 0
 fi
 
-count=0
-while IFS= read -r line; do
-  line="${line%%#*}"; line="$(printf '%s' "$line" | xargs || true)"
-  [ -n "$line" ] || continue
-  patch_file="$REPO_ROOT/patches/$line"
-  [ -f "$patch_file" ] || die "missing patch: $line"
-  printf '  %s\n' "$line"
-  # git apply requires exact context and has no fuzz mode at all, unlike
-  # patch(1) — so strictness is the default rather than something to request.
-  # An earlier version passed --no-fuzz, which git apply does not accept.
-  # Some pinned vendor sources use CRLF. Treat its CR as a line ending while
-  # retaining errors for actual trailing spaces/tabs and blank EOF lines.
-  git -C "$SRC" -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol \
-    apply --whitespace=error "$patch_file" \
-    || die "failed to apply $line — rebase the patch against $CHROMIUM_VERSION"
-  count=$((count + 1))
-done < "$SERIES"
+if [ "$check_only" = 1 ]; then
+  # Verify-only: report the current tree's state without modifying it.
+  if [ -e "$STAMP" ]; then
+    echo "stale stamp — a real run will reset and reapply"
+    exit 3
+  fi
+  if [ -z "$(git -C "$SRC" status --porcelain)" ]; then
+    echo "pristine tree; a real run will apply the full series"
+    exit 0
+  fi
+  echo "mixed/partial state — a real run will reset and reapply"
+  exit 3
+fi
 
-say "applied $count patch(es)"
-python3 "$REPO_ROOT/scripts/preserve-patch-mtimes.py" restore --src "$SRC" \
-  --state "$MTIME_SNAPSHOT"
+# Every repository the series touches, not just the main one. DEPS checkouts
+# such as third_party/swiftshader, angle, dawn and webrtc are independent git
+# repositories nested inside the Chromium worktree: `git apply` writes into
+# them by path, but the parent repository's checkout and clean cannot revert
+# them. Resetting only $SRC therefore left sub-repository patches applied, the
+# reverse-apply fast path disagreed with reality, and the series stopped at the
+# first sub-repository patch with "patch does not apply" against its own
+# already-applied output.
+repo_roots() {
+  local paths=() path dir root
+  while IFS= read -r path; do
+    paths+=("$path")
+  done < <(sed -n 's|^+++ b/||p' "${patches[@]}" | sort -u)
+  {
+    printf '%s\n' "$SRC"
+    for path in "${paths[@]}"; do
+      dir="$SRC/$(dirname "$path")"
+      [ -d "$dir" ] || continue
+      root="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)"
+      [ -n "$root" ] && printf '%s\n' "$root"
+    done
+  } | sort -u
+}
+
+# Paths the series creates, so the reset can remove exactly those instead of
+# every untracked file. `git clean -fd` deleted gclient-provisioned build
+# tooling — buildtools/mac_arm64/gn and third_party/node's node binary are
+# fetched by hooks, are untracked, and are not gitignored — which left the
+# checkout unable to configure until the hooks were re-run.
+created_paths() {
+  python3 - "$@" <<'PY'
+import pathlib, sys
+paths = []
+for patch in sys.argv[1:]:
+    lines = pathlib.Path(patch).read_text(encoding="utf-8", errors="replace").splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("--- /dev/null") and i + 1 < len(lines) and lines[i + 1].startswith("+++ b/"):
+            paths.append(lines[i + 1][6:])
+for path in sorted(set(paths)):
+    print(path)
+PY
+}
+
+# Not fully applied: reset to pristine, then apply the whole series exactly.
+rm -f "$STAMP"
+say "resetting checkout to pristine"
+while IFS= read -r root; do
+  say "  reset $(basename "$root")"
+  git -C "$root" checkout -- .
+done < <(repo_roots)
+while IFS= read -r path; do
+  [ -n "$path" ] || continue
+  rm -f "$SRC/$path"
+  # Remove the directory only when the series created it and nothing else is
+  # left in it; rmdir refuses otherwise, which is the check we want.
+  rmdir "$SRC/$(dirname "$path")" 2>/dev/null || true
+done < <(created_paths "${patches[@]}")
+
+# The tag is pinned, so every patch must apply without fuzz. Each is applied in
+# series order and checked immediately before it is applied, because a patch may
+# legitimately depend on a file an earlier patch created.
+
+say "applying patch series"
+for patch_path in "${patches[@]}"; do
+  echo "==> $(basename "$patch_path")"
+  if ! git -C "$SRC" apply "$patch_path"; then
+    die "failed to apply $(basename "$patch_path")"
+  fi
+done
+
+printf '%s\n' "$digest" > "$STAMP"
+
+say "applied ${#patches[@]} patches"

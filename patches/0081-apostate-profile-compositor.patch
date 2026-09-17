@@ -1,0 +1,2562 @@
+Subject: [PATCH] base: the fingerprint compositor
+
+The deterministic function (seed, tables, host capability, requested platform)
+-> profile, in C++ in the browser process, as the only implementation.
+
+It has to be in the binary. The bare binary must produce a fingerprint with no
+arguments, and until now the project had three separate resolvers -- 
+scripts/profile_resolver.py, python/apostate/resolver.py and npm/src/index.ts --
+which measurably disagreed: given no seed they picked, respectively, the seed
+"0", the string "platform-default", and the lexicographically first family.
+Three sources of truth for one deterministic function, drifting silently. The
+packages keep doing what only they can do (CLI ergonomics, schema validation,
+launch orchestration, GeoIP) and stop composing.
+
+The derivation is FINGERPRINTS.md §5 verbatim:
+
+  root = SHA-256("apostate/fp/v1" 0x00 profile_schema_version 0x00
+                 catalogue_version 0x00 chromium_version 0x00
+                 fingerprint_platform 0x00 seed)
+  draw(label, i) = SHA-256(root 0x00 label 0x00 uint32_be(i))
+
+Every axis draws from a substream keyed by its own label, which is the property
+that lets the catalogue grow: adding an axis, or changing one axis's option
+list, cannot shift any other axis's choice, so an old seed keeps producing the
+same profile for everything that did not change. Weighted selection takes the
+high 64 bits of the draw and picks by cumulative weight at
+(u64 * total_weight) >> 64 -- no modulo, no rejection loop, no floating point.
+ScaleToRange computes that 128-bit high half from 32-bit halves because C++ has
+no portable 128-bit multiply.
+
+SHA-256 comes from BoringSSL, not //crypto: base/ cannot depend on //crypto
+because //crypto depends on //base, and base/hash carries only SHA-1 and the
+non-cryptographic hashes. base/DEPS already allows
+third_party/boringssl/src/include and base/hash/sha1.cc takes the same route.
+
+Axes resolve in dependency order, and a dependent axis draws from an option set
+that is a function of its parents' resolved values, so there is no rejection
+sampling and no re-draw: every profile is coherent by construction rather than
+by validation. Option-set matching is exact and total; a miss is a defect in
+the compiled tables, not a runtime condition, so it fails loudly instead of
+falling back to something incoherent. The generator rejects every such defect
+at build time, so those paths are unreachable in a well-generated binary.
+
+Servability is a property of the option set rather than a post-hoc correction:
+the host clamp filters the option list before the draw, so the drawn index
+always lands on something the host can serve and the realised distribution is
+the table's distribution over what is servable. When a capacity axis has
+nothing servable the surface is left host-inherited rather than falling back to
+the table's lowest option -- on a host below every bucket the table knows, the
+lowest option is a claim *above* host capability, which is the one thing
+servability exists to prevent. Host inheritance is servable by definition,
+because it is the host's own value.
+
+--fingerprint-platform does not move the GPU cluster. Across graphics backends
+nothing transfers: the same NVIDIA silicon produces a different capability
+digest through D3D11 than through Vulkan, and Apple Metal differs from both. So
+the anchor is drawn from anchors the host can actually serve, and a
+persona/cluster mismatch is reported as a limitation rather than hidden. That
+mismatch report is the difference between this and the retired catalogue, whose
+fourteen families were identity-string swaps over one Mac's capability tables.
+
+The host graphics backend is the platform default unless --use-angle names one.
+A real backend probe needs the GPU process, and the GPU process is a child:
+A3 requires the profile to be fully materialised before the first renderer
+starts, so no child exists yet when this runs. The explain report says the
+backend was inferred rather than implying a measurement happened.
+
+Seed lifetime is the user-data-dir, not the launch. A new fingerprint on every
+launch of the same browser profile is itself a signal -- returning-visitor
+checks, long-lived cookies and storage all expect the machine to stay the same
+machine -- so the seed is written to <user-data-dir>/apostate/seed on first use
+and reused afterwards. An ephemeral user-data-dir yields a new identity and a
+persistent one a stable identity, which is what that directory already means
+for cookies. base/ cannot compute Chrome's default user data directory, and it
+does not have to: ChromeMainDelegate appends the resolved path back onto the
+command line during startup.
+
+The tables are compiled in by a GN action, not read from disk: FINGERPRINTS.md
+§10. A data directory beside the executable is one more thing to lose, to
+mismatch against the binary, and to diverge per install. The generator is the
+repository's scripts/generate-dispersion-tables.py and the in-tree script is a
+shim that execs it, so there is one implementation of the table format rather
+than two. The SHA-256 of the generator's inputs is compiled in beside the
+tables so --fingerprint-explain can answer whether a binary and a profile came
+from the same catalogue.
+
+--fingerprint-explain writes the composition report to stdout and exits: per
+surface, the resolved value, the owning layer, the evidence class and any
+limitation. It is the honest answer to "what does this profile actually claim,
+and what can this host actually serve". It writes to stdout and never to a
+page-visible API, and the switches this adds are not readable by web content,
+so nothing here is a new observable.
+
+Not wired up yet: the profile loader still only reads --apostate-profile. The
+one call that makes a bare launch compose is a separate change against
+patches/0004, because that patch is being edited concurrently. The entry point
+it needs is base::apostate::ComposeProfileForCurrentProcess(), which returns
+the composed profile already base64-encoded so the loader's existing parser
+takes it unchanged.
+
+Compile-unverified: this cannot be built in this session.
+
+diff --git a/base/BUILD.gn b/base/BUILD.gn
+index 87e4cdc..f29dfe9 100644
+--- a/base/BUILD.gn
++++ b/base/BUILD.gn
+@@ -1624,6 +1624,35 @@ component("base") {
+   ]
+   public_deps += [ "//third_party/boringssl" ]
+ 
++  # Apostate: the fingerprint compositor.
++  #
++  # Placed next to the BoringSSL public_dep above because that dep is the whole
++  # of its dependency story. FINGERPRINTS.md §5 derives every draw from
++  # SHA-256; base/ cannot depend on //crypto, because //crypto depends on
++  # //base; and base/hash carries only SHA-1 and the non-cryptographic hashes.
++  # base/DEPS already allows third_party/boringssl/src/include, and
++  # base/hash/sha1.cc takes exactly this route for SHA-1.
++  sources += [
++    "apostate/compose.cc",
++    "apostate/compose.h",
++    "apostate/dispersion_table.cc",
++    "apostate/dispersion_table.h",
++    "apostate/explain.cc",
++    "apostate/explain.h",
++    "apostate/host_capability.cc",
++    "apostate/host_capability.h",
++    "apostate/seed.cc",
++    "apostate/seed.h",
++  ]
++
++  # The option tables and anchors are compiled in rather than read from disk:
++  # FINGERPRINTS.md §10. See the action at the end of this file.
++  sources += [
++    "$target_gen_dir/apostate/dispersion_tables.cc",
++    "$target_gen_dir/apostate/dispersion_tables.h",
++  ]
++  deps += [ ":apostate_dispersion_tables" ]
++
+   sources += [
+     "base_paths.cc",
+     "base_paths.h",
+@@ -6508,3 +6537,32 @@ process_version("check_version_internal") {
+     ]
+   }
+ }
++
++# Apostate: compile the dispersion tables and the GPU anchors into the binary.
++#
++# FINGERPRINTS.md §10 rejects reading them from disk at runtime: a data
++# directory beside the executable is one more thing to lose, to mismatch
++# against the binary, and to diverge per install. The SHA-256 of the generator's
++# inputs is compiled in beside them, so --fingerprint-explain can answer whether
++# a binary and a profile came from the same catalogue.
++#
++# The table files live in the Apostate repository that drives this checkout, so
++# the input list is discovered when the action runs rather than at `gn gen`
++# time and ninja learns it from the depfile. Editing a table therefore
++# regenerates the tables without reconfiguring.
++action("apostate_dispersion_tables") {
++  script = "apostate/generate_dispersion_tables.py"
++  outputs = [
++    "$target_gen_dir/apostate/dispersion_tables.cc",
++    "$target_gen_dir/apostate/dispersion_tables.h",
++  ]
++  depfile = "$target_gen_dir/apostate/dispersion_tables.d"
++  args = [
++    "--out-cc",
++    rebase_path(outputs[0], root_build_dir),
++    "--out-h",
++    rebase_path(outputs[1], root_build_dir),
++    "--depfile",
++    rebase_path(depfile, root_build_dir),
++  ]
++}
+diff --git a/base/apostate/compose.cc b/base/apostate/compose.cc
+new file mode 100644
+index 0000000..d0d1623
+--- /dev/null
++++ b/base/apostate/compose.cc
+@@ -0,0 +1,1011 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#include "base/apostate/compose.h"
++
++#include <cstdint>
++#include <limits>
++#include <map>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <utility>
++#include <vector>
++
++#include "base/apostate/dispersion_tables.h"
++#include "base/apostate/explain.h"
++#include "base/base64.h"
++#include "base/base_switches.h"
++#include "base/check.h"
++#include "base/check_op.h"
++#include "base/command_line.h"
++#include "base/containers/span.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/logging.h"
++#include "base/notreached.h"
++#include "base/process/process.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/values.h"
++#include "third_party/boringssl/src/include/openssl/sha.h"
++
++namespace base::apostate {
++
++namespace {
++
++// The domain separator. Any change to it is a new identity space for every
++// existing seed, which is why it carries its own version.
++constexpr std::string_view kRootPrefix = "apostate/fp/v1";
++
++constexpr uint8_t kSeparator = 0x00;
++
++// chrome/common/chrome_switches.cc kLang. base/ cannot include chrome/.
++constexpr char kLangSwitch[] = "lang";
++
++// content/public/common/content_switches.cc kProcessType. A child process
++// always carries it; the browser process never does. Spelled as a literal for
++// the same reason base/metrics/histogram_shared_memory.cc does.
++constexpr char kProcessTypeSwitch[] = "type";
++
++// Where a provisioned font family lives, relative to the seed directory.
++constexpr char kProvisionedFontsDirectory[] = "fonts";
++
++constexpr std::string_view kLayerAnchor = "anchor";
++constexpr std::string_view kLayerDispersion = "dispersion";
++constexpr std::string_view kLayerHostInherited = "host-inherited";
++
++void Absorb(SHA256_CTX* context, std::string_view data) {
++  SHA256_Update(context, data.data(), data.size());
++}
++
++void AbsorbSeparator(SHA256_CTX* context) {
++  SHA256_Update(context, &kSeparator, 1);
++}
++
++bool IsKnownPlatform(std::string_view platform) {
++  return platform == "windows" || platform == "macos" || platform == "linux";
++}
++
++// Parses one option's profile fragment.
++//
++// A fragment that does not parse is a defect in the compiled catalogue, not a
++// runtime condition: the generator canonicalises every fragment through a JSON
++// round-trip, so reaching this means the binary was built with a broken
++// generator. Failing loudly is correct -- a half-composed fingerprint is more
++// detectable than none, and this is not reachable from user input.
++DictValue ParseFragment(std::string_view axis, std::string_view json) {
++  std::optional<DictValue> parsed = JSONReader::ReadDict(json, JSON_PARSE_RFC);
++  if (!parsed) {
++    LOG(FATAL) << "apostate: the compiled table for '" << axis
++               << "' carries a value that is not a JSON object; the binary was "
++                  "built with a broken catalogue";
++  }
++  return std::move(*parsed);
++}
++
++// The identity strings the composed profile claims, if it claims any.
++struct ClaimedIdentity {
++  bool declared = false;
++  std::string vendor;
++  std::string renderer;
++};
++
++ClaimedIdentity IdentityFromProfile(const DictValue& profile) {
++  ClaimedIdentity identity;
++  const DictValue* gpu = profile.FindDict("gpu");
++  if (!gpu) {
++    return identity;
++  }
++  const std::string* vendor = gpu->FindString("unmasked_vendor");
++  const std::string* renderer = gpu->FindString("unmasked_renderer");
++  if (vendor && renderer) {
++    identity.declared = true;
++    identity.vendor = *vendor;
++    identity.renderer = *renderer;
++  }
++  return identity;
++}
++
++// The projection of a resolved accept-languages list onto the voices table's
++// own keys.
++//
++// This is computed *before* the draw, so it is a key projection and never a
++// fallback after a failed match: option-set matching stays exact and total, and
++// there is never a miss to recover from. The empty-string set carries no
++// `speech` section, which leaves the host's real providers in effect -- the
++// only honest answer for a language set nobody measured.
++std::string ProjectLanguages(const DispersionAxis& axis,
++                             std::string_view accept_languages) {
++  for (const DispersionOptionSet& option_set : axis.option_sets) {
++    for (const ConditionKey& entry : option_set.key) {
++      if (entry.name == "languages" && entry.value == accept_languages) {
++        return std::string(accept_languages);
++      }
++    }
++  }
++  return std::string();
++}
++
++struct FilterOutcome {
++  std::vector<const DispersionOption*> options;
++  // Per-option notes that must be reported rather than dropped silently.
++  std::vector<std::string> limitations;
++};
++
++// Applies the axis's servability clamp to an option set *before* drawing.
++//
++// Filtering first rather than correcting afterwards is what keeps §3's
++// "capacity is only ever reduced" a property of the option set: the drawn index
++// always lands on a servable option, so nothing is ever re-drawn and the
++// realised distribution is the table's distribution over what the host can
++// serve. A dropped option changes that distribution, and that is intended -- a
++// 14-core host offering only <= 14 core buckets is correct behaviour.
++FilterOutcome FilterServable(const DispersionAxis& axis,
++                             const DispersionOptionSet& option_set,
++                             const HostCapability& host,
++                             const Anchor* anchor,
++                             const FilePath& fonts_directory) {
++  FilterOutcome outcome;
++
++  for (const DispersionOption& option : option_set.options) {
++    const Requirement* requirement = option.requirement;
++    bool servable = true;
++
++    switch (axis.servability) {
++      case Servability::kNone:
++        break;
++
++      case Servability::kClampDown:
++        if (requirement) {
++          if (host.logical_cores > 0 && requirement->min_logical_cores > 0 &&
++              requirement->min_logical_cores > host.logical_cores) {
++            servable = false;
++          }
++          if (host.total_memory_bytes > 0 && requirement->min_total_bytes > 0 &&
++              requirement->min_total_bytes > host.total_memory_bytes) {
++            servable = false;
++          }
++        }
++        break;
++
++      case Servability::kWindowBounds:
++        // The panel must be at least as large as the window the launch asked
++        // for. An option that states no dimensions states a zero-sized panel,
++        // which can only serve a launch that constrained nothing.
++        if (host.window_width > 0 &&
++            (requirement ? requirement->min_width : 0) < host.window_width) {
++          servable = false;
++        }
++        if (host.window_height > 0 &&
++            (requirement ? requirement->min_height : 0) < host.window_height) {
++          servable = false;
++        }
++        break;
++
++      case Servability::kAnchorMember:
++        // Within an anchor the identity strings are rotatable, because the
++        // anchor's members measurably agree on everything else. Across anchors
++        // they are not: presenting a Windows/D3D11 renderer string on top of an
++        // Apple Metal capability cluster is exactly the failure this model was
++        // built to stop. That the drawn identity really was measured on this
++        // anchor is checked after the draw, where the member is also what
++        // WebGPU comes from.
++        servable = anchor && requirement && requirement->anchor == anchor->id;
++        break;
++
++      case Servability::kFilesPresent:
++        // Core packs are never dropped: the mandatory set for an OS release is
++        // what makes the claim coherent at all, and a machine claiming macOS
++        // without its core faces is not a Mac. A missing core family is
++        // reported, never silently removed, because that absence is the
++        // defensible detection.
++        if (option.pack_kind == PackKind::kCore) {
++          if (requirement && !fonts_directory.empty() &&
++              !FamiliesProvisioned(fonts_directory, requirement->families)) {
++            outcome.limitations.push_back(
++                "core font pack '" + std::string(option.id) +
++                "' names families that are not provisioned into this profile, "
++                "so the claimed platform is missing faces it cannot be without");
++          }
++          break;
++        }
++        // An optional pack is only offered when its families are provisioned.
++        // When nothing is provisioned the host's own families are the only
++        // ones in play and presence is not answerable from here, so the packs
++        // stay offered and the gap is reported on the axis.
++        if (!fonts_directory.empty()) {
++          servable = requirement &&
++                     FamiliesProvisioned(fonts_directory, requirement->families);
++        }
++        break;
++    }
++
++    if (servable) {
++      outcome.options.push_back(&option);
++    }
++  }
++
++  return outcome;
++}
++
++}  // namespace
++
++void MergeFragment(DictValue& target,
++                   DictValue overlay,
++                   span<const std::string_view> union_array_paths,
++                   std::string_view path) {
++  for (auto [key, value] : overlay) {
++    const std::string here =
++        path.empty() ? std::string(key) : std::string(path) + "." + key;
++
++    Value* existing = target.Find(key);
++
++    if (value.is_dict() && existing && existing->is_dict()) {
++      MergeFragment(existing->GetDict(), std::move(value).TakeDict(),
++                    union_array_paths, here);
++      continue;
++    }
++
++    if (value.is_list() && existing && existing->is_list()) {
++      bool unioned = false;
++      for (const std::string_view candidate : union_array_paths) {
++        if (candidate == here) {
++          unioned = true;
++          break;
++        }
++      }
++      if (unioned) {
++        ListValue& into = existing->GetList();
++        for (const Value& item : value.GetList()) {
++          // ListValue::contains has no Value overload, and a de-duplicating
++          // union is the whole point of this path, so the comparison is
++          // explicit.
++          bool present = false;
++          for (const Value& existing_item : into) {
++            if (existing_item == item) {
++              present = true;
++              break;
++            }
++          }
++          if (!present) {
++            into.Append(item.Clone());
++          }
++        }
++        continue;
++      }
++    }
++
++    target.Set(key, std::move(value));
++  }
++}
++
++// ---------------------------------------------------------------------------
++// The deterministic core
++// ---------------------------------------------------------------------------
++
++Digest ComputeRoot(const RootInputs& inputs) {
++  SHA256_CTX context;
++  SHA256_Init(&context);
++  Absorb(&context, kRootPrefix);
++  AbsorbSeparator(&context);
++  Absorb(&context, inputs.profile_schema_version);
++  AbsorbSeparator(&context);
++  Absorb(&context, inputs.catalogue_version);
++  AbsorbSeparator(&context);
++  Absorb(&context, inputs.chromium_version);
++  AbsorbSeparator(&context);
++  Absorb(&context, inputs.fingerprint_platform);
++  AbsorbSeparator(&context);
++  // The seed closes the input with no trailing separator, exactly as
++  // FINGERPRINTS.md §5 writes it.
++  Absorb(&context, inputs.seed);
++
++  Digest root = {};
++  SHA256_Final(root.data(), &context);
++  return root;
++}
++
++Digest Draw(const Digest& root, std::string_view label, uint32_t index) {
++  const std::array<uint8_t, 4> index_be = {
++      static_cast<uint8_t>((index >> 24) & 0xFF),
++      static_cast<uint8_t>((index >> 16) & 0xFF),
++      static_cast<uint8_t>((index >> 8) & 0xFF),
++      static_cast<uint8_t>(index & 0xFF),
++  };
++
++  SHA256_CTX context;
++  SHA256_Init(&context);
++  SHA256_Update(&context, root.data(), root.size());
++  AbsorbSeparator(&context);
++  Absorb(&context, label);
++  AbsorbSeparator(&context);
++  SHA256_Update(&context, index_be.data(), index_be.size());
++
++  Digest digest = {};
++  SHA256_Final(digest.data(), &context);
++  return digest;
++}
++
++uint64_t High64(const Digest& digest) {
++  uint64_t value = 0;
++  for (size_t i = 0; i < 8; ++i) {
++    value = (value << 8) | digest[i];
++  }
++  return value;
++}
++
++uint64_t ScaleToRange(uint64_t value, uint32_t range) {
++  // The high 64 bits of the 128-bit product value*range, computed from 32-bit
++  // halves because C++ has no portable 128-bit multiply and MSVC's intrinsic is
++  // not available on every toolchain this builds with.
++  //
++  //   value*range = hi*range*2^32 + lo*range
++  //   (value*range) >> 64 = ((hi*range) + ((lo*range) >> 32)) >> 32
++  //
++  // The nested floor is exact: the fraction discarded by the inner shift is
++  // strictly less than one, and adding it to a value already reduced mod 2^32
++  // cannot carry into the outer shift. Neither intermediate overflows, since
++  // hi*range <= (2^32-1)^2 and the addend is at most range-1 < 2^32.
++  const uint64_t hi = value >> 32;
++  const uint64_t lo = value & 0xFFFFFFFFu;
++  const uint64_t span_size = range;
++  const uint64_t carry = (lo * span_size) >> 32;
++  return ((hi * span_size) + carry) >> 32;
++}
++
++size_t WeightedPick(uint64_t value, span<const uint32_t> weights) {
++  CHECK(!weights.empty());
++
++  uint64_t total = 0;
++  for (const uint32_t weight : weights) {
++    total += weight;
++  }
++  CHECK_GT(total, 0u);
++  // ScaleToRange takes a 32-bit range, and the generator enforces the same
++  // bound on every option set's weight sum, so this cannot fire on a
++  // well-generated catalogue.
++  CHECK_LE(total, uint64_t{std::numeric_limits<uint32_t>::max()});
++
++  const uint64_t position = ScaleToRange(value, static_cast<uint32_t>(total));
++
++  uint64_t cumulative = 0;
++  size_t index = 0;
++  for (const uint32_t weight : weights) {
++    cumulative += weight;
++    if (position < cumulative) {
++      return index;
++    }
++    ++index;
++  }
++  // position < total by construction, so the loop always returns.
++  NOTREACHED();
++}
++
++bool SubsetIncluded(uint64_t value, uint32_t percent) {
++  return ScaleToRange(value, 100) < percent;
++}
++
++bool FamiliesProvisioned(const FilePath& fonts_directory,
++                         span<const std::string_view> families) {
++  if (families.empty() || fonts_directory.empty()) {
++    return false;
++  }
++  for (const std::string_view family : families) {
++    if (!PathExists(fonts_directory.AppendASCII(family))) {
++      return false;
++    }
++  }
++  return true;
++}
++
++// ---------------------------------------------------------------------------
++// Composition
++// ---------------------------------------------------------------------------
++
++std::optional<Composition> Compose(const ComposeRequest& request) {
++  if (request.seed.empty()) {
++    return std::nullopt;
++  }
++
++  Composition composition;
++  composition.seed = request.seed;
++  composition.host_platform = request.host.platform;
++  composition.profile_schema_version =
++      std::string(request.profile_schema_version);
++  composition.catalogue_version = std::string(request.catalogue_version);
++  composition.catalogue_digest = std::string(request.catalogue_digest);
++  composition.chromium_version = std::string(request.chromium_version);
++
++  composition.platform = request.platform.empty() ? request.host.platform
++                                                  : request.platform;
++  if (!IsKnownPlatform(composition.platform)) {
++    LOG(ERROR) << "apostate: no platform persona for '" << composition.platform
++               << "'; this launch inherits the host";
++    return std::nullopt;
++  }
++
++  const RootInputs root_inputs = {
++      .profile_schema_version = request.profile_schema_version,
++      .catalogue_version = request.catalogue_version,
++      .chromium_version = request.chromium_version,
++      .fingerprint_platform = composition.platform,
++      .seed = composition.seed,
++  };
++  composition.root = ComputeRoot(root_inputs);
++
++  // Resolved parent values, keyed by condition name. std::map is used for its
++  // node stability: the ConditionKey views handed to FindOptionSet point into
++  // these nodes.
++  std::map<std::string, std::string> resolved;
++  resolved["platform"] = composition.platform;
++
++  const FilePath fonts_directory =
++      request.state_directory.empty()
++          ? FilePath()
++          : request.state_directory.AppendASCII(kProvisionedFontsDirectory);
++
++  // ---- the anchor, before any axis that can be conditioned on it ----
++  //
++  // The GPU cluster is selected from anchors the host can actually serve, and
++  // --fingerprint-platform does not move it. Across backends nothing
++  // transfers, so the host's backend is the filter and the persona is not.
++  const Anchor* anchor = nullptr;
++  if (!request.pinned_anchor.empty()) {
++    anchor = FindAnchor(request.anchors, request.pinned_anchor);
++    if (!anchor) {
++      LOG(ERROR) << "apostate: --fingerprint-anchor named '"
++                 << request.pinned_anchor
++                 << "', which is not in the compiled catalogue";
++      return std::nullopt;
++    }
++  } else {
++    std::vector<const Anchor*> servable;
++    for (const Anchor& candidate : request.anchors) {
++      if (request.host.graphics_backend.empty() ||
++          candidate.backend == request.host.graphics_backend) {
++        servable.push_back(&candidate);
++      }
++    }
++    // Prefer an anchor captured on this host's own platform, but do not insist
++    // on it: a backend match is the coherence requirement, and the platform is
++    // only a tie-break within it.
++    if (!request.host.platform.empty()) {
++      std::vector<const Anchor*> same_platform;
++      for (const Anchor* candidate : servable) {
++        if (candidate->platform == request.host.platform) {
++          same_platform.push_back(candidate);
++        }
++      }
++      if (!same_platform.empty()) {
++        servable = std::move(same_platform);
++      }
++    }
++
++    if (servable.empty()) {
++      // Presenting another backend's cluster is the retired catalogue's
++      // failure, so there is nothing to fall back to.
++      LOG(ERROR) << "apostate: no compiled anchor was captured through this "
++                    "host's graphics backend ("
++                 << request.host.graphics_backend
++                 << "); a coherent capability cluster cannot be composed";
++      return std::nullopt;
++    }
++
++    std::vector<uint32_t> weights;
++    weights.reserve(servable.size());
++    for (const Anchor* candidate : servable) {
++      weights.push_back(candidate->weight);
++    }
++    anchor = servable[WeightedPick(High64(Draw(composition.root, "anchor", 0)),
++                                   weights)];
++  }
++
++  resolved["anchor"] = std::string(anchor->id);
++
++  std::string anchor_limitation;
++  if (anchor->platform != composition.platform) {
++    // The §4 case, stated rather than hidden: on a macOS host a Windows
++    // persona keeps an Apple GPU cluster. A coherent Windows fingerprint wants
++    // a Windows or Linux host with the corresponding silicon, which is a
++    // property of graphics drivers and not of this codebase.
++    anchor_limitation = "anchor " + std::string(anchor->id) + " is a " +
++                        std::string(anchor->platform) + "/" +
++                        std::string(anchor->backend) +
++                        " cluster while the persona is " +
++                        composition.platform +
++                        ": --fingerprint-platform does not move the GPU "
++                        "cluster, and this mismatch is reported rather than "
++                        "hidden";
++    composition.limitations.push_back(anchor_limitation);
++  }
++  if (anchor->members.size() == 1) {
++    composition.limitations.push_back(
++        "anchor " + std::string(anchor->id) +
++        " has one measured member, so no identity rotation is offered on its "
++        "capability cluster");
++  }
++  if (request.host.graphics_backend_is_inferred) {
++    composition.limitations.push_back(
++        "the host graphics backend was taken to be the platform default (" +
++        request.host.graphics_backend +
++        ") because the GPU process does not exist yet at composition time; "
++        "pass --use-angle to state it");
++  }
++
++  MergeFragment(composition.profile,
++                ParseFragment("anchor", anchor->value_json),
++                request.union_array_paths);
++  composition.surfaces.push_back({
++      .surface = "anchor",
++      .value = std::string(anchor->id),
++      .layer = std::string(kLayerAnchor),
++      .evidence = std::string(anchor->evidence),
++      .limitation = anchor_limitation,
++  });
++
++  // ---- the catalogue policies ----
++  auto resolve_policy = [&](std::string_view kind,
++                            span<const PolicyOption> policies) {
++    std::vector<const PolicyOption*> candidates;
++    for (const PolicyOption& policy : policies) {
++      if (policy.AppliesTo(composition.platform)) {
++        candidates.push_back(&policy);
++      }
++    }
++    if (candidates.empty()) {
++      LOG(FATAL) << "apostate: no " << kind << " policy supports the persona '"
++                 << composition.platform
++                 << "'; the compiled catalogue is incomplete";
++    }
++    // Every policy weighs the same: the catalogue states no prevalence for
++    // them, and inventing one would be synthesis dressed as data.
++    const std::vector<uint32_t> weights(candidates.size(), 1u);
++    const std::string label = "policy." + std::string(kind);
++    const PolicyOption* chosen =
++        candidates[WeightedPick(High64(Draw(composition.root, label, 0)),
++                                weights)];
++
++    MergeFragment(composition.profile,
++                  ParseFragment(kind, chosen->value_json),
++                  request.union_array_paths);
++    composition.surfaces.push_back({
++        .surface = std::string(kind),
++        .value = std::string(chosen->id),
++        .layer = std::string(kLayerDispersion),
++        .evidence = std::string(chosen->evidence),
++        .limitation = std::string(),
++    });
++    resolved[std::string(kind)] = std::string(chosen->id);
++  };
++
++  // ---- the dispersion axes, in the §5 resolution order ----
++  bool locale_resolved = false;
++  bool panel_resolved = false;
++
++  for (const DispersionAxis& axis : request.axes) {
++    // The voices table is keyed on the resolved accept-languages list, so the
++    // locale policy has to be picked before it. It is picked as late as
++    // possible otherwise, because the §5 order puts locale last.
++    if (axis.axis == "voices" && !locale_resolved) {
++      resolve_policy("locale", request.locale_policies);
++      locale_resolved = true;
++    }
++    if (axis.axis == "voices") {
++      std::string accept_languages(request.default_accept_languages);
++      if (const DictValue* locale = composition.profile.FindDict("locale")) {
++        if (const std::string* declared =
++                locale->FindString("accept_languages")) {
++          accept_languages = *declared;
++        }
++      }
++      resolved["languages"] = ProjectLanguages(axis, accept_languages);
++    }
++
++    std::vector<ConditionKey> key;
++    key.reserve(axis.conditioned_on.size());
++    for (const std::string_view name : axis.conditioned_on) {
++      const auto it = resolved.find(std::string(name));
++      if (it == resolved.end()) {
++        LOG(FATAL) << "apostate: axis '" << axis.axis
++                   << "' is conditioned on '" << name
++                   << "', which nothing resolved before it; the compiled "
++                      "catalogue's resolution order is wrong";
++      }
++      key.push_back({it->first, it->second});
++    }
++
++    const DispersionOptionSet* option_set = axis.FindOptionSet(key);
++    if (!option_set) {
++      // Matching is exact and total: a child's option set is a function of its
++      // parents, so a miss is a hole in the compiled table. The generator
++      // rejects duplicate and mismatched keys, so this is unreachable from a
++      // well-generated binary -- and falling back or re-drawing here would
++      // silently produce an incoherent machine.
++      LOG(FATAL) << "apostate: axis '" << axis.axis
++                 << "' has no option set for its resolved parents; the "
++                    "compiled catalogue is incomplete";
++    }
++
++    FilterOutcome outcome = FilterServable(axis, *option_set, request.host,
++                                           anchor, fonts_directory);
++    for (std::string& limitation : outcome.limitations) {
++      composition.limitations.push_back(std::string(axis.axis) + ": " +
++                                        limitation);
++    }
++
++    if (outcome.options.empty()) {
++      if (axis.servability == Servability::kAnchorMember) {
++        // Every anchor has at least one measured member, so an empty set here
++        // is a defect in the compiled tables and not a host condition.
++        LOG(FATAL) << "apostate: axis '" << axis.axis
++                   << "' offers no member of anchor '" << anchor->id
++                   << "'; the compiled catalogue is inconsistent with the "
++                      "corpus";
++      }
++      // Nothing this host can serve. The axis contributes nothing and the
++      // surface stays host-inherited, which is servable by definition because
++      // it is the host's own value. Keeping the table's lowest option instead
++      // would ship a claim *above* host capability whenever the host sits
++      // below every bucket -- a 4-core host given an 8-core floor -- which is
++      // exactly what servability exists to prevent.
++      const std::string limitation =
++          "no option is servable on this host, so the surface is left "
++          "inherited rather than raising a claim the host cannot serve";
++      composition.surfaces.push_back({
++          .surface = std::string(axis.axis),
++          .value = "(inherited)",
++          .layer = std::string(kLayerHostInherited),
++          .evidence = "host-inherited",
++          .limitation = limitation,
++      });
++      composition.limitations.push_back(std::string(axis.axis) + ": " +
++                                        limitation);
++      continue;
++    }
++
++    if (axis.selection == Selection::kSingle) {
++      std::vector<uint32_t> weights;
++      weights.reserve(outcome.options.size());
++      for (const DispersionOption* option : outcome.options) {
++        weights.push_back(option->weight);
++      }
++      const DispersionOption* chosen = outcome.options[WeightedPick(
++          High64(Draw(composition.root, axis.label, 0)), weights)];
++
++      resolved[std::string(axis.axis)] = std::string(chosen->id);
++      MergeFragment(composition.profile,
++                    ParseFragment(axis.axis, chosen->value_json),
++                    request.union_array_paths);
++      composition.surfaces.push_back({
++          .surface = std::string(axis.axis),
++          .value = std::string(chosen->id),
++          .layer = std::string(kLayerDispersion),
++          .evidence = std::string(chosen->evidence),
++          .limitation = std::string(),
++      });
++      if (axis.axis == "panel") {
++        panel_resolved = true;
++      }
++      if (axis.axis == "gpu_identity") {
++        // WebGPU belongs to the resolved member, not to the anchor: it is the
++        // one part of a capability cluster that is not anchor-wide. Two of the
++        // Linux/Vulkan anchor's four members measured no adapter at all, and
++        // claiming a sibling's would be an unmeasured assertion, so an empty
++        // fragment leaves WebGPU host-inherited.
++        const ClaimedIdentity identity =
++            IdentityFromProfile(composition.profile);
++        const AnchorMember* member =
++            identity.declared
++                ? anchor->FindMemberIdentity(identity.vendor, identity.renderer)
++                : nullptr;
++        if (identity.declared && !member) {
++          LOG(FATAL) << "apostate: gpu_identity option '" << chosen->id
++                     << "' claims a renderer that is not a measured member of "
++                        "anchor '"
++                     << anchor->id
++                     << "'; the compiled catalogue is inconsistent with the "
++                        "corpus";
++        }
++        if (member && !member->webgpu_json.empty()) {
++          MergeFragment(composition.profile,
++                        ParseFragment("webgpu", member->webgpu_json),
++                        request.union_array_paths);
++          composition.surfaces.push_back({
++              .surface = "webgpu",
++              .value = std::string(member->label),
++              .layer = std::string(kLayerAnchor),
++              .evidence = std::string(anchor->evidence),
++              .limitation = std::string(),
++          });
++        } else if (member) {
++          const std::string limitation =
++              "the resolved member measured no WebGPU adapter, so WebGPU is "
++              "the host's own rather than a sibling member's";
++          composition.surfaces.push_back({
++              .surface = "webgpu",
++              .value = "(inherited)",
++              .layer = std::string(kLayerHostInherited),
++              .evidence = "host-inherited",
++              .limitation = limitation,
++          });
++          composition.limitations.push_back("webgpu: " + limitation);
++        }
++      }
++      continue;
++    }
++
++    // core-plus-subset: every core option, plus an independent inclusion
++    // decision per optional option. Substream index 0 is reserved so a single
++    // and a core-plus-subset axis never collide on the same draw, and the
++    // optional index counts the *offered* optional options in file order --
++    // the servability filter runs before the draw precisely so that the drawn
++    // index is an index into the offered set.
++    std::string included;
++    uint32_t optional_index = 0;
++    for (const DispersionOption* option : outcome.options) {
++      bool take = true;
++      if (option->pack_kind != PackKind::kCore) {
++        take = SubsetIncluded(
++            High64(Draw(composition.root, axis.label, optional_index + 1)),
++            option->weight);
++        ++optional_index;
++      }
++      if (!take) {
++        continue;
++      }
++      MergeFragment(composition.profile,
++                    ParseFragment(axis.axis, option->value_json),
++                    request.union_array_paths);
++      if (!included.empty()) {
++        included += "+";
++      }
++      included += std::string(option->id);
++      composition.surfaces.push_back({
++          .surface = std::string(axis.axis) + "/" + std::string(option->id),
++          .value = option->pack_kind == PackKind::kCore ? "core" : "included",
++          .layer = std::string(kLayerDispersion),
++          .evidence = std::string(option->evidence),
++          .limitation = std::string(),
++      });
++    }
++    resolved[std::string(axis.axis)] = included;
++
++    if (axis.servability == Servability::kFilesPresent &&
++        fonts_directory.empty()) {
++      composition.limitations.push_back(
++          std::string(axis.axis) +
++          ": font presence could not be checked, because the host's installed "
++          "families cannot be enumerated before the graphics stack starts and "
++          "nothing is provisioned into this profile; every pack the table "
++          "offers was therefore offered");
++    }
++  }
++
++  if (!locale_resolved) {
++    resolve_policy("locale", request.locale_policies);
++  }
++  resolve_policy("theme", request.theme_policies);
++
++  DeriveWorkArea(composition.profile, panel_resolved,
++                 &composition.limitations);
++
++  // A diagnostic handle, not a claim: patch 0004 reads `id` into source_id_
++  // and nothing page-visible consumes it. Naming it after the root makes a
++  // profile traceable back to the tuple that produced it.
++  composition.profile.Set("id",
++                          "fp-" + HexEncodeLower(composition.root).substr(0, 24));
++
++  // The last line behind the option filters: no claim leaves here above what
++  // the host can serve, whatever the tables said.
++  if (DictValue* cpu = composition.profile.FindDict("cpu")) {
++    if (const std::optional<int> claimed = cpu->FindInt("logical_cores")) {
++      const int clamped =
++          ClampLogicalCores(*claimed, request.host.logical_cores);
++      if (clamped != *claimed) {
++        cpu->Set("logical_cores", clamped);
++        composition.limitations.push_back(
++            "cpu: the drawn core bucket exceeded this host's " +
++            NumberToString(request.host.logical_cores) +
++            " logical cores and was reduced to " + NumberToString(clamped));
++      }
++    }
++  }
++  if (DictValue* memory = composition.profile.FindDict("memory")) {
++    if (const std::optional<double> claimed =
++            memory->FindDouble("total_bytes")) {
++      const uint64_t claimed_bytes = static_cast<uint64_t>(*claimed);
++      const uint64_t clamped =
++          ClampMemoryBytes(claimed_bytes, request.host.total_memory_bytes);
++      if (clamped != claimed_bytes) {
++        memory->Set("total_bytes", static_cast<double>(clamped));
++        composition.limitations.push_back(
++            "memory: the drawn memory bucket exceeded this host's installed "
++            "memory and was reduced to " +
++            NumberToString(clamped) + " bytes");
++      }
++    }
++  }
++
++  return composition;
++}
++
++void DeriveWorkArea(DictValue& profile,
++                    bool panel_resolved,
++                    std::vector<std::string>* limitations) {
++  DictValue* screen = profile.FindDict("screen");
++  if (!screen) {
++    return;
++  }
++
++  const std::optional<int> inset_left = screen->FindInt("avail_inset_left");
++  const std::optional<int> inset_top = screen->FindInt("avail_inset_top");
++  const std::optional<int> inset_right = screen->FindInt("avail_inset_right");
++  const std::optional<int> inset_bottom = screen->FindInt("avail_inset_bottom");
++
++  screen->Remove("avail_inset_left");
++  screen->Remove("avail_inset_top");
++  screen->Remove("avail_inset_right");
++  screen->Remove("avail_inset_bottom");
++
++  const std::optional<int> width = screen->FindInt("width");
++  const std::optional<int> height = screen->FindInt("height");
++
++  if (!width || !height || !inset_left || !inset_top || !inset_right ||
++      !inset_bottom) {
++    // The panel axis was left inherited while furniture still contributed
++    // insets. The insets are already stripped: an inset without a panel is not
++    // a work area, and an empty section is not a claim, so the whole object
++    // goes rather than shipping "screen": {}.
++    if (!panel_resolved && screen->empty()) {
++      profile.Remove("screen");
++      if (limitations) {
++        limitations->push_back(
++            "screen: the panel axis was left inherited, so the furniture "
++            "insets have no panel to apply to and the screen section was "
++            "dropped rather than emitted empty");
++      }
++    }
++    return;
++  }
++
++  if (*inset_left + *inset_right >= *width ||
++      *inset_top + *inset_bottom >= *height) {
++    LOG(FATAL) << "apostate: furniture insets exceed the panel (" << *inset_left
++               << "+" << *inset_right << " of " << *width << ", " << *inset_top
++               << "+" << *inset_bottom << " of " << *height
++               << "); that work area cannot exist and the compiled tables are "
++                  "inconsistent";
++  }
++
++  // availLeft/availTop are panel-relative: the Windows reference capture ran
++  // on a second monitor at x=1920 and reported availLeft 1920 with a zero
++  // inset. So the inset is added to the panel origin, which is zero unless the
++  // panel states one.
++  const int origin_left = screen->FindInt("left").value_or(0);
++  const int origin_top = screen->FindInt("top").value_or(0);
++
++  screen->Set("avail_left", origin_left + *inset_left);
++  screen->Set("avail_top", origin_top + *inset_top);
++  screen->Set("avail_width", *width - *inset_left - *inset_right);
++  screen->Set("avail_height", *height - *inset_top - *inset_bottom);
++}
++
++// ---------------------------------------------------------------------------
++// The entry point
++// ---------------------------------------------------------------------------
++
++std::optional<std::string> ComposeProfileForCurrentProcess() {
++  if (!CommandLine::InitializedForCurrentProcess()) {
++    return std::nullopt;
++  }
++  const CommandLine& command_line = *CommandLine::ForCurrentProcess();
++
++  // Browser process only. A child receives the composed profile on its command
++  // line, and composing again in a child would be both wasteful and, in a
++  // sandboxed renderer, impossible: the seed file is not reachable from there.
++  if (command_line.HasSwitch(kProcessTypeSwitch)) {
++    return std::nullopt;
++  }
++
++  // An already-composed profile is the strongest layer in the §10 precedence,
++  // so it is not recomposed. `::switches` is base_switches.h, not this
++  // namespace's own switches.
++  if (command_line.HasSwitch(::switches::kApostateProfile)) {
++    return std::nullopt;
++  }
++
++  const SeedResolution seed = ResolveSeed(command_line);
++  const bool explain = command_line.HasSwitch(switches::kFingerprintExplain);
++
++  if (!seed.should_compose()) {
++    if (explain) {
++      WriteHostInheritanceReport(seed);
++      Process::TerminateCurrentProcessImmediately(0);
++    }
++    return std::nullopt;
++  }
++
++  ComposeRequest request;
++  request.seed = seed.seed;
++  request.host = ProbeHostCapability(command_line);
++  request.axes = DispersionAxes();
++  request.anchors = Anchors();
++  request.locale_policies = LocalePolicies();
++  request.theme_policies = ThemePolicies();
++  request.union_array_paths = UnionArrayPaths();
++  request.profile_schema_version = kProfileSchemaVersion;
++  request.catalogue_version = kCatalogueVersion;
++  request.chromium_version = kChromiumVersion;
++  request.catalogue_digest = kCatalogueDigest;
++  request.default_accept_languages = kDefaultAcceptLanguages;
++  request.state_directory = SeedDirectory(command_line);
++  request.pinned_anchor =
++      command_line.GetSwitchValueASCII(switches::kFingerprintAnchor);
++  request.accept_languages = command_line.GetSwitchValueASCII(kLangSwitch);
++
++  std::string persona_limitation;
++  if (command_line.HasSwitch(switches::kFingerprintPlatform)) {
++    const std::string requested =
++        command_line.GetSwitchValueASCII(switches::kFingerprintPlatform);
++    if (IsKnownPlatform(requested)) {
++      request.platform = requested;
++    } else {
++      persona_limitation =
++          "--fingerprint-platform named '" + requested +
++          "', which is not one of windows, macos or linux; the host's platform "
++          "was used";
++      LOG(ERROR) << "apostate: " << persona_limitation;
++    }
++  }
++
++  std::optional<Composition> composition = Compose(request);
++  if (!composition) {
++    LOG(ERROR) << "apostate: the compiled catalogue cannot serve this launch; "
++                  "inheriting the host";
++    return std::nullopt;
++  }
++
++  composition->seed_origin = seed.origin;
++  composition->seed_path = seed.path;
++  if (!seed.limitation.empty()) {
++    composition->limitations.push_back("seed: " + seed.limitation);
++  }
++  if (!persona_limitation.empty()) {
++    composition->limitations.push_back(persona_limitation);
++  }
++
++  if (explain) {
++    WriteExplainReport(*composition, request.host);
++    Process::TerminateCurrentProcessImmediately(0);
++  }
++
++  // OPTIONS_OMIT_DOUBLE_TYPE_PRESERVATION is not cosmetic here.
++  //
++  // base::Value has no 64-bit integer type, so every profile field above
++  // INT32_MAX is held as a double: memory.total_bytes,
++  // gl_limits.MAX_ELEMENT_INDEX, webgpu.limits.maxBufferSize and
++  // maxStorageBufferBindingSize, and both theme highlight ARGBs. The default
++  // writer appends ".0" to an integral double to keep it a JSON real, which
++  // would emit `8589934592.0` for a field config/profile.schema.json declares
++  // as "type": "integer" -- so the binary's own output would fail the schema
++  // the packages validate against, and would differ byte-for-byte from the
++  // reference resolver for six real fields. This flag writes an integral
++  // double in int64 range as an integer and leaves a genuinely fractional
++  // value alone, so screen.device_pixel_ratio stays 1.25.
++  const std::optional<std::string> json = WriteJsonWithOptions(
++      composition->profile, JSONWriter::OPTIONS_OMIT_DOUBLE_TYPE_PRESERVATION);
++  if (!json) {
++    LOG(ERROR) << "apostate: the composed profile could not be serialised; "
++                  "inheriting the host";
++    return std::nullopt;
++  }
++
++  // Base64EncodeEarlyStartup rather than Base64Encode: this runs before
++  // FeatureList exists and the ordinary entry point consults a base::Feature.
++  return Base64EncodeEarlyStartup(as_byte_span(*json));
++}
++
++}  // namespace base::apostate
+diff --git a/base/apostate/compose.h b/base/apostate/compose.h
+new file mode 100644
+index 0000000..0a6b83b
+--- /dev/null
++++ b/base/apostate/compose.h
+@@ -0,0 +1,285 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_APOSTATE_COMPOSE_H_
++#define BASE_APOSTATE_COMPOSE_H_
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "base/apostate/dispersion_table.h"
++#include "base/apostate/host_capability.h"
++#include "base/apostate/seed.h"
++#include "base/base_export.h"
++#include "base/containers/span.h"
++#include "base/files/file_path.h"
++#include "base/values.h"
++
++namespace base {
++
++class CommandLine;
++
++namespace apostate {
++
++// The fingerprint compositor: the deterministic function
++// (seed, tables, host capability, requested platform) -> profile.
++//
++// It lives here, in the browser process, in C++, and is the only
++// implementation. The bare binary must produce a fingerprint with no
++// arguments, which puts the compositor inside the binary by necessity;
++// reimplementing it in the Python and Node packages would create three sources
++// of truth for one deterministic function and the drift between them would be
++// silent. It already did: three resolvers disagreed on what "no seed" means.
++//
++// Nothing here reaches a value at read time. The profile is fully materialised
++// before the first renderer starts, and nothing inside the session varies.
++
++namespace switches {
++
++// FINGERPRINTS.md §10. Declared here rather than in base_switches.h because
++// they belong to the compositor's launch contract, and because command-line
++// switches are not readable by web content -- carrying them discloses nothing
++// to a page.
++
++// Deterministic seed. An integer or an arbitrary string.
++inline constexpr char kFingerprint[] = "fingerprint";
++
++// The one reserved --fingerprint value: inherit the host, compose nothing.
++inline constexpr char kFingerprintHostValue[] = "host";
++
++// Platform persona: windows | macos | linux. Defaults to the host's.
++//
++// This does not move the GPU cluster. Across graphics backends nothing
++// transfers -- the same NVIDIA silicon produces a different capability digest
++// through D3D11 than through Vulkan -- so the anchor is always selected from
++// what the host can actually serve, and a persona/cluster mismatch is reported
++// as a limitation instead of hidden.
++inline constexpr char kFingerprintPlatform[] = "fingerprint-platform";
++
++// Pin the GPU anchor by id instead of drawing one.
++inline constexpr char kFingerprintAnchor[] = "fingerprint-anchor";
++
++// Write the composition report to stdout and exit.
++inline constexpr char kFingerprintExplain[] = "fingerprint-explain";
++
++}  // namespace switches
++
++// ---------------------------------------------------------------------------
++// The deterministic core
++// ---------------------------------------------------------------------------
++//
++// These are the whole of FINGERPRINTS.md §5 and they are free functions over
++// plain data on purpose: they must be unit-testable without a browser, a
++// filesystem or a command line.
++
++using Digest = std::array<uint8_t, 32>;
++
++// The tuple that keys the composition. Every field is part of the identity, so
++// changing any one of them is a different profile for the same seed -- which
++// is what makes a binary and a profile unable to silently disagree about what
++// the catalogue said.
++struct BASE_EXPORT RootInputs {
++  std::string_view profile_schema_version;
++  std::string_view catalogue_version;
++  std::string_view chromium_version;
++  std::string_view fingerprint_platform;
++  std::string_view seed;
++};
++
++// root = SHA-256( "apostate/fp/v1" 0x00
++//                 profile_schema_version 0x00
++//                 catalogue_version      0x00
++//                 chromium_version       0x00
++//                 fingerprint_platform   0x00
++//                 seed )
++BASE_EXPORT Digest ComputeRoot(const RootInputs& inputs);
++
++// draw(label, i) = SHA-256( root 0x00 label 0x00 uint32_be(i) )
++//
++// Every axis draws from a substream keyed by its own label. That is the
++// property that lets the catalogue grow: adding an axis, or changing the
++// option list of one axis, cannot shift any other axis's choice, so an old
++// seed keeps producing the same profile for everything that did not change.
++BASE_EXPORT Digest Draw(const Digest& root,
++                        std::string_view label,
++                        uint32_t index);
++
++// The leading 8 bytes of a digest as a big-endian u64.
++BASE_EXPORT uint64_t High64(const Digest& digest);
++
++// (value * range) >> 64, the high half of the 128-bit product. No modulo, no
++// rejection loop, no floating point, so the mapping is uniform to within one
++// part in 2^64 and needs no re-draw.
++BASE_EXPORT uint64_t ScaleToRange(uint64_t value, uint32_t range);
++
++// The index whose cumulative weight first exceeds ScaleToRange(value, total).
++// `weights` must be non-empty and sum to a non-zero value that fits in
++// uint32_t; the sum is the option list's total prevalence.
++BASE_EXPORT size_t WeightedPick(uint64_t value, span<const uint32_t> weights);
++
++// Whether an optional pack at `percent` prevalence is included.
++BASE_EXPORT bool SubsetIncluded(uint64_t value, uint32_t percent);
++
++// ---------------------------------------------------------------------------
++// Composition
++// ---------------------------------------------------------------------------
++
++// One line of the --fingerprint-explain report: what a surface resolved to,
++// who owns it, and what backs it.
++struct BASE_EXPORT SurfaceRecord {
++  std::string surface;
++  std::string value;
++  // "invariant", "anchor", "dispersion" or "host-inherited".
++  std::string layer;
++  std::string evidence;
++  // Empty when the resolved value is exactly what was asked for.
++  std::string limitation;
++};
++
++struct BASE_EXPORT Composition {
++  std::string seed;
++  SeedOrigin seed_origin = SeedOrigin::kGenerated;
++  FilePath seed_path;
++
++  // The requested persona and the host it is running on. When they differ the
++  // GPU cluster stays with the host and that is recorded in `limitations`.
++  std::string platform;
++  std::string host_platform;
++
++  std::string profile_schema_version;
++  std::string catalogue_version;
++  // SHA-256 over the generator's inputs. Not a root component -- §5 fixes the
++  // tuple -- but the value that makes "did this binary and this profile come
++  // from the same tables" answerable from the explain report.
++  std::string catalogue_digest;
++  std::string chromium_version;
++  Digest root = {};
++
++  std::vector<SurfaceRecord> surfaces;
++  std::vector<std::string> limitations;
++
++  // The composed profile, deep-merged in resolution order. Validates against
++  // config/profile.schema.json because every option's value does.
++  DictValue profile;
++};
++
++struct BASE_EXPORT ComposeRequest {
++  // Never empty: --fingerprint=host is handled before composition starts.
++  std::string seed;
++  // Requested persona. Empty means the host's platform.
++  std::string platform;
++  // --fingerprint-anchor. Empty means draw one.
++  std::string pinned_anchor;
++  // The launch's language list, e.g. "en-US,en". Empty means the catalogue's
++  // default. The voices table is keyed on the resolved list, projected onto
++  // the keys the table actually has.
++  std::string accept_languages;
++  // <user-data-dir>/apostate: where the seed lives and where font
++  // provisioning is looked for. Empty when the launch named no user data
++  // directory.
++  FilePath state_directory;
++
++  HostCapability host;
++
++  // The catalogue. Passed in rather than read from the generated tables inside
++  // Compose() so that composition is a pure function of its request: that is
++  // what "the deterministic function (seed, tables, host capability, requested
++  // platform) -> profile" means, and it is what lets the resolution order be
++  // tested against a table written in the test instead of against whatever the
++  // shipped catalogue happens to say today.
++  span<const DispersionAxis> axes;
++  span<const Anchor> anchors;
++  span<const PolicyOption> locale_policies;
++  span<const PolicyOption> theme_policies;
++  span<const std::string_view> union_array_paths;
++
++  // The three declared identity components of the §5 root.
++  std::string_view profile_schema_version;
++  std::string_view catalogue_version;
++  std::string_view chromium_version;
++  // Reported, not hashed. See Composition::catalogue_digest.
++  std::string_view catalogue_digest;
++
++  // Used when `accept_languages` is empty.
++  std::string_view default_accept_languages;
++};
++
++// Resolves every axis in the §5 dependency order and deep-merges the result.
++//
++// A dependent axis draws from an option set that is a *function* of its
++// parents' resolved values, so there is no rejection sampling and no re-draw:
++// every profile is coherent by construction rather than by validation.
++//
++// Returns nullopt only when the request itself is unusable (no seed, no
++// platform persona the tables know). A coherence violation after resolution is
++// a defect in the compiled option tables and is fatal, because the generator
++// rejects all of them at build time -- reaching one at runtime means the
++// binary shipped with a broken catalogue, and a half-composed fingerprint is
++// more detectable than none.
++BASE_EXPORT std::optional<Composition> Compose(const ComposeRequest& request);
++
++// Deep-merges `overlay` into `target`.
++//
++// Dictionaries recurse. Arrays replace, except at a dotted path in
++// `union_array_paths`, where the overlay's new items are appended in option
++// file order. That one exception is what makes a font pack additive without the
++// compositor knowing what a font is; everything else replacing is what lets a
++// later axis correct an earlier one. Exposed for tests.
++BASE_EXPORT void MergeFragment(DictValue& target,
++                               DictValue overlay,
++                               span<const std::string_view> union_array_paths,
++                               std::string_view path = {});
++
++// Whether every family in `families` has been provisioned into this profile,
++// i.e. exists under `fonts_directory`.
++//
++// base/ cannot enumerate the host's installed families at composition time --
++// that is Skia's job and Skia starts later -- so "present on the host" is not
++// answerable here, and a launch that provisions nothing has every pack offered
++// with the gap reported. Exposed for tests.
++BASE_EXPORT bool FamiliesProvisioned(const FilePath& fonts_directory,
++                                     span<const std::string_view> families);
++
++// Turns panel geometry plus furniture insets into the avail_* rectangle, and
++// removes the four inset keys either way.
++//
++// `panel_resolved` is false when the panel axis was left host-inherited; in
++// that case an inset has no panel to apply to, and a `screen` object left with
++// nothing in it is dropped rather than emitted empty, because an empty section
++// is not a claim. Insets that exceed the panel are a table defect and fail the
++// launch. Exposed for tests.
++BASE_EXPORT void DeriveWorkArea(DictValue& profile,
++                                bool panel_resolved,
++                                std::vector<std::string>* limitations);
++
++// ---------------------------------------------------------------------------
++// The entry point
++// ---------------------------------------------------------------------------
++
++// Composes the profile for this launch and returns it base64-encoded, ready to
++// hand to the profile loader's existing parser.
++//
++// Returns nullopt, meaning "inherit the host", when:
++//   * this is not the browser process (a child receives the composed profile
++//     on its command line and must never compose its own, not least because a
++//     sandboxed renderer cannot read the seed file);
++//   * --apostate-profile was supplied, so an already-composed profile wins;
++//   * --fingerprint=host was supplied;
++//   * the compiled catalogue cannot serve the request.
++//
++// Touches the filesystem exactly once, for the seed, and caches nothing: the
++// caller is expected to be the profile loader's one-time initialisation. When
++// --fingerprint-explain is present this writes the report to stdout and exits
++// the process instead of returning.
++BASE_EXPORT std::optional<std::string> ComposeProfileForCurrentProcess();
++
++}  // namespace apostate
++}  // namespace base
++
++#endif  // BASE_APOSTATE_COMPOSE_H_
+diff --git a/base/apostate/dispersion_table.cc b/base/apostate/dispersion_table.cc
+new file mode 100644
+index 0000000..0cebc6d
+--- /dev/null
++++ b/base/apostate/dispersion_table.cc
+@@ -0,0 +1,75 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#include "base/apostate/dispersion_table.h"
++
++#include <string_view>
++
++#include "base/containers/span.h"
++
++namespace base::apostate {
++
++const DispersionOptionSet* DispersionAxis::FindOptionSet(
++    span<const ConditionKey> resolved) const {
++  for (const DispersionOptionSet& candidate : option_sets) {
++    if (candidate.key.size() != resolved.size()) {
++      continue;
++    }
++    // Exact and total: every name in the key must appear in `resolved` with the
++    // same value, and the sizes already agree, so this is set equality. Order
++    // is not compared because the caller builds `resolved` from its own
++    // resolution order, which need not be the table's.
++    bool matched = true;
++    for (const ConditionKey& required : candidate.key) {
++      bool found = false;
++      for (const ConditionKey& actual : resolved) {
++        if (actual.name == required.name) {
++          found = actual.value == required.value;
++          break;
++        }
++      }
++      if (!found) {
++        matched = false;
++        break;
++      }
++    }
++    if (matched) {
++      return &candidate;
++    }
++  }
++  return nullptr;
++}
++
++const AnchorMember* Anchor::FindMemberIdentity(
++    std::string_view unmasked_vendor,
++    std::string_view unmasked_renderer) const {
++  for (const AnchorMember& member : members) {
++    if (member.unmasked_vendor == unmasked_vendor &&
++        member.unmasked_renderer == unmasked_renderer) {
++      return &member;
++    }
++  }
++  return nullptr;
++}
++
++const DispersionAxis* FindAxis(span<const DispersionAxis> axes,
++                               std::string_view axis) {
++  for (const DispersionAxis& candidate : axes) {
++    if (candidate.axis == axis) {
++      return &candidate;
++    }
++  }
++  return nullptr;
++}
++
++const Anchor* FindAnchor(span<const Anchor> anchors, std::string_view id) {
++  for (const Anchor& candidate : anchors) {
++    if (candidate.id == id) {
++      return &candidate;
++    }
++  }
++  return nullptr;
++}
++
++}  // namespace base::apostate
+diff --git a/base/apostate/dispersion_table.h b/base/apostate/dispersion_table.h
+new file mode 100644
+index 0000000..c49a16c
+--- /dev/null
++++ b/base/apostate/dispersion_table.h
+@@ -0,0 +1,190 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_APOSTATE_DISPERSION_TABLE_H_
++#define BASE_APOSTATE_DISPERSION_TABLE_H_
++
++#include <cstdint>
++#include <string_view>
++
++#include "base/base_export.h"
++#include "base/containers/span.h"
++
++namespace base::apostate {
++
++// The in-memory shape of one dispersion option table, as compiled in by
++// scripts/generate-dispersion-tables.py. The file shape these mirror is
++// documented in the dispersion-table-shape contract; this header is the C++
++// side of it and nothing else parses those files.
++//
++// Everything here is a view into static, read-only data with no owner and no
++// lifetime: the tables are `constexpr` arrays in the generated translation
++// unit. There is deliberately no loader and no mutable state, because
++// FINGERPRINTS.md §10 rejects reading the tables from disk at runtime.
++
++// How many options one draw on this axis yields.
++enum class Selection {
++  // Weighted pick of exactly one option, using substream index 0.
++  kSingle,
++  // Every `core` option, plus an independent inclusion decision per `optional`
++  // option using substream indices 1..n. Index 0 is reserved so a `single` and
++  // a `core-plus-subset` axis never collide on the same draw.
++  kCorePlusSubset,
++};
++
++// Which host clamp is applied to the option list *before* drawing. Filtering
++// first rather than correcting afterwards is what keeps §3's "capacity is only
++// ever reduced" a property of the option set, so the drawn index stays
++// meaningful and no re-draw is ever needed.
++enum class Servability {
++  kNone,
++  kClampDown,
++  kWindowBounds,
++  kAnchorMember,
++  kFilesPresent,
++};
++
++enum class PackKind {
++  kNotAPack,
++  kCore,
++  kOptional,
++};
++
++// Preconditions an option states about the host. Zero and empty mean "unset":
++// the generator rejects an unrecognised key outright, so an unset field here
++// always means the table said nothing, never that something was dropped.
++struct Requirement {
++  int min_logical_cores = 0;
++  uint64_t min_total_bytes = 0;
++  int min_width = 0;
++  int min_height = 0;
++  std::string_view anchor;
++  span<const std::string_view> families;
++};
++
++struct DispersionOption {
++  std::string_view id;
++  // Relative real-world prevalence for kSingle; percent in 1..100 for an
++  // optional pack under kCorePlusSubset.
++  uint32_t weight = 0;
++  std::string_view evidence;
++  std::string_view source;
++  PackKind pack_kind = PackKind::kNotAPack;
++  const Requirement* requirement = nullptr;
++  // A partial device profile that validates against config/profile.schema.json
++  // on its own, as canonical JSON. Composition is a deep merge of these in
++  // resolution order, which is why the compositor needs no axis-specific
++  // knowledge of what any value means.
++  std::string_view value_json;
++};
++
++struct ConditionKey {
++  std::string_view name;
++  std::string_view value;
++};
++
++struct DispersionOptionSet {
++  // One entry per name in the axis's `conditioned_on`, in that order. Empty for
++  // a root axis.
++  span<const ConditionKey> key;
++  // File order is significant: the weighted pick resolves an index against
++  // cumulative weights in this order, so reordering reassigns every seed.
++  span<const DispersionOption> options;
++};
++
++struct DispersionAxis {
++  std::string_view axis;
++  // The draw(label, i) substream label. Adding an axis, or changing one axis's
++  // option list, cannot shift another axis's choice precisely because each
++  // keys its own substream.
++  std::string_view label;
++  span<const std::string_view> conditioned_on;
++  Selection selection = Selection::kSingle;
++  Servability servability = Servability::kNone;
++  span<const DispersionOptionSet> option_sets;
++
++  // The single option set whose key equals `resolved`, or null.
++  //
++  // Matching is exact and total: a child's option set is a *function* of its
++  // parents, so zero matches is a defect in the compiled tables rather than a
++  // runtime condition. Callers must not fall back and must not re-draw.
++  const DispersionOptionSet* FindOptionSet(
++      span<const ConditionKey> resolved) const;
++};
++
++struct AnchorMember {
++  std::string_view label;
++  std::string_view unmasked_vendor;
++  std::string_view unmasked_renderer;
++  // This member's measured WebGPU adapter as a profile fragment, empty when it
++  // measured none.
++  //
++  // WebGPU is the one part of a capability cluster that is not anchor-wide:
++  // `capability_cluster.webgpu.uniform` is false for the Linux/Vulkan anchor,
++  // where the two Ada cards report nvidia/lovelace and the RTX 3090 and RTX PRO
++  // 4000 Blackwell returned no adapter at all. Presenting lovelace on a 3090
++  // would be an unmeasured assertion, so an empty fragment leaves WebGPU
++  // host-inherited instead of borrowing a sibling's.
++  std::string_view webgpu_json;
++};
++
++// A measured GPU capability cluster. Atomic by construction: selecting it takes
++// the whole `value_json`, because any mixture of two anchors is a device that
++// does not exist.
++struct Anchor {
++  std::string_view id;
++  std::string_view platform;
++  // Normalised graphics backend: "metal", "d3d11", "d3d9", "vulkan", "gl" or
++  // "swiftshader". Across backends nothing transfers, so this is what host
++  // servability is decided on -- not the platform persona.
++  std::string_view backend;
++  std::string_view vendor;
++  std::string_view evidence;
++  std::string_view webgl1_caps_sha256;
++  std::string_view webgl2_caps_sha256;
++  std::string_view pixels_sha256;
++  uint32_t weight = 1;
++  span<const AnchorMember> members;
++  std::string_view value_json;
++
++  // The member that measured this identity pair, or null.
++  //
++  // Within an anchor the identity strings are rotatable because the members
++  // measurably agree on the GL cluster; across anchors they are not. The
++  // member matters beyond that agreement only for WebGPU, which is why this
++  // returns the member rather than a bool.
++  const AnchorMember* FindMemberIdentity(
++      std::string_view unmasked_vendor,
++      std::string_view unmasked_renderer) const;
++};
++
++// A catalogue policy: locale or theme.
++//
++// Not a dispersion axis. `locale` is launch precedence plus GeoIP and `theme`
++// is not one of the nine axes, so neither has an option table -- but both are
++// drawn by seed from the same root, with all candidates weighted equally, so
++// the compositor needs them in the same compiled form.
++struct PolicyOption {
++  std::string_view id;
++  // "all", or one of "windows", "macos", "linux".
++  std::string_view platform;
++  std::string_view evidence;
++  std::string_view value_json;
++
++  bool AppliesTo(std::string_view persona) const {
++    return platform == "all" || platform == persona;
++  }
++};
++
++// The axis named `axis`, or null when the compiled catalogue has no such table.
++BASE_EXPORT const DispersionAxis* FindAxis(span<const DispersionAxis> axes,
++                                           std::string_view axis);
++
++// The anchor with id `id`, or null.
++BASE_EXPORT const Anchor* FindAnchor(span<const Anchor> anchors,
++                                     std::string_view id);
++
++}  // namespace base::apostate
++
++#endif  // BASE_APOSTATE_DISPERSION_TABLE_H_
+diff --git a/base/apostate/explain.cc b/base/apostate/explain.cc
+new file mode 100644
+--- /dev/null
++++ b/base/apostate/explain.cc
+@@ -0,0 +1,173 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#include "base/apostate/explain.h"
++
++#include <algorithm>
++#include <cstdio>
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "base/apostate/compose.h"
++#include "base/apostate/host_capability.h"
++#include "base/apostate/seed.h"
++#include "base/containers/span.h"
++#include "base/files/file_util.h"
++#include "base/strings/string_number_conversions.h"
++
++namespace base::apostate {
++
++namespace {
++
++std::string_view SeedOriginName(SeedOrigin origin) {
++  switch (origin) {
++    case SeedOrigin::kSwitch:
++      return "--fingerprint";
++    case SeedOrigin::kPersisted:
++      return "persisted in the user data directory";
++    case SeedOrigin::kGenerated:
++      return "drawn from OS entropy on first use";
++    case SeedOrigin::kHostInheritance:
++      return "none: the host is inherited";
++  }
++  return "unknown";
++}
++
++void AppendField(std::string& out, std::string_view name, std::string_view value) {
++  out += "  ";
++  out += name;
++  // Two columns, so the report stays greppable by field name.
++  for (size_t i = name.size(); i < 20; ++i) {
++    out += ' ';
++  }
++  out += value;
++  out += '\n';
++}
++
++void AppendPadded(std::string& out, std::string_view text, size_t width) {
++  out += text;
++  for (size_t i = text.size(); i < width; ++i) {
++    out += ' ';
++  }
++}
++
++void AppendLimitations(std::string& out,
++                       span<const std::string> limitations) {
++  out += '\n';
++  if (limitations.empty()) {
++    out += "limitations\n  none\n";
++    return;
++  }
++  out += "limitations\n";
++  for (const std::string& limitation : limitations) {
++    out += "  - ";
++    out += limitation;
++    out += '\n';
++  }
++}
++
++void WriteToStdout(const std::string& text) {
++  // Not std::fwrite: Chromium builds with -Wunsafe-buffer-usage-in-libc-call,
++  // which rejects the pointer+size libc form outright.
++  WriteFileDescriptor(STDOUT_FILENO, text);
++}
++
++}  // namespace
++
++std::string FormatExplainReport(const Composition& composition,
++                                const HostCapability& host) {
++  std::string out = "apostate fingerprint composition\n\n";
++
++  AppendField(out, "chromium", composition.chromium_version);
++  AppendField(out, "profile schema", composition.profile_schema_version);
++  AppendField(out, "catalogue",
++              "v" + composition.catalogue_version + " (tables " +
++                  composition.catalogue_digest + ")");
++  AppendField(out, "platform persona", composition.platform);
++  AppendField(out, "host platform",
++              composition.host_platform.empty() ? "(unknown)"
++                                                : composition.host_platform);
++  AppendField(out, "host cores", NumberToString(host.logical_cores));
++  AppendField(out, "host memory",
++              NumberToString(host.total_memory_bytes) + " bytes");
++  AppendField(out, "host backend",
++              host.graphics_backend +
++                  (host.graphics_backend_is_inferred
++                       ? " (platform default, not probed)"
++                       : " (from --use-angle)"));
++  if (host.window_width > 0 && host.window_height > 0) {
++    AppendField(out, "window bounds",
++                NumberToString(host.window_width) + "x" +
++                    NumberToString(host.window_height));
++  }
++  AppendField(out, "seed", composition.seed);
++  AppendField(out, "seed source", SeedOriginName(composition.seed_origin));
++  AppendField(out, "seed file",
++              composition.seed_path.empty()
++                  ? "(not persisted)"
++                  : composition.seed_path.AsUTF8Unsafe());
++  AppendField(out, "root", HexEncodeLower(composition.root));
++
++  // Column widths from the data, so nothing is ever truncated: a truncated
++  // renderer string is exactly the kind of detail this report exists to show.
++  size_t surface_width = std::string_view("surface").size();
++  size_t layer_width = std::string_view("layer").size();
++  size_t evidence_width = std::string_view("evidence").size();
++  for (const SurfaceRecord& record : composition.surfaces) {
++    surface_width = std::max(surface_width, record.surface.size());
++    layer_width = std::max(layer_width, record.layer.size());
++    evidence_width = std::max(evidence_width, record.evidence.size());
++  }
++
++  out += '\n';
++  AppendPadded(out, "surface", surface_width + 2);
++  AppendPadded(out, "layer", layer_width + 2);
++  AppendPadded(out, "evidence", evidence_width + 2);
++  out += "value\n";
++
++  for (const SurfaceRecord& record : composition.surfaces) {
++    AppendPadded(out, record.surface, surface_width + 2);
++    AppendPadded(out, record.layer, layer_width + 2);
++    AppendPadded(out, record.evidence, evidence_width + 2);
++    out += record.value;
++    out += '\n';
++    if (!record.limitation.empty()) {
++      out += "  ! ";
++      out += record.limitation;
++      out += '\n';
++    }
++  }
++
++  AppendLimitations(out, composition.limitations);
++  return out;
++}
++
++void WriteExplainReport(const Composition& composition,
++                        const HostCapability& host) {
++  WriteToStdout(FormatExplainReport(composition, host));
++}
++
++std::string FormatHostInheritanceReport(const SeedResolution& seed) {
++  std::string out = "apostate fingerprint composition\n\n";
++  AppendField(out, "composition", "disabled");
++  AppendField(out, "seed source", SeedOriginName(seed.origin));
++  out +=
++      "\nEvery surface is the host's own value, which is what --fingerprint=host\n"
++      "asks for. No layer below it is active, so there is nothing to report per\n"
++      "surface: the profile is the host.\n";
++
++  std::vector<std::string> limitations;
++  if (!seed.limitation.empty()) {
++    limitations.push_back(seed.limitation);
++  }
++  AppendLimitations(out, limitations);
++  return out;
++}
++
++void WriteHostInheritanceReport(const SeedResolution& seed) {
++  WriteToStdout(FormatHostInheritanceReport(seed));
++}
++
++}  // namespace base::apostate
+
+diff --git a/base/apostate/explain.h b/base/apostate/explain.h
+new file mode 100644
+index 0000000..c748800
+--- /dev/null
++++ b/base/apostate/explain.h
+@@ -0,0 +1,44 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_APOSTATE_EXPLAIN_H_
++#define BASE_APOSTATE_EXPLAIN_H_
++
++#include <string>
++
++#include "base/base_export.h"
++
++namespace base::apostate {
++
++struct Composition;
++struct HostCapability;
++struct SeedResolution;
++
++// The --fingerprint-explain report: per surface, the resolved value, the layer
++// that owns it, the evidence class, and any limitation.
++//
++// It is the honest answer to "what does this profile actually claim, and what
++// can this host actually serve" -- and on a cross-platform launch it is where
++// the GPU-cluster mismatch is reported rather than hidden.
++//
++// Writes to stdout and never to a page-visible API. A page cannot read stdout,
++// and nothing here is exposed through any web surface: the report exists so an
++// operator can audit a launch, which is the opposite of a new observable.
++BASE_EXPORT std::string FormatExplainReport(const Composition& composition,
++                                            const HostCapability& host);
++
++// Formats and writes the report to stdout.
++BASE_EXPORT void WriteExplainReport(const Composition& composition,
++                                    const HostCapability& host);
++
++// The report for a launch that composes nothing, so that
++// `--fingerprint=host --fingerprint-explain` still answers the question rather
++// than printing nothing.
++BASE_EXPORT std::string FormatHostInheritanceReport(
++    const SeedResolution& seed);
++BASE_EXPORT void WriteHostInheritanceReport(const SeedResolution& seed);
++
++}  // namespace base::apostate
++
++#endif  // BASE_APOSTATE_EXPLAIN_H_
+diff --git a/base/apostate/generate_dispersion_tables.py b/base/apostate/generate_dispersion_tables.py
+new file mode 100755
+index 0000000..b21f617
+--- /dev/null
++++ b/base/apostate/generate_dispersion_tables.py
+@@ -0,0 +1,72 @@
++#!/usr/bin/env python3
++"""GN action shim: run the Apostate table generator from inside the checkout.
++
++A GN action's script has to live in the source tree, and the generator and its
++inputs live in the Apostate repository that drives this checkout. Copying the
++generator in here would create a second implementation to keep in sync -- which
++is the exact failure this whole change exists to remove -- so this file locates
++the repository and execs the one implementation instead.
++
++The layout is fixed by scripts/lib.sh: the Chromium checkout is
++`$REPO_ROOT/.workspace/src`, so from this file at
++`<src>/base/apostate/generate_dispersion_tables.py` the repository root is five
++parents up. `APOSTATE_DATA_ROOT` overrides that for a checkout placed
++elsewhere.
++
++Failing the build when the repository cannot be found is deliberate. The bare
++binary has to produce a fingerprint with no arguments, so a binary with no
++compiled tables is not a degraded build, it is a broken one.
++"""
++
++from __future__ import annotations
++
++import os
++import pathlib
++import runpy
++import sys
++
++GENERATOR = "scripts/generate-dispersion-tables.py"
++# Files that together identify the Apostate repository rather than some other
++# directory that happens to have a scripts/ in it.
++MARKERS = (GENERATOR, "docs/FINGERPRINTS.md", "build/CHROMIUM_VERSION")
++
++
++def looks_like_repository(candidate: pathlib.Path) -> bool:
++    return all((candidate / marker).is_file() for marker in MARKERS)
++
++
++def find_repository() -> pathlib.Path:
++    override = os.environ.get("APOSTATE_DATA_ROOT")
++    if override:
++        candidate = pathlib.Path(override).resolve()
++        if not looks_like_repository(candidate):
++            raise SystemExit(
++                f"APOSTATE_DATA_ROOT={override} is not an Apostate repository: "
++                f"expected {', '.join(MARKERS)} under it"
++            )
++        return candidate
++
++    here = pathlib.Path(__file__).resolve()
++    # <repo>/.workspace/src/base/apostate/generate_dispersion_tables.py
++    for candidate in here.parents:
++        if looks_like_repository(candidate):
++            return candidate
++
++    raise SystemExit(
++        "could not find the Apostate repository above "
++        f"{here}. The dispersion tables and GPU anchors are compiled into the "
++        "binary, so a build without them is broken rather than degraded. Set "
++        "APOSTATE_DATA_ROOT to the repository root."
++    )
++
++
++def main() -> int:
++    repository = find_repository()
++    script = repository / GENERATOR
++    sys.argv = [str(script), "--data-root", str(repository), *sys.argv[1:]]
++    runpy.run_path(str(script), run_name="__main__")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/base/apostate/host_capability.cc b/base/apostate/host_capability.cc
+new file mode 100644
+--- /dev/null
++++ b/base/apostate/host_capability.cc
+@@ -0,0 +1,141 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#include "base/apostate/host_capability.h"
++
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "base/system/sys_info.h"
++#include "build/build_config.h"
++
++namespace base::apostate {
++
++namespace {
++
++// Switch names spelled as literals because base/ cannot include ui/gl or
++// chrome/common. Both are stable, both are cited, and neither is readable by
++// web content.
++//
++// "use-angle": ui/gl/gl_switches.cc kUseANGLE, with the backend value names
++// from kANGLEImplementation*Name in the same file.
++// "window-size": chrome/common/chrome_switches.cc kWindowSize, "w,h" in DIP.
++constexpr char kUseANGLESwitch[] = "use-angle";
++constexpr char kWindowSizeSwitch[] = "window-size";
++
++// The backend ANGLE selects when nothing overrides it.
++//
++// Grounded in this project's own T0 captures rather than asserted: the corpus
++// anchors record ANGLE/Metal on macOS, ANGLE/D3D11 on Windows and
++// ANGLE/Vulkan on Linux at the pinned Chromium version. It is an inference
++// about *this* launch, though, which is why HostCapability marks it as one.
++std::string PlatformDefaultBackend() {
++#if BUILDFLAG(IS_MAC)
++  return "metal";
++#elif BUILDFLAG(IS_WIN)
++  return "d3d11";
++#elif BUILDFLAG(IS_LINUX)
++  return "vulkan";
++#else
++  return std::string();
++#endif
++}
++
++std::string HostPlatformToken() {
++#if BUILDFLAG(IS_MAC)
++  return "macos";
++#elif BUILDFLAG(IS_WIN)
++  return "windows";
++#elif BUILDFLAG(IS_LINUX)
++  return "linux";
++#else
++  return std::string();
++#endif
++}
++
++// Maps a --use-angle value onto an Anchor::backend token.
++//
++// Only the values that name a backend an anchor could have been captured
++// through are mapped. "default" and the null/warp test backends deliberately
++// fall through to the platform default: pretending a null backend can serve a
++// measured capability cluster would make an unservable anchor selectable,
++// which is the §4 failure this whole model exists to avoid.
++std::string_view BackendFromANGLEValue(std::string_view value) {
++  if (value == "metal") {
++    return "metal";
++  }
++  if (value == "d3d11" || value == "d3d11on12") {
++    return "d3d11";
++  }
++  if (value == "d3d9") {
++    return "d3d9";
++  }
++  if (value == "vulkan") {
++    return "vulkan";
++  }
++  if (value == "gl" || value == "gl-egl" || value == "gles" ||
++      value == "gles-egl") {
++    return "gl";
++  }
++  if (value == "swiftshader" || value == "swiftshader-webgl") {
++    return "swiftshader";
++  }
++  return std::string_view();
++}
++
++}  // namespace
++
++HostCapability ProbeHostCapability(const CommandLine& command_line) {
++  HostCapability host;
++
++  host.logical_cores = SysInfo::NumberOfProcessorsImpl();
++  host.total_memory_bytes = SysInfo::AmountOfTotalPhysicalMemory().InBytes();
++  host.platform = HostPlatformToken();
++
++  host.graphics_backend = PlatformDefaultBackend();
++  if (command_line.HasSwitch(kUseANGLESwitch)) {
++    const std::string requested =
++        command_line.GetSwitchValueASCII(kUseANGLESwitch);
++    const std::string_view mapped = BackendFromANGLEValue(requested);
++    if (!mapped.empty()) {
++      host.graphics_backend = std::string(mapped);
++      host.graphics_backend_is_inferred = false;
++    }
++  }
++
++  if (command_line.HasSwitch(kWindowSizeSwitch)) {
++    const std::string value = command_line.GetSwitchValueASCII(kWindowSizeSwitch);
++    const std::vector<std::string_view> parts =
++        SplitStringPiece(value, ",", TRIM_WHITESPACE, SPLIT_WANT_NONEMPTY);
++    int width = 0;
++    int height = 0;
++    if (parts.size() == 2 && StringToInt(parts[0], &width) &&
++        StringToInt(parts[1], &height) && width > 0 && height > 0) {
++      host.window_width = width;
++      host.window_height = height;
++    }
++  }
++
++  return host;
++}
++
++int ClampLogicalCores(int claimed, int host) {
++  if (host <= 0) {
++    return claimed;
++  }
++  return claimed > host ? host : claimed;
++}
++
++uint64_t ClampMemoryBytes(uint64_t claimed, uint64_t host) {
++  if (host == 0) {
++    return claimed;
++  }
++  return claimed > host ? host : claimed;
++}
++
++}  // namespace base::apostate
+
+diff --git a/base/apostate/host_capability.h b/base/apostate/host_capability.h
+new file mode 100644
+index 0000000..0df7632
+--- /dev/null
++++ b/base/apostate/host_capability.h
+@@ -0,0 +1,77 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_APOSTATE_HOST_CAPABILITY_H_
++#define BASE_APOSTATE_HOST_CAPABILITY_H_
++
++#include <cstdint>
++#include <string>
++
++#include "base/base_export.h"
++
++namespace base {
++
++class CommandLine;
++
++namespace apostate {
++
++// What this host can actually serve.
++//
++// This exists because of FINGERPRINTS.md §3: a profile may claim fewer cores
++// than the host has, never more, and the same for memory, display area and the
++// GPU cluster. The reason is falsifiability -- a page can measure parallel
++// throughput, allocate until it fails, or compile a shader at the advertised
++// limit. A claim below host capability survives every one of those probes; a
++// claim above it fails the first.
++struct BASE_EXPORT HostCapability {
++  // The host's real logical processor count, from
++  // SysInfo::NumberOfProcessorsImpl(). Deliberately not NumberOfProcessors(),
++  // which consults the profile and would make the clamp consult its own
++  // output.
++  int logical_cores = 0;
++
++  // Real installed physical memory in bytes.
++  uint64_t total_memory_bytes = 0;
++
++  // Normalised graphics backend, matching Anchor::backend: "metal", "d3d11",
++  // "vulkan", "gl" or "swiftshader".
++  std::string graphics_backend;
++
++  // True when `graphics_backend` is the platform's default rather than an
++  // observed fact. It always is, unless --use-angle named one explicitly.
++  //
++  // A real backend probe requires the GPU process, and the GPU process is a
++  // child: A3 requires the profile to be fully materialised before the first
++  // renderer starts, so no child exists yet when this runs. The platform
++  // default is therefore the best available fact at composition time, and the
++  // explain report says so rather than implying a measurement happened.
++  bool graphics_backend_is_inferred = true;
++
++  // The host OS, as a fingerprint platform token: "windows", "macos" or
++  // "linux". Empty on a platform the model has no persona for.
++  std::string platform;
++
++  // Launch window bounds in DIP, from --window-size. Zero means unconstrained,
++  // in which case the window-bounds servability filter drops nothing.
++  int window_width = 0;
++  int window_height = 0;
++};
++
++// Probes the host. Cheap, no blocking I/O, safe to call before FeatureList
++// exists.
++BASE_EXPORT HostCapability ProbeHostCapability(const CommandLine& command_line);
++
++// Reduces a claim to what the host can serve. Never raises: these are the last
++// line behind the servability option filters, and they exist so that a table
++// defect degrades into an honest smaller claim instead of a falsifiable one.
++//
++// A host count of zero or less means "unknown", and an unknown host capability
++// cannot justify reducing anything, so the claim passes through.
++BASE_EXPORT int ClampLogicalCores(int claimed, int host);
++BASE_EXPORT uint64_t ClampMemoryBytes(uint64_t claimed, uint64_t host);
++
++}  // namespace apostate
++}  // namespace base
++
++#endif  // BASE_APOSTATE_HOST_CAPABILITY_H_
+diff --git a/base/apostate/seed.cc b/base/apostate/seed.cc
+new file mode 100644
+index 0000000..124d804
+--- /dev/null
++++ b/base/apostate/seed.cc
+@@ -0,0 +1,176 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#include "base/apostate/seed.h"
++
++#include <array>
++#include <cstdint>
++#include <string>
++#include <string_view>
++
++#include "base/apostate/compose.h"
++#include "base/command_line.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/files/important_file_writer.h"
++#include "base/logging.h"
++#include "base/rand_util.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
++#include "build/build_config.h"
++
++namespace base::apostate {
++
++namespace {
++
++// chrome/common/chrome_switches.cc kUserDataDir. Spelled as a literal because
++// base/ cannot depend on chrome/; base/metrics/histogram_shared_memory.cc
++// reads the process "type" switch the same way.
++constexpr char kUserDataDirSwitch[] = "user-data-dir";
++
++constexpr char kSeedDirectoryName[] = "apostate";
++constexpr char kSeedFileName[] = "seed";
++
++// 32 bytes of entropy, hex-encoded: 256 bits is past any birthday concern for
++// an identity space, and hex text means the file can be read, copied and
++// handed straight back as --fingerprint=<seed> to reproduce the identity
++// elsewhere. A binary file would not round-trip through a shell.
++constexpr size_t kSeedEntropyBytes = 32;
++
++// A hand-written seed is allowed to be any short printable line, so the cap is
++// generous. It exists only to stop a mis-pointed directory from loading a
++// megabyte of something else as identity material.
++constexpr size_t kMaxSeedFileBytes = 4096;
++
++// A seed is used verbatim as a hash input, so any byte sequence is technically
++// usable. Restricting the *file* to one printable line is about diagnosis: a
++// seed nobody can read back and retype is a seed nobody can reproduce.
++bool IsUsableSeed(std::string_view seed) {
++  if (seed.empty() || seed.size() > 512) {
++    return false;
++  }
++  for (const char c : seed) {
++    const auto byte = static_cast<unsigned char>(c);
++    if (byte < 0x21 || byte > 0x7E) {
++      return false;
++    }
++  }
++  return true;
++}
++
++std::string GenerateSeed() {
++  std::array<uint8_t, kSeedEntropyBytes> entropy = {};
++  RandBytes(entropy);
++  return HexEncodeLower(entropy);
++}
++
++}  // namespace
++
++FilePath SeedDirectory(const CommandLine& command_line) {
++  const FilePath user_data_dir =
++      command_line.GetSwitchValuePath(kUserDataDirSwitch);
++  if (user_data_dir.empty()) {
++    return FilePath();
++  }
++  return user_data_dir.AppendASCII(kSeedDirectoryName);
++}
++
++SeedResolution ResolveSeed(const CommandLine& command_line) {
++  SeedResolution resolution;
++
++  // --fingerprint wins outright, and `host` disables every layer below it.
++  if (command_line.HasSwitch(switches::kFingerprint)) {
++    const std::string value =
++        command_line.GetSwitchValueASCII(switches::kFingerprint);
++    if (value == switches::kFingerprintHostValue) {
++      resolution.origin = SeedOrigin::kHostInheritance;
++      return resolution;
++    }
++    if (IsUsableSeed(value)) {
++      resolution.seed = value;
++      resolution.origin = SeedOrigin::kSwitch;
++      return resolution;
++    }
++    // An unusable --fingerprint is a launch error, not something to paper over
++    // with entropy: the caller asked for a specific, reproducible identity and
++    // quietly substituting a different one is the opposite of what they asked
++    // for.
++    resolution.origin = SeedOrigin::kHostInheritance;
++    resolution.limitation =
++        "--fingerprint value is empty, over-long or not printable ASCII; no "
++        "profile was composed and this launch inherits the host";
++    LOG(ERROR) << "apostate: " << resolution.limitation;
++    return resolution;
++  }
++
++  const FilePath directory = SeedDirectory(command_line);
++  if (directory.empty()) {
++    // No user data directory on the command line. Compose from fresh entropy
++    // rather than refusing, but say plainly that the identity will not
++    // survive the launch -- §5's stability promise is tied to that directory
++    // and cannot be kept without it.
++    resolution.seed = GenerateSeed();
++    resolution.origin = SeedOrigin::kGenerated;
++    resolution.limitation =
++        "no --user-data-dir on the command line, so the seed could not be "
++        "persisted; this launch has a fresh identity and the next launch will "
++        "have another one";
++    LOG(WARNING) << "apostate: " << resolution.limitation;
++    return resolution;
++  }
++
++  resolution.path = directory.AppendASCII(kSeedFileName);
++
++  std::string contents;
++  if (ReadFileToStringWithMaxSize(resolution.path, &contents,
++                                  kMaxSeedFileBytes)) {
++    const std::string_view trimmed =
++        TrimWhitespaceASCII(contents, TRIM_ALL);
++    if (IsUsableSeed(trimmed)) {
++      resolution.seed = std::string(trimmed);
++      resolution.origin = SeedOrigin::kPersisted;
++      return resolution;
++    }
++    // A seed file that cannot be parsed is replaced rather than merely
++    // ignored. Ignoring it would draw fresh entropy on every launch from now
++    // on, and an identity that changes every launch is the exact signal §5
++    // exists to avoid; replacing it restores stability and is reported.
++    resolution.limitation =
++        "the persisted seed file was unreadable as a seed and has been "
++        "replaced, so this browser profile's identity changed once";
++    LOG(WARNING) << "apostate: " << resolution.limitation << " ("
++                 << resolution.path << ")";
++  }
++
++  resolution.seed = GenerateSeed();
++  resolution.origin = SeedOrigin::kGenerated;
++
++  if (!CreateDirectory(directory) ||
++      !ImportantFileWriter::WriteFileAtomically(resolution.path,
++                                                resolution.seed + "\n")) {
++    const std::string failure =
++        "the seed could not be written, so this launch has a fresh identity "
++        "and the next launch will have another one";
++    resolution.limitation = resolution.limitation.empty()
++                                ? failure
++                                : resolution.limitation + "; " + failure;
++    LOG(ERROR) << "apostate: " << failure << " (" << resolution.path << ")";
++    resolution.path = FilePath();
++    return resolution;
++  }
++
++#if BUILDFLAG(IS_POSIX)
++  // The seed is the whole identity: anything that can read it can reproduce
++  // this browser profile's fingerprint. Best effort, because a failure here
++  // does not make the seed unusable.
++  if (!SetPosixFilePermissions(resolution.path, 0600)) {
++    LOG(WARNING) << "apostate: could not restrict permissions on "
++                 << resolution.path;
++  }
++#endif
++
++  return resolution;
++}
++
++}  // namespace base::apostate
+diff --git a/base/apostate/seed.h b/base/apostate/seed.h
+new file mode 100644
+index 0000000..7df1372
+--- /dev/null
++++ b/base/apostate/seed.h
+@@ -0,0 +1,77 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_APOSTATE_SEED_H_
++#define BASE_APOSTATE_SEED_H_
++
++#include <string>
++
++#include "base/base_export.h"
++#include "base/files/file_path.h"
++
++namespace base {
++
++class CommandLine;
++
++namespace apostate {
++
++// Where the seed for this launch came from.
++enum class SeedOrigin {
++  // --fingerprint=<seed>. Reproducible anywhere.
++  kSwitch,
++  // Read from <user-data-dir>/apostate/seed.
++  kPersisted,
++  // Drawn from OS entropy and written to that file on first use.
++  kGenerated,
++  // --fingerprint=host. No composition at all; every layer below it is off.
++  kHostInheritance,
++};
++
++struct BASE_EXPORT SeedResolution {
++  // Empty when `origin` is kHostInheritance.
++  std::string seed;
++  SeedOrigin origin = SeedOrigin::kHostInheritance;
++  // Where the seed was read from or written to. Empty when it was not
++  // persisted, which the limitation below then explains.
++  FilePath path;
++  // Non-empty when something about the seed's lifetime is not what §5 promises.
++  // Reported by --fingerprint-explain, never silently swallowed.
++  std::string limitation;
++
++  bool should_compose() const { return origin != SeedOrigin::kHostInheritance; }
++};
++
++// Resolves the seed for this launch, per FINGERPRINTS.md §5 and §10.
++//
++// Precedence, strongest first: --fingerprint, then the seed persisted in the
++// user data directory, then 32 bytes of OS entropy written there on first use.
++// `--fingerprint=host` short-circuits everything.
++//
++// Seed lifetime is the user-data-dir, not the launch. A new fingerprint on
++// every launch of the same browser profile is itself a signal: returning-
++// visitor checks, long-lived cookies and storage all expect the machine to
++// stay the same machine. So an ephemeral user-data-dir yields a new identity
++// and a persistent one yields a stable identity, which is exactly what that
++// directory already means for cookies.
++//
++// This touches the filesystem, so it must be called exactly once, in the
++// browser process, before any child is launched. `ComposeProfileForCurrentProcess()`
++// is the only caller and enforces both conditions.
++BASE_EXPORT SeedResolution ResolveSeed(const CommandLine& command_line);
++
++// The directory the seed lives in: <user-data-dir>/apostate. Empty when the
++// command line carries no user data directory.
++//
++// base/ cannot compute Chrome's *default* user data directory -- that logic is
++// branding-dependent and lives in chrome/common/chrome_paths_*.cc. It does not
++// have to: ChromeMainDelegate resolves the directory and appends it back onto
++// the command line during startup (chrome/app/chrome_main_delegate.cc calls
++// AppendSwitchPath(switches::kUserDataDir, ...)), so by the time anything
++// composes, the switch is present whether or not the user passed it.
++BASE_EXPORT FilePath SeedDirectory(const CommandLine& command_line);
++
++}  // namespace apostate
++}  // namespace base
++
++#endif  // BASE_APOSTATE_SEED_H_

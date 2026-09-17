@@ -1,0 +1,606 @@
+Subject: net: carry QUIC over a SOCKS5 UDP association
+
+Routes a single-hop SOCKS5 chain through the datagram socket added in patch
+0079, so HTTP/3 works through a SOCKS5 proxy. Nothing else gains QUIC: an
+HTTP, HTTPS, SOCKS4 or multi-proxy chain still refuses it with
+ERR_NO_SUPPORTED_PROXIES, because none of them can relay a datagram.
+
+Exactly two rejections are relaxed, both guarded by IsQuicOverSocks5Chain():
+
+  - `DoInitConnectionImpl` rejected every non-direct, non-QUIC chain.
+  - `DoInitConnectionImplQuic` rejected any chain containing a non-QUIC proxy.
+
+The third gate is deliberately left alone: H3 discovery from DNS in
+`http_stream_factory_job_controller.cc` stays `is_direct()`-only, because an
+HTTPS-record lookup for the destination is the DNS query this design exists to
+avoid. Proxied H3 is therefore reached via Alt-Svc on a response that already
+came through the proxy, exactly as it is on a network without HTTPS records.
+
+`QuicSessionPool::RequestSession` sent every non-direct key to ProxyJob, which
+is QUIC-proxy-only. A SOCKS5 datagram chain now takes DirectJob instead; every
+other non-direct chain still takes ProxyJob.
+
+`CreateSocket` takes the session key and wraps the socket for such a chain.
+Every caller is routed through it, including the three migration and multi-port
+probe sites in QuicChromiumClientSession: a probe socket created without the
+key would send straight to the destination and leak past the proxy. Credentials
+are read from the launch envelope at that point and held only by the socket.
+
+DirectJob resolves the *proxy* for such a chain, which is forced rather than
+chosen: the socket needs a TCP control connection to the proxy and
+`ConnectAsync`'s address is the only address it gets. Consequences, all
+deliberate:
+
+  - `peer_address` becomes the proxy's endpoint, which is what the socket
+    reports from `GetPeerAddress()`, so the packet reader and QuicConnection
+    agree and no packet looks like a server address change.
+  - DNS timing measures the proxy's lookup, which is the lookup
+    TransportConnectJob already performs for a proxied stream and the one
+    Resource Timing already reports for it.
+  - Cross-origin IP pooling is skipped, because the resolved addresses are the
+    proxy's and pooling on them would key sessions by proxy identity.
+  - DNS aliases are dropped, because they would be the proxy's canonical names.
+
+Everything that identifies the server is untouched: the alias key's
+destination, `QuicSessionKey::server_id()`, SNI, certificate verification and
+session keying all still name the real destination, and the proxy chain is
+already part of the session key, so a proxied session can never be reused for a
+direct request or for a different proxy.
+
+`QuicSessionAttempt` is forced onto `CreateSessionAsync` for such a chain.
+kAsyncQuicSession is disabled by default off Windows and the synchronous path
+calls the socket's synchronous `Connect`, which cannot run a three-round-trip
+handshake.
+
+`QuicChromiumPacketWriter` consults the socket's encapsulation:
+
+  - `GetMaxPacketSize()` subtracts the per-datagram overhead. Without it an MTU
+    probe at 1452 becomes a 1462-byte payload, 1510 bytes on the wire over
+    IPv6, which the first 1500-MTU hop drops and QUIC reads as a path-MTU black
+    hole -- a far louder signal than the missing ECN below.
+  - `SupportsEcn()` becomes the socket's `preserves_ecn`, which is false
+    through a relay. A relay re-originates the inner packet and can carry the
+    ECN codepoint in neither direction, so advertising it would have QUIC mark
+    packets ECT and then fail its own ECN validation. A path that returns no
+    ECN counts is ordinary on the real Internet; an advertise-then-retract
+    pattern is not.
+
+The one existing `CreateSocket` caller in quic_session_pool_test.cc is updated
+to pass a direct session key, which keeps its behaviour identical.
+
+diff --git a/net/http/http_stream_factory_job.cc b/net/http/http_stream_factory_job.cc
+--- a/net/http/http_stream_factory_job.cc
++++ b/net/http/http_stream_factory_job.cc
+@@ -49,6 +49,7 @@
+ #include "net/socket/client_socket_pool_manager.h"
+ #include "net/socket/connect_job.h"
+ #include "net/socket/next_proto.h"
++#include "net/socket/socks5_datagram_client_socket.h"
+ #include "net/socket/ssl_client_socket.h"
+ #include "net/socket/stream_socket.h"
+ #include "net/spdy/bidirectional_stream_spdy_impl.h"
+@@ -729,12 +730,15 @@
+ int HttpStreamFactory::Job::DoInitConnectionImpl() {
+   DCHECK(!connection_->is_initialized());
+ 
+-  if (using_quic_ && !proxy_info_.is_direct() &&
+-      !proxy_info_.proxy_chain().Last().is_quic()) {
+-    // QUIC can not be spoken to non-QUIC proxies.  This error should not be
+-    // user visible, because the non-alternative Job should be resumed.
+-    return ERR_NO_SUPPORTED_PROXIES;
+-  }
++  if (using_quic_ && !proxy_info_.is_direct() &&
++      !proxy_info_.proxy_chain().Last().is_quic() &&
++      !IsQuicOverSocks5Chain(proxy_info_.proxy_chain())) {
++    // QUIC can not be spoken to non-QUIC proxies, except a single-hop SOCKS5
++    // chain, whose datagrams are relayed by RFC 1928 UDP ASSOCIATE. This error
++    // should not be user visible, because the non-alternative Job should be
++    // resumed.
++    return ERR_NO_SUPPORTED_PROXIES;
++  }
+ 
+   DCHECK(proxy_info_.proxy_chain().IsValid());
+   next_state_ = STATE_INIT_CONNECTION_COMPLETE;
+@@ -855,17 +859,19 @@
+       (job_type_ == DNS_ALPN_H3) || (job_type_ == PRECONNECT_DNS_ALPN_H3);
+ 
+   ProxyChain proxy_chain = proxy_info_.proxy_chain();
+-  if (!proxy_chain.is_direct()) {
+-    // We only support proxying QUIC over QUIC. While MASQUE defines mechanisms
+-    // to carry QUIC traffic over non-QUIC proxies, the performance of these
+-    // mechanisms would be worse than simply using H/1 or H/2 to reach the
+-    // destination. The error for an invalid condition should not be user
+-    // visible, because the non-alternative Job should be resumed.
+-    if (proxy_chain.AnyProxy(
+-            [](const ProxyServer& s) { return !s.is_quic(); })) {
+-      return ERR_NO_SUPPORTED_PROXIES;
+-    }
+-  }
++  if (!proxy_chain.is_direct() && !IsQuicOverSocks5Chain(proxy_chain)) {
++    // Apart from a single-hop SOCKS5 chain, whose datagrams are relayed by RFC
++    // 1928 UDP ASSOCIATE, we only support proxying QUIC over QUIC. While
++    // MASQUE defines mechanisms to carry QUIC traffic over non-QUIC proxies,
++    // the performance of these mechanisms would be worse than simply using H/1
++    // or H/2 to reach the destination. The error for an invalid condition
++    // should not be user visible, because the non-alternative Job should be
++    // resumed.
++    if (proxy_chain.AnyProxy(
++            [](const ProxyServer& s) { return !s.is_quic(); })) {
++      return ERR_NO_SUPPORTED_PROXIES;
++    }
++  }
+ 
+   std::optional<NetworkTrafficAnnotationTag> traffic_annotation =
+       proxy_info_.traffic_annotation().is_valid()
+
+diff --git a/net/quic/quic_session_pool.h b/net/quic/quic_session_pool.h
+--- a/net/quic/quic_session_pool.h
++++ b/net/quic/quic_session_pool.h
+@@ -473,12 +473,21 @@
+   handles::NetworkHandle FindAlternateNetwork(
+       handles::NetworkHandle old_network);
+ 
+-  // Creates a datagram socket. |source| is the NetLogSource for the entity
+-  // trying to create the socket, if it has one.
+-  std::unique_ptr<DatagramClientSocket> CreateSocket(
+-      handles::NetworkHandle target_network,
+-      NetLog* net_log,
+-      const NetLogSource& source);
++  // Creates a datagram socket for a session with `session_key`. |source| is
++  // the NetLogSource for the entity trying to create the socket, if it has
++  // one.
++  //
++  // The key decides the transport: a single-hop SOCKS5 chain gets the socket
++  // wrapped in a SOCKS5DatagramClientSocket, so every datagram is relayed by
++  // RFC 1928 UDP ASSOCIATE instead of being sent to the destination directly.
++  // Every caller must route through here for that reason -- a socket created
++  // without the key would send a probe straight to the destination and leak
++  // past the proxy.
++  std::unique_ptr<DatagramClientSocket> CreateSocket(
++      const QuicSessionKey& session_key,
++      handles::NetworkHandle target_network,
++      NetLog* net_log,
++      const NetLogSource& source);
+ 
+   // NetworkChangeNotifier::IPAddressObserver methods:
+ 
+
+diff --git a/net/quic/quic_session_pool.cc b/net/quic/quic_session_pool.cc
+--- a/net/quic/quic_session_pool.cc
++++ b/net/quic/quic_session_pool.cc
+@@ -13,6 +13,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "base/apostate/profile.h"
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
+@@ -75,6 +76,7 @@
+ #include "net/socket/next_proto.h"
+ #include "net/socket/socket_performance_watcher.h"
+ #include "net/socket/socket_performance_watcher_factory.h"
++#include "net/socket/socks5_datagram_client_socket.h"
+ #include "net/socket/udp_client_socket.h"
+ #include "net/spdy/multiplexed_session_creation_initiator.h"
+ #include "net/third_party/quiche/src/quiche/quic/core/crypto/crypto_protocol.h"
+@@ -387,6 +389,37 @@
+   }
+   return features::kAdditionalDelay.Get();
+ }
++// Annotates the SOCKS5 control connection: the greeting, the optional RFC 1929
++// sub-negotiation, and the UDP ASSOCIATE request. The relayed datagrams
++// themselves carry QuicChromiumPacketWriter's annotation, because they are the
++// same packets it would have written directly.
++const net::NetworkTrafficAnnotationTag kSocks5AssociateTrafficAnnotation =
++    net::DefineNetworkTrafficAnnotation("quic_socks5_udp_associate", R"(
++        semantics {
++          sender: "QUIC Session Pool"
++          description:
++            "Establishes a SOCKS5 UDP association so an HTTP/3 session can be "
++            "carried through the configured SOCKS5 proxy. Carries the SOCKS5 "
++            "greeting, the optional username/password sub-negotiation, and the "
++            "UDP ASSOCIATE request."
++          trigger:
++            "A QUIC session is created while a SOCKS5 proxy is configured for "
++            "the request."
++          data:
++            "The SOCKS5 handshake. No request content and no destination name; "
++            "the destination is named per datagram, not on this connection."
++          destination: OTHER
++          destination_other: "The configured SOCKS5 proxy."
++        }
++        policy {
++          cookies_allowed: NO
++          setting:
++            "This traffic only occurs when a SOCKS5 proxy is configured, and "
++            "stops when it is removed."
++          policy_exception_justification:
++            "Not implemented, behaviour follows the proxy configuration."
++        }
++    )");
+ 
+ }  // namespace
+ 
+@@ -953,27 +986,34 @@
+   }
+ 
+   QuicSessionAliasKey key(destination, session_key);
+-  std::unique_ptr<Job> job;
+-  // Connect start time, but only for direct connections to a proxy.
+-  std::optional<base::TimeTicks> proxy_connect_start_time = std::nullopt;
+-  if (session_key.proxy_chain().is_direct()) {
+-    if (session_key.session_usage() == SessionUsage::kProxy) {
+-      proxy_connect_start_time = base::TimeTicks::Now();
+-    }
+-    job = std::make_unique<DirectJob>(
+-        this, quic_version, host_resolver_, std::move(key),
+-        CreateCryptoConfigHandle(QuicCryptoClientConfigKey(session_key)),
+-        params_.retry_on_alternate_network_before_handshake, priority,
+-        use_dns_aliases, session_key.require_dns_https_alpn(),
+-        cert_verify_flags, session_creation_initiator, management_config,
+-        net_log);
+-  } else {
+-    job = std::make_unique<ProxyJob>(
+-        this, quic_version, std::move(key), *proxy_annotation_tag,
+-        session_creation_initiator, management_config, http_user_agent_settings,
+-        CreateCryptoConfigHandle(QuicCryptoClientConfigKey(session_key)),
+-        priority, cert_verify_flags, net_log);
+-  }
++  std::unique_ptr<Job> job;
++  // Connect start time, but only for direct connections to a proxy.
++  std::optional<base::TimeTicks> proxy_connect_start_time = std::nullopt;
++  // A single-hop SOCKS5 chain is proxied by the socket, not by a session to
++  // the proxy, so it takes the direct job and gets its datagrams relayed. Every
++  // other non-direct chain still goes to ProxyJob, which speaks QUIC to a QUIC
++  // proxy and cannot carry a SOCKS5 association.
++  const bool socks5_datagram_chain =
++      IsQuicOverSocks5Chain(session_key.proxy_chain());
++  if (session_key.proxy_chain().is_direct() || socks5_datagram_chain) {
++    if (session_key.proxy_chain().is_direct() &&
++        session_key.session_usage() == SessionUsage::kProxy) {
++      proxy_connect_start_time = base::TimeTicks::Now();
++    }
++    job = std::make_unique<DirectJob>(
++        this, quic_version, host_resolver_, std::move(key),
++        CreateCryptoConfigHandle(QuicCryptoClientConfigKey(session_key)),
++        params_.retry_on_alternate_network_before_handshake, priority,
++        use_dns_aliases, session_key.require_dns_https_alpn(),
++        cert_verify_flags, session_creation_initiator, management_config,
++        net_log);
++  } else {
++    job = std::make_unique<ProxyJob>(
++        this, quic_version, std::move(key), *proxy_annotation_tag,
++        session_creation_initiator, management_config, http_user_agent_settings,
++        CreateCryptoConfigHandle(QuicCryptoClientConfigKey(session_key)),
++        priority, cert_verify_flags, net_log);
++  }
+   job->AssociateWithNetLogSource(net_log);
+   int rv = job->Run(base::BindOnce(&QuicSessionPool::OnJobComplete,
+                                    weak_factory_.GetWeakPtr(), job.get(),
+@@ -1385,17 +1425,42 @@
+   return handles::kInvalidNetworkHandle;
+ }
+ 
+-std::unique_ptr<DatagramClientSocket> QuicSessionPool::CreateSocket(
+-    handles::NetworkHandle target_network,
+-    NetLog* net_log,
+-    const NetLogSource& source) {
+-  auto socket = client_socket_factory_->CreateDatagramClientSocket(
+-      DatagramSocket::DEFAULT_BIND, target_network, net_log, source);
+-  if (params_.enable_socket_recv_optimization) {
+-    socket->EnableRecvOptimization();
+-  }
+-  return socket;
+-}
++std::unique_ptr<DatagramClientSocket> QuicSessionPool::CreateSocket(
++    const QuicSessionKey& session_key,
++    handles::NetworkHandle target_network,
++    NetLog* net_log,
++    const NetLogSource& source) {
++  auto socket = client_socket_factory_->CreateDatagramClientSocket(
++      DatagramSocket::DEFAULT_BIND, target_network, net_log, source);
++  if (params_.enable_socket_recv_optimization) {
++    socket->EnableRecvOptimization();
++  }
++  if (!IsQuicOverSocks5Chain(session_key.proxy_chain())) {
++    return socket;
++  }
++  // The socket that carries data is still the one the factory produced, so it
++  // is configured exactly as a direct QUIC socket is; the wrapper only frames
++  // and deframes.
++  //
++  // Credentials are read here, at the point of use, and held only by the
++  // socket. They are deliberately absent from QuicSessionKey, the crypto
++  // config key and every NetLog parameter, so two launches with different
++  // credentials against one proxy still share session keying and a capture
++  // holds no secret.
++  std::optional<SOCKS5Credentials> credentials;
++  if (const base::apostate::Profile* profile =
++          base::apostate::Profile::Get()) {
++    if (const std::optional<base::apostate::ProxyCredentials>& configured =
++            profile->proxy_credentials()) {
++      credentials.emplace(configured->username, configured->password);
++    }
++  }
++  return std::make_unique<SOCKS5DatagramClientSocket>(
++      std::move(socket), client_socket_factory_,
++      HostPortPair(session_key.server_id().host(),
++                   session_key.server_id().port()),
++      std::move(credentials), kSocks5AssociateTrafficAnnotation);
++}
+ 
+ void QuicSessionPool::OnIPAddressChanged(
+     NetworkChangeNotifier::IPAddressChangeType change_type) {
+@@ -1841,8 +1906,9 @@
+   *session = nullptr;
+   // TODO(crbug.com/40256842): This logic only knows how to try one IP
+   // endpoint.
+-  std::unique_ptr<DatagramClientSocket> socket(CreateSocket(
+-      key.session_key().target_network(), net_log.net_log(), net_log.source()));
++  std::unique_ptr<DatagramClientSocket> socket(
++      CreateSocket(key.session_key(), key.session_key().target_network(),
++                   net_log.net_log(), net_log.source()));
+ 
+   // If migrate_sessions_on_network_change_v2 is on, passing in
+   // handles::kInvalidNetworkHandle will bind the socket to the default network.
+@@ -1893,8 +1959,9 @@
+     std::optional<ConnectionManagementConfig> connection_management_config) {
+   // TODO(crbug.com/40256842): This logic only knows how to try one IP
+   // endpoint.
+-  std::unique_ptr<DatagramClientSocket> socket(CreateSocket(
+-      key.session_key().target_network(), net_log.net_log(), net_log.source()));
++  std::unique_ptr<DatagramClientSocket> socket(
++      CreateSocket(key.session_key(), key.session_key().target_network(),
++                   net_log.net_log(), net_log.source()));
+   DatagramClientSocket* socket_ptr = socket.get();
+   CompletionOnceCallback connect_and_configure_callback = base::BindOnce(
+       &QuicSessionPool::FinishCreateSession, weak_factory_.GetWeakPtr(),
+
+diff --git a/net/quic/quic_chromium_client_session.cc b/net/quic/quic_chromium_client_session.cc
+--- a/net/quic/quic_chromium_client_session.cc
++++ b/net/quic/quic_chromium_client_session.cc
+@@ -3521,9 +3521,12 @@
+   // `ConnectAndConfigureSocket`, bind the socket via this `CreateSocket` call,
+   // by passing in `default_network_` instead of
+   // `handles::kInvalidNetworkHandle`.
+-  std::unique_ptr<DatagramClientSocket> probing_socket =
+-      session_pool_->CreateSocket(handles::kInvalidNetworkHandle,
+-                                  net_log_.net_log(), net_log_.source());
++  // The session key decides the transport, so a probe for a proxied session is
++  // relayed through the proxy like every other datagram. Without it the probe
++  // would go straight to the destination and leak past the proxy.
++  std::unique_ptr<DatagramClientSocket> probing_socket =
++      session_pool_->CreateSocket(session_key_, handles::kInvalidNetworkHandle,
++                                  net_log_.net_log(), net_log_.source());
+   if (base::FeatureList::IsEnabled(net::features::kAsyncMultiPortPath)) {
+     DatagramClientSocket* probing_socket_ptr = probing_socket.get();
+     CompletionOnceCallback configure_callback = base::BindOnce(
+@@ -3618,9 +3621,12 @@
+   // TODO(crbug.com/518753285): Once we no longer bindToNetwork via
+   // `FinishStartProbing`, bind the socket via this `CreateSocket` call, by
+   // passing in `network` instead of `handles::kInvalidNetworkHandle`.
+-  std::unique_ptr<DatagramClientSocket> probing_socket =
+-      session_pool_->CreateSocket(handles::kInvalidNetworkHandle,
+-                                  net_log_.net_log(), net_log_.source());
++  // The session key decides the transport, so a probe for a proxied session is
++  // relayed through the proxy like every other datagram. Without it the probe
++  // would go straight to the destination and leak past the proxy.
++  std::unique_ptr<DatagramClientSocket> probing_socket =
++      session_pool_->CreateSocket(session_key_, handles::kInvalidNetworkHandle,
++                                  net_log_.net_log(), net_log_.source());
+   DatagramClientSocket* probing_socket_ptr = probing_socket.get();
+   CompletionOnceCallback configure_callback =
+       base::BindOnce(&QuicChromiumClientSession::FinishStartProbing,
+@@ -4238,8 +4244,9 @@
+   // TODO(crbug.com/518753285): Once we no longer bindToNetwork via
+   // `ConnectAndConfigureSocket`, bind the socket via this `CreateSocket` call,
+   // by passing in `network` instead of `handles::kInvalidNetworkHandle`.
+-  std::unique_ptr<DatagramClientSocket> socket(session_pool_->CreateSocket(
+-      handles::kInvalidNetworkHandle, net_log_.net_log(), net_log_.source()));
++  std::unique_ptr<DatagramClientSocket> socket(session_pool_->CreateSocket(
++      session_key_, handles::kInvalidNetworkHandle, net_log_.net_log(),
++      net_log_.source()));
+   DatagramClientSocket* socket_ptr = socket.get();
+   DVLOG(1) << "Force blocking the packet writer";
+   static_cast<QuicChromiumPacketWriter*>(connection()->writer())
+
+diff --git a/net/quic/quic_session_pool_direct_job.cc b/net/quic/quic_session_pool_direct_job.cc
+--- a/net/quic/quic_session_pool_direct_job.cc
++++ b/net/quic/quic_session_pool_direct_job.cc
+@@ -19,6 +19,7 @@
+ #include "net/quic/quic_crypto_client_config_handle.h"
+ #include "net/quic/quic_http_stream.h"
+ #include "net/quic/quic_session_pool.h"
++#include "net/socket/socks5_datagram_client_socket.h"
+ #include "net/spdy/multiplexed_session_creation_initiator.h"
+ #include "net/ssl/ssl_config_service.h"
+ #include "net/third_party/quiche/src/quiche/quic/core/quic_versions.h"
+@@ -138,9 +139,25 @@
+   HostResolver::ResolveHostParameters parameters;
+   parameters.initial_priority = priority_;
+   parameters.secure_dns_policy = key_.session_key().secure_dns_policy();
+-  resolve_host_request_ = host_resolver_->CreateRequest(
+-      key_.destination(), key_.session_key().network_anonymization_key(),
+-      key_.session_key().target_network(), net_log_, parameters);
++  if (IsQuicOverSocks5Chain(key_.session_key().proxy_chain())) {
++    // Resolve the proxy, not the destination. The datagram socket needs the
++    // proxy's address for its control connection, and it is the only address
++    // this job can hand it. Resolving the destination as well would emit a DNS
++    // query that the SOCKS5 stream path never makes -- that path passes a
++    // hostname to the proxy -- which a site can observe at its authoritative
++    // nameserver as an HTTP/3-only resolver. The proxy is resolved as a plain
++    // host: it has no HTTPS record worth asking for, and this is the same
++    // lookup TransportConnectJob performs for a proxied stream, so the DNS
++    // timing Resource Timing reports is unchanged.
++    resolve_host_request_ = host_resolver_->CreateRequest(
++        key_.session_key().proxy_chain().First().host_port_pair(),
++        key_.session_key().network_anonymization_key(),
++        key_.session_key().target_network(), net_log_, parameters);
++  } else {
++    resolve_host_request_ = host_resolver_->CreateRequest(
++        key_.destination(), key_.session_key().network_anonymization_key(),
++        key_.session_key().target_network(), net_log_, parameters);
++  }
+   // Unretained is safe because |this| owns the request, ensuring cancellation
+   // on destruction.
+   return resolve_host_request_->Start(
+@@ -166,22 +183,28 @@
+   // provides new IP endpoints. Iterate through them to check if we
+   // can perform cross-origin IP pooling with an existing session, which will
+   // set up a session alias, if found.
+-  const bool svcb_optional =
+-      IsSvcbOptional(resolve_host_request_->GetEndpointResults());
+-  for (const auto& endpoint : resolve_host_request_->GetEndpointResults()) {
+-    // Only consider endpoints that would have been eligible for QUIC.
+-    quic::ParsedQuicVersion endpoint_quic_version = pool_->SelectQuicVersion(
+-        quic_version_, endpoint.metadata, svcb_optional);
+-    if (!endpoint_quic_version.IsKnown()) {
+-      continue;
+-    }
+-    if (pool_->HasMatchingIpSession(key_, endpoint.ip_endpoints,
+-                                    resolve_host_request_->GetDnsAliasResults(),
+-                                    use_dns_aliases_)) {
+-      LogConnectionIpPooling(true);
+-      return OK;
+-    }
+-  }
++  //
++  // Cross-origin IP pooling is skipped for a SOCKS5 datagram chain: the
++  // addresses just resolved are the proxy's, so pooling on them would key
++  // sessions by proxy identity rather than by server.
++  if (!IsQuicOverSocks5Chain(key_.session_key().proxy_chain())) {
++    const bool svcb_optional =
++        IsSvcbOptional(resolve_host_request_->GetEndpointResults());
++    for (const auto& endpoint : resolve_host_request_->GetEndpointResults()) {
++      // Only consider endpoints that would have been eligible for QUIC.
++      quic::ParsedQuicVersion endpoint_quic_version = pool_->SelectQuicVersion(
++          quic_version_, endpoint.metadata, svcb_optional);
++      if (!endpoint_quic_version.IsKnown()) {
++        continue;
++      }
++      if (pool_->HasMatchingIpSession(
++              key_, endpoint.ip_endpoints,
++              resolve_host_request_->GetDnsAliasResults(), use_dns_aliases_)) {
++        LogConnectionIpPooling(true);
++        return OK;
++      }
++    }
++  }
+   io_state_ = STATE_ATTEMPT_SESSION;
+   return OK;
+ }
+@@ -209,9 +232,14 @@
+     return ERR_DNS_NO_MATCHING_SUPPORTED_ALPN;
+   }
+ 
+-  std::set<std::string> dns_aliases =
+-      use_dns_aliases_ ? resolve_host_request_->GetDnsAliasResults()
+-                       : std::set<std::string>();
++  // DNS aliases are dropped for a SOCKS5 datagram chain: they would be the
++  // proxy's canonical names, which are not the destination's.
++  const bool use_dns_aliases =
++      use_dns_aliases_ &&
++      !IsQuicOverSocks5Chain(key_.session_key().proxy_chain());
++  std::set<std::string> dns_aliases =
++      use_dns_aliases ? resolve_host_request_->GetDnsAliasResults()
++                      : std::set<std::string>();
+   // Passing an empty `crypto_client_config_handle` is safe because this job
+   // already owns a handle.
+   session_attempt_ = std::make_unique<QuicSessionAttempt>(
+@@ -219,7 +247,7 @@
+       std::move(quic_version_used), cert_verify_flags_,
+       dns_resolution_start_time_, dns_resolution_end_time_,
+       resolve_host_request_->GetResolutionDetails(),
+-      retry_on_alternate_network_before_handshake_, use_dns_aliases_,
++      retry_on_alternate_network_before_handshake_, use_dns_aliases,
+       std::move(dns_aliases), /*crypto_client_config_handle=*/nullptr,
+       session_creation_initiator_, connection_management_config_);
+ 
+
+diff --git a/net/quic/quic_session_attempt.cc b/net/quic/quic_session_attempt.cc
+--- a/net/quic/quic_session_attempt.cc
++++ b/net/quic/quic_session_attempt.cc
+@@ -19,6 +19,7 @@
+ #include "net/quic/address_utils.h"
+ #include "net/quic/quic_http_stream.h"
+ #include "net/quic/quic_session_pool.h"
++#include "net/socket/socks5_datagram_client_socket.h"
+ #include "net/spdy/multiplexed_session_creation_initiator.h"
+ #include "net/third_party/quiche/src/quiche/quic/core/quic_versions.h"
+ 
+@@ -197,7 +198,12 @@
+         std::move(local_endpoint_), std::move(ip_endpoint_),
+         std::move(proxy_stream_), std::move(user_agent), net_log(), network_);
+   } else {
+-    if (base::FeatureList::IsEnabled(net::features::kAsyncQuicSession)) {
++    // A SOCKS5 association needs at least three round trips, which the
++    // synchronous creation path cannot run, and kAsyncQuicSession is disabled
++    // by default off Windows. Force the asynchronous path for that chain rather
++    // than let the capability silently depend on a field trial.
++    if (base::FeatureList::IsEnabled(net::features::kAsyncQuicSession) ||
++        IsQuicOverSocks5Chain(key().session_key().proxy_chain())) {
+       return pool()->CreateSessionAsync(
+           base::BindOnce(&QuicSessionAttempt::OnCreateSessionComplete,
+                          weak_ptr_factory_.GetWeakPtr()),
+
+diff --git a/net/quic/quic_chromium_packet_writer.cc b/net/quic/quic_chromium_packet_writer.cc
+--- a/net/quic/quic_chromium_packet_writer.cc
++++ b/net/quic/quic_chromium_packet_writer.cc
+@@ -286,10 +286,19 @@
+   return true;
+ }
+ 
+-quic::QuicByteCount QuicChromiumPacketWriter::GetMaxPacketSize(
+-    const quic::QuicSocketAddress& peer_address) const {
+-  return quic::kMaxOutgoingPacketSize;
+-}
++quic::QuicByteCount QuicChromiumPacketWriter::GetMaxPacketSize(
++    const quic::QuicSocketAddress& peer_address) const {
++  // A socket that encapsulates each datagram -- a SOCKS5 UDP relay prepends an
++  // RFC 1928 section 7 header -- can carry that much less. Without the
++  // subtraction an MTU probe at 1452 becomes a 1462-byte payload, 1510 bytes on
++  // the wire over IPv6, which the first 1500-MTU hop drops and QUIC reads as a
++  // path-MTU black hole. The overhead is fixed for the socket's lifetime, so
++  // this cannot go stale.
++  const quic::QuicByteCount overhead =
++      socket_ ? socket_->GetEncapsulation().overhead : 0;
++  CHECK_LT(overhead, quic::kMaxOutgoingPacketSize);
++  return quic::kMaxOutgoingPacketSize - overhead;
++}
+ 
+ bool QuicChromiumPacketWriter::SupportsReleaseTime() const {
+   return false;
+@@ -299,9 +308,13 @@
+   return false;
+ }
+ 
+-bool QuicChromiumPacketWriter::SupportsEcn() const {
+-  return true;
+-}
++bool QuicChromiumPacketWriter::SupportsEcn() const {
++  // A relay re-originates the inner packet and cannot carry its ECN codepoint
++  // to the destination, nor the destination's back. Claiming support would have
++  // QUIC mark packets ECT and then fail its own ECN validation when no counts
++  // came back, which advertises a capability the transport cannot serve.
++  return socket_ && socket_->GetEncapsulation().preserves_ecn;
++}
+ 
+ quic::QuicPacketBuffer QuicChromiumPacketWriter::GetNextWriteLocation(
+     const quiche::QuicheIpAddress& self_address,
+
+diff --git a/net/quic/quic_session_pool_test.cc b/net/quic/quic_session_pool_test.cc
+--- a/net/quic/quic_session_pool_test.cc
++++ b/net/quic/quic_session_pool_test.cc
+@@ -7025,8 +7025,9 @@
+   EXPECT_EQ(OK, stream->SendRequest(request_headers, &response,
+                                     callback_.callback()));
+ 
+-  std::unique_ptr<DatagramClientSocket> socket(pool_->CreateSocket(
+-      handles::kInvalidNetworkHandle, net_log_.net_log(), net_log_.source()));
++  std::unique_ptr<DatagramClientSocket> socket(pool_->CreateSocket(
++      session->quic_session_key(), handles::kInvalidNetworkHandle,
++      net_log_.net_log(), net_log_.source()));
+   DatagramClientSocket* socket_ptr = socket.get();
+   pool_->ConnectAndConfigureSocket(
+       base::BindLambdaForTesting([&session, &socket](int rv) {

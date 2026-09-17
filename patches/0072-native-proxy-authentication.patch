@@ -3,7 +3,7 @@ Subject: net: authenticate launch-only proxy credentials
 diff --git a/base/apostate/profile.h b/base/apostate/profile.h
 --- a/base/apostate/profile.h
 +++ b/base/apostate/profile.h
-@@ -12,6 +12,12 @@
+@@ -15,6 +15,18 @@
  #include "base/base_export.h"
  
  namespace base::apostate {
@@ -13,10 +13,16 @@ diff --git a/base/apostate/profile.h b/base/apostate/profile.h
 +  std::string username;
 +  std::string password;
 +};
++
++// Upper bound on how many times launch-supplied proxy credentials are fed to
++// one connect job or transaction. Enough for a full NTLM/Negotiate handshake
++// or a Digest nonce rotation; bounded so a genuinely rejected credential
++// still reaches the delegate instead of looping against the proxy.
++inline constexpr int kMaxProxyAuthRounds = 3;
  
  // The device profile this process is presenting.
  //
-@@ -73,12 +79,18 @@
+@@ -411,6 +423,11 @@
    // Identifier of the capture this profile was derived from, for diagnostics.
    const std::string& source_id() const { return source_id_; }
  
@@ -26,15 +32,17 @@ diff --git a/base/apostate/profile.h b/base/apostate/profile.h
 +  }
 +
   private:
+   friend class ProfileTestPeer;
    static Profile* ParseOrNull(const std::string& encoded);
- 
-   std::optional<int> cpu_logical_cores_;
-   std::optional<uint64_t> memory_total_bytes_;
+@@ -465,6 +482,7 @@
+   std::optional<uint32_t> css_highlight_argb_;
+   std::optional<uint32_t> css_highlight_text_argb_;
    std::string source_id_;
 +  std::optional<ProxyCredentials> proxy_credentials_;
  };
  
  }  // namespace base::apostate
+
 diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
 --- a/base/apostate/profile.cc
 +++ b/base/apostate/profile.cc
@@ -99,25 +107,18 @@ diff --git a/net/socket/socks_client_socket.h b/net/socket/socks_client_socket.h
 diff --git a/net/socket/socks_client_socket.cc b/net/socket/socks_client_socket.cc
 --- a/net/socket/socks_client_socket.cc
 +++ b/net/socket/socks_client_socket.cc
-@@ -65,7 +65,17 @@
+@@ -65,8 +65,10 @@
      RequestPriority priority,
      HostResolver* host_resolver,
      SecureDnsPolicy secure_dns_policy,
 -    const NetworkTrafficAnnotationTag& traffic_annotation)
 +    const NetworkTrafficAnnotationTag& traffic_annotation,
 +    std::optional<std::string> user_id)
-+    : transport_socket_(std::move(transport_socket)),
+     : transport_socket_(std::move(transport_socket)),
 +      user_id_(std::move(user_id)),
-+      host_resolver_(host_resolver),
-+      secure_dns_policy_(secure_dns_policy),
-+      destination_(destination),
-+      network_anonymization_key_(network_anonymization_key),
-+      priority_(priority),
-+      net_log_(transport_socket_->NetLog()),
-+      traffic_annotation_(traffic_annotation) {}
- 
- SOCKSClientSocket::~SOCKSClientSocket() {
-   Disconnect();
+       host_resolver_(host_resolver),
+       secure_dns_policy_(secure_dns_policy),
+       destination_(destination),
 @@ -339,7 +341,10 @@
    handshake_data.reserve(request_as_span.size() + 1u);
    handshake_data.insert(handshake_data.end(), request_as_span.begin(),
@@ -130,6 +131,7 @@ diff --git a/net/socket/socks_client_socket.cc b/net/socket/socks_client_socket.
    handshake_data.push_back(0);
  
    return handshake_data;
+
 diff --git a/net/socket/socks_connect_job.h b/net/socket/socks_connect_job.h
 --- a/net/socket/socks_connect_job.h
 +++ b/net/socket/socks_connect_job.h
@@ -301,43 +303,6 @@ diff --git a/net/socket/connect_job_params_factory.cc b/net/socket/connect_job_p
    }
  
    if (UsingSsl(endpoint)) {
-diff --git a/net/http/http_auth_controller.h b/net/http/http_auth_controller.h
---- a/net/http/http_auth_controller.h
-+++ b/net/http/http_auth_controller.h
-@@ -115,7 +115,9 @@
-                           const NetLogWithSource& net_log);
- 
-   // Store the supplied credentials and prepare to restart the auth.
--  void ResetAuth(const AuthCredentials& credentials);
-+  // |cache_credentials| is false for launch-only credentials.
-+  void ResetAuth(const AuthCredentials& credentials,
-+                 bool cache_credentials = true);
- 
-   bool HaveAuthHandler() const;
- 
-diff --git a/net/http/http_auth_controller.cc b/net/http/http_auth_controller.cc
---- a/net/http/http_auth_controller.cc
-+++ b/net/http/http_auth_controller.cc
-@@ -346,7 +346,8 @@
-   return OK;
- }
- 
--void HttpAuthController::ResetAuth(const AuthCredentials& credentials) {
-+void HttpAuthController::ResetAuth(const AuthCredentials& credentials,
-+                                    bool cache_credentials) {
-   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-   DCHECK(identity_.invalid || credentials.Empty());
- 
-@@ -376,6 +377,9 @@
-   // round 1 and round 2, which is redundant but correct.  It would be nice
-   // to add an auth entry to the cache only once, preferrably in round 1.
-   // See http://crbug.com/21015.
-+  if (!cache_credentials)
-+    return;
-+
-   switch (identity_.source) {
-     case HttpAuth::IDENT_SRC_NONE:
-     case HttpAuth::IDENT_SRC_DEFAULT_CREDENTIALS:
 diff --git a/net/http/http_proxy_connect_job.cc b/net/http/http_proxy_connect_job.cc
 --- a/net/http/http_proxy_connect_job.cc
 +++ b/net/http/http_proxy_connect_job.cc
@@ -410,19 +375,24 @@ diff --git a/net/http/http_proxy_connect_job.cc b/net/http/http_proxy_connect_jo
    DCHECK(!proxy_chain_.is_direct());
    DCHECK(proxy_chain_.IsValid());
    CHECK(proxy_chain_index_ < proxy_chain_.length());
-@@ -906,6 +914,19 @@
+@@ -906,6 +914,24 @@
    // Stop timer while potentially waiting for user input.
    ResetTimer(base::TimeDelta());
  
-+  if (!launch_proxy_credentials_attempted_ && params_->proxy_credentials() &&
-+      http_auth_controller_ && http_auth_controller_->HaveAuthHandler() &&
++  // Multi-round schemes (NTLM, Negotiate) always re-challenge after the first
++  // credential, and Digest re-challenges on nonce rotation. Answering only
++  // once leaves those handshakes unfinished and surfaces a prompt the user
++  // cannot usefully answer, so allow a bounded number of rounds before
++  // falling back to the delegate.
++  if (launch_proxy_auth_rounds_ < base::apostate::kMaxProxyAuthRounds &&
++      params_->proxy_credentials() && http_auth_controller_ &&
++      http_auth_controller_->HaveAuthHandler() &&
 +      !http_auth_controller_->HaveAuth()) {
-+    launch_proxy_credentials_attempted_ = true;
++    ++launch_proxy_auth_rounds_;
 +    const auto& credentials = *params_->proxy_credentials();
 +    http_auth_controller_->ResetAuth(
 +        AuthCredentials(base::UTF8ToUTF16(credentials.username),
-+                        base::UTF8ToUTF16(credentials.password)),
-+        false);
++                        base::UTF8ToUTF16(credentials.password)));
 +    RestartWithAuthCredentials();
 +    return;
 +  }
@@ -496,7 +466,7 @@ diff --git a/net/http/http_proxy_connect_job.h b/net/http/http_proxy_connect_job
    State next_state_ = STATE_NONE;
  
    bool has_restarted_ = false;
-+  bool launch_proxy_credentials_attempted_ = false;
++  int launch_proxy_auth_rounds_ = 0;
  
    // Set to true once a connection has been successfully established. Remains
    // true even if a new socket is being connected to retry with auth.
@@ -512,27 +482,32 @@ diff --git a/net/http/http_network_transaction.cc b/net/http/http_network_transa
  #include "base/base64url.h"
  #include "base/byte_size.h"
  #include "base/compiler_specific.h"
-@@ -2402,8 +2404,26 @@
+@@ -2402,8 +2404,32 @@
  
    int rv = auth_controllers_[target]->HandleAuthChallenge(
        headers, response_.ssl_info, !ShouldApplyServerAuth(), false, net_log_);
--  if (auth_controllers_[target]->HaveAuthHandler())
-+  if (rv == OK && auth_controllers_[target]->HaveAuthHandler())
+   if (auth_controllers_[target]->HaveAuthHandler())
      pending_auth_target_ = target;
 +
++  // See kMaxProxyAuthRounds in base/apostate/profile.h: a single
++  // injected credential cannot finish a multi-round handshake, and giving up
++  // after one round surfaces a prompt on a proxy that is working.
 +  if (rv == OK && target == HttpAuth::AUTH_PROXY &&
-+      !launch_proxy_credentials_attempted_ &&
++      launch_proxy_auth_rounds_ < base::apostate::kMaxProxyAuthRounds &&
 +      auth_controllers_[target]->HaveAuthHandler() &&
 +      !auth_controllers_[target]->HaveAuth()) {
 +    const auto* profile = base::apostate::Profile::Get();
 +    if (profile && profile->proxy_credentials()) {
-+      launch_proxy_credentials_attempted_ = true;
++      ++launch_proxy_auth_rounds_;
 +      const auto& credentials = *profile->proxy_credentials();
 +      auth_controllers_[target]->ResetAuth(
 +          AuthCredentials(base::UTF8ToUTF16(credentials.username),
-+                          base::UTF8ToUTF16(credentials.password)),
-+          false);
++                          base::UTF8ToUTF16(credentials.password)));
 +      pending_auth_target_ = HttpAuth::AUTH_NONE;
++      // Drive the restart from here rather than returning to the caller.
++      // DoReadHeadersComplete() clears request_ once pending_auth_target_ is
++      // AUTH_NONE, which would destroy the data the restarted request needs,
++      // so the restart has to run before this call unwinds.
 +      PrepareForAuthRestart(target);
 +      return DoLoop(OK);
 +    }
@@ -547,7 +522,7 @@ diff --git a/net/http/http_network_transaction.h b/net/http/http_network_transac
    // cleared by RestartWithAuth().
    HttpAuth::Target pending_auth_target_ = HttpAuth::AUTH_NONE;
  
-+  bool launch_proxy_credentials_attempted_ = false;
++  int launch_proxy_auth_rounds_ = 0;
 +
    CompletionRepeatingCallback io_callback_;
    CompletionOnceCallback callback_;

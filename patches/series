@@ -71,3 +71,9 @@
 0072-native-proxy-authentication.patch
 0073-webrtc-candidate-address-override.patch
 0074-webrtc-spoof-ice-candidate-ip.patch
+0075-network-speech-voices-with-api-keys.patch
+0079-net-socks5-datagram-socket.patch
+0080-quic-over-socks5-datagram.patch
+0081-apostate-profile-compositor.patch
+0082-apostate-compositor-tests.patch
+0083-loader-composes-when-no-profile-given.patch

@@ -84,7 +84,7 @@ index 0261246..b22b735 100644
  #include "build/build_config.h"
  
  #if BUILDFLAG(IS_WIN)
-@@ -399,7 +401,39 @@ bool InitializeICUWithFileDescriptor(
+@@ -399,7 +403,39 @@ bool InitializeICUWithFileDescriptor(
      return false;
    }
  
@@ -125,7 +125,7 @@ index 0261246..b22b735 100644
  }
  
  PlatformFile GetIcuDataFileHandle(MemoryMappedFile::Region* out_region) {
-@@ -447,7 +481,39 @@ bool InitializeICU() {
+@@ -447,7 +483,39 @@ bool InitializeICU() {
  #error Unsupported ICU_UTIL_DATA_IMPL value
  #endif  // (ICU_UTIL_DATA_IMPL == ICU_UTIL_DATA_STATIC)
  

@@ -1,0 +1,2226 @@
+Subject: net: SOCKS5 datagram socket via RFC 1928 UDP ASSOCIATE
+
+Chromium can speak SOCKS5 only as a stream. `SOCKS5ClientSocket` hardcodes
+`kTunnelCommand` and discards the reply's bound address, so there is no way to
+open an association, and QUIC therefore has no datagram path through a SOCKS5
+proxy at all.
+
+Adds `SOCKS5DatagramClientSocket`: a `DatagramClientSocket` that relays its
+datagrams through a SOCKS5 proxy using RFC 1928 UDP ASSOCIATE. This patch adds
+only the socket; patch 0080 wires it into `QuicSessionPool`, so nothing here
+changes any existing behaviour.
+
+Design notes, in full in docs/subsystems/network-proxy.md:
+
+  - It owns the TCP control connection for its whole lifetime, because RFC 1928
+    section 7 terminates the association when that connection terminates. After
+    the ASSOCIATE reply nothing is ever written on it; inventing a keep-alive
+    would give the proxy a signature no other SOCKS5 client emits. One
+    outstanding 1-byte read watches for closure, and any completion is latched
+    as a terminal error so the next Write() fails instead of succeeding into a
+    relay that has stopped listening.
+
+  - `ConnectAsync()` is given the proxy's endpoint and `GetPeerAddress()`
+    returns that same endpoint. `QuicChromiumPacketReader` reports
+    `GetPeerAddress()` as every packet's peer address and `QuicConnection`
+    compares it against the address the connection was built with, so returning
+    the relay's port would look like a server address change on every packet.
+
+  - The ASSOCIATE reply's BND.ADDR is substituted with the control connection's
+    peer address when it is unspecified, when it is loopback while the proxy is
+    not, when it names a domain, or when its family differs from the control
+    connection's. The port always comes from BND.PORT. Most proxies answer
+    0.0.0.0, which is legal and means "this host".
+
+  - The per-datagram header is derived once at construction from the
+    destination and stored, so the overhead `GetEncapsulation()` reports can
+    never go stale relative to the bytes actually written. A name destination
+    frames ATYP 0x03 and the proxy resolves it, which is what keeps HTTP/3 from
+    emitting a destination DNS query that the stream path through the same proxy
+    never makes; Chromium's SOCKS5 stream path always passes a hostname for
+    exactly that reason. A destination whose header would leave less than
+    QUIC's 1200-byte Initial floor is declined at construction.
+
+  - Reads strip the header out of band. The single `Read()` copies the payload
+    to the front of the caller's buffer; `ReadMultiple()` reads into its own
+    buffer and packs payloads into the caller's, so every returned offset
+    indexes the caller's buffer and points at inner-packet bytes.
+    `QuicChromiumPacketReader` subspans its own buffer with those offsets, so a
+    stale one would hand it header bytes. Fragmented, malformed and
+    unfittable datagrams are dropped rather than erroring, which is
+    indistinguishable from the packet loss QUIC already handles, and a batch
+    that drops entirely re-reads rather than returning the empty vector the
+    reader CHECKs against.
+
+  - `DatagramClientSocket` gains `GetEncapsulation()`, whose default preserves
+    upstream behaviour for every existing implementation. A SOCKS5 relay cannot
+    carry the inner packet's ECN in either direction, so this socket reports
+    `preserves_ecn = false`, `SetRecvTos()` succeeds without enabling
+    IP_RECVTOS, and `GetLastTos()` and every datagram's metadata report
+    ECN_NOT_ECT. Reporting the relay-to-client hop's TOS as the destination's
+    would be worse than reporting none.
+
+  - No NetLog event type is added: `NetLog()` returns the underlying UDP
+    socket's source, so a net-export capture gains no new field and in
+    particular none holding the relay address or a credential. Patch 0001
+    deferred dedicated SOCKS auth events for the same reason.
+
+Credentials reuse `SOCKS5Credentials` from patch 0001 and are held only by the
+socket. Nothing puts them in a session key, a pool key or a NetLog parameter.
+
+Tests cover the unauthenticated greeting byte-for-byte against upstream's, the
+RFC 1929 handshake, rejected authentication, method 0xFF, REP 0x07, every
+relay-address substitution rule, the declined overlong destination, write
+framing for both name and IP-literal destinations, read deframing through
+`Read` and `ReadMultiple` including packed offsets, fragment and malformed
+drops, the reported encapsulation, and control-connection closure failing both
+a pending read and a subsequent write.
+
+diff --git a/net/socket/datagram_client_socket.h b/net/socket/datagram_client_socket.h
+--- a/net/socket/datagram_client_socket.h
++++ b/net/socket/datagram_client_socket.h
+@@ -35,6 +35,19 @@
+ };
+ 
+ using DatagramsMetadata = std::vector<DatagramMetadata>;
++
++// An encapsulation a socket applies to every datagram that passes through it,
++// such as the RFC 1928 §7 header of a SOCKS5 UDP relay. A plain UDP socket
++// applies none, which is the default this struct describes.
++//
++// Callers that size packets or advertise transport capabilities must consult
++// this rather than assume a bare datagram: `overhead` reduces the usable
++// packet size, and `preserves_ecn` says whether the ECN bits of a written
++// payload can reach the far end at all.
++struct NET_EXPORT_PRIVATE DatagramEncapsulation {
++  size_t overhead = 0;
++  bool preserves_ecn = true;
++};
+ 
+ class IPEndPoint;
+ class SocketTag;
+@@ -148,7 +161,12 @@
+   // Unregister the underlying socket and its associated UDP payload that were
+   // previously registered by RegisterQuicConnectionClosePayload
+   virtual void UnregisterQuicConnectionClosePayload() {}
++
++  // Describes any per-datagram encapsulation this socket applies. The default
++  // reports none, so an implementation that writes the payload unmodified need
++  // not override it.
++  virtual DatagramEncapsulation GetEncapsulation() const;
+ };
+ 
+ }  // namespace net
+
+diff --git a/net/socket/datagram_client_socket.cc b/net/socket/datagram_client_socket.cc
+new file mode 100644
+--- /dev/null
++++ b/net/socket/datagram_client_socket.cc
+@@ -0,0 +1,16 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "net/socket/datagram_client_socket.h"
++
++namespace net {
++
++// Out of line rather than inline in the header: Chromium's style plugin
++// rejects a virtual method with a non-empty inline body, and the default has
++// to return a value.
++DatagramEncapsulation DatagramClientSocket::GetEncapsulation() const {
++  return DatagramEncapsulation();
++}
++
++}  // namespace net
+
+diff --git a/net/socket/socks5_datagram_client_socket.h b/net/socket/socks5_datagram_client_socket.h
+new file mode 100644
+--- /dev/null
++++ b/net/socket/socks5_datagram_client_socket.h
+@@ -0,0 +1,343 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#ifndef NET_SOCKET_SOCKS5_DATAGRAM_CLIENT_SOCKET_H_
++#define NET_SOCKET_SOCKS5_DATAGRAM_CLIENT_SOCKET_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include <memory>
++#include <optional>
++#include <vector>
++
++#include "base/containers/span.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/types/expected.h"
++#include "net/base/completion_once_callback.h"
++#include "net/base/host_port_pair.h"
++#include "net/base/ip_endpoint.h"
++#include "net/base/net_errors.h"
++#include "net/base/net_export.h"
++#include "net/base/network_handle.h"
++#include "net/socket/datagram_client_socket.h"
++#include "net/socket/socks5_client_socket.h"
++#include "net/traffic_annotation/network_traffic_annotation.h"
++
++namespace net {
++
++class ClientSocketFactory;
++class DrainableIOBuffer;
++class GrowableIOBuffer;
++class IOBuffer;
++class IOBufferWithSize;
++class ProxyChain;
++class StreamSocket;
++
++// The largest RFC 1928 §7 datagram header this socket will frame.
++//
++// A relayed QUIC connection must still be able to put a 1200-byte Initial
++// packet inside a datagram that fits a 1500-byte path: 1500 - 40 (IPv6) - 8
++// (UDP) leaves 1452 bytes, so the header may consume at most 252 of them. A
++// destination whose header would be longer cannot complete a QUIC handshake
++// through the relay, and a transport that cannot complete a handshake is
++// declined rather than advertised.
++inline constexpr size_t kMaxSocks5DatagramHeaderSize = 252;
++
++// The largest header this socket will accept on a datagram it receives:
++// 2 (RSV) + 1 (FRAG) + 1 (ATYP) + 1 (name length) + 255 (name) + 2 (port).
++inline constexpr size_t kMaxSocks5InboundHeaderSize = 262;
++
++// True when `chain` can carry QUIC using RFC 1928 UDP ASSOCIATE: exactly one
++// proxy, and that proxy is SOCKS5.
++//
++// This is the single predicate that decides whether a proxied QUIC attempt is
++// allowed. HTTP, HTTPS and SOCKS4 proxies cannot relay a datagram at all, and
++// a multi-proxy chain would need an association per hop with no way to frame
++// the inner ones, so all of them keep refusing QUIC with
++// ERR_NO_SUPPORTED_PROXIES. QUIC-over-QUIC remains Chromium's own path and is
++// not this function's business.
++NET_EXPORT_PRIVATE bool IsQuicOverSocks5Chain(const ProxyChain& chain);
++
++// A DatagramClientSocket that relays its datagrams through a SOCKS5 proxy
++// using RFC 1928 UDP ASSOCIATE.
++//
++// It owns two sockets. The TCP control socket carries the greeting, the
++// optional RFC 1929 authentication and the UDP ASSOCIATE request; RFC 1928 §7
++// ties the association's lifetime to that connection, so it is held open for
++// as long as this socket exists and nothing is ever written on it after the
++// ASSOCIATE reply. The datagram socket, supplied by the caller and therefore a
++// stock UDPClientSocket, carries the data and receives every socket option the
++// caller sets, so its kernel-visible configuration matches a direct QUIC
++// socket.
++//
++// Addresses:
++//  - ConnectAsync() is given the *proxy's* endpoint, because that is what the
++//    control connection needs and what the caller resolved.
++//  - GetPeerAddress() returns that same proxy endpoint, not the relay's. The
++//    QUIC packet reader reports GetPeerAddress() as every packet's peer
++//    address and QuicConnection compares it against the address the connection
++//    was built with, so reporting the relay's port would look like a server
++//    address change on every packet.
++//  - The relay endpoint learned from the ASSOCIATE reply stays inside this
++//    class.
++//
++// Credentials are launch-only transport state. They are held by this socket
++// and nowhere else; no session key, pool key or NetLog parameter sees them,
++// and this class introduces no NetLog event type of its own.
++class NET_EXPORT_PRIVATE SOCKS5DatagramClientSocket
++    : public DatagramClientSocket {
++ public:
++  // `datagram_socket` is the unconnected socket that will carry the relayed
++  // datagrams. `client_socket_factory` creates the TCP control socket.
++  // `destination` is the QUIC destination and is used only to frame the
++  // per-datagram header: when it is a host name the header carries ATYP 0x03
++  // and the proxy resolves it, which is what keeps HTTP/3 from emitting a
++  // destination DNS query that the stream path through the same proxy never
++  // makes.
++  SOCKS5DatagramClientSocket(
++      std::unique_ptr<DatagramClientSocket> datagram_socket,
++      ClientSocketFactory* client_socket_factory,
++      const HostPortPair& destination,
++      std::optional<SOCKS5Credentials> credentials,
++      const NetworkTrafficAnnotationTag& traffic_annotation);
++
++  SOCKS5DatagramClientSocket(const SOCKS5DatagramClientSocket&) = delete;
++  SOCKS5DatagramClientSocket& operator=(const SOCKS5DatagramClientSocket&) =
++      delete;
++
++  ~SOCKS5DatagramClientSocket() override;
++
++  // Socket implementation.
++  int Read(IOBuffer* buf,
++           int buf_len,
++           CompletionOnceCallback callback) override;
++  int Write(IOBuffer* buf,
++            int buf_len,
++            CompletionOnceCallback callback,
++            const NetworkTrafficAnnotationTag& traffic_annotation) override;
++  int SetReceiveBufferSize(int32_t size) override;
++  int SetSendBufferSize(int32_t size) override;
++
++  // DatagramSocket implementation.
++  void Close() override;
++  int GetPeerAddress(IPEndPoint* address) const override;
++  int GetLocalAddress(IPEndPoint* address) const override;
++  void UseNonBlockingIO() override;
++  int SetDoNotFragment() override;
++  int SetRecvTos() override;
++  int SetTos(DiffServCodePoint dscp, EcnCodePoint ecn) override;
++  void SetMsgConfirm(bool confirm) override;
++  const NetLogWithSource& NetLog() const override;
++  DscpAndEcn GetLastTos() const override;
++
++  // DatagramClientSocket implementation.
++  int Connect(const IPEndPoint& address) override;
++  int ConnectUsingNetwork(handles::NetworkHandle network,
++                          const IPEndPoint& address) override;
++  int ConnectUsingDefaultNetwork(const IPEndPoint& address) override;
++  int ConnectAsync(const IPEndPoint& address,
++                   CompletionOnceCallback callback) override;
++  int ConnectUsingNetworkAsync(handles::NetworkHandle network,
++                               const IPEndPoint& address,
++                               CompletionOnceCallback callback) override;
++  int ConnectUsingDefaultNetworkAsync(
++      const IPEndPoint& address,
++      CompletionOnceCallback callback) override;
++  handles::NetworkHandle GetBoundNetwork() const override;
++  base::expected<DatagramsMetadata, Error> ReadMultiple(
++      IOBuffer* buf,
++      size_t buf_len,
++      size_t max_message_size,
++      base::OnceCallback<void(base::expected<DatagramsMetadata, Error>)>
++          callback) override;
++  void ApplySocketTag(const SocketTag& tag) override;
++  void EnableRecvOptimization() override;
++  int SetMulticastInterface(uint32_t interface_index) override;
++  void SetIOSNetworkServiceType(int ios_network_service_type) override;
++  DatagramEncapsulation GetEncapsulation() const override;
++
++  // RegisterQuicConnectionClosePayload() and its Unregister counterpart are
++  // deliberately not overridden. They hand a raw UDP payload to the Android
++  // system server to be sent after the socket dies; that payload would reach
++  // the relay with no SOCKS5 header and be discarded, so the base class's
++  // no-op is the honest behaviour.
++
++  // True when the relay address from the ASSOCIATE reply was replaced by the
++  // proxy's own address. Test-only: nothing logs it.
++  bool relay_address_was_substituted_for_testing() const {
++    return relay_address_substituted_;
++  }
++  const IPEndPoint& relay_endpoint_for_testing() const {
++    return relay_endpoint_;
++  }
++
++ private:
++  enum State {
++    STATE_NONE,
++    STATE_CONTROL_CONNECT,
++    STATE_CONTROL_CONNECT_COMPLETE,
++    STATE_GREET_WRITE,
++    STATE_GREET_WRITE_COMPLETE,
++    STATE_GREET_READ,
++    STATE_GREET_READ_COMPLETE,
++    STATE_AUTH_WRITE,
++    STATE_AUTH_WRITE_COMPLETE,
++    STATE_AUTH_READ,
++    STATE_AUTH_READ_COMPLETE,
++    STATE_ASSOCIATE_WRITE,
++    STATE_ASSOCIATE_WRITE_COMPLETE,
++    STATE_ASSOCIATE_READ,
++    STATE_ASSOCIATE_READ_COMPLETE,
++    STATE_DATAGRAM_CONNECT,
++    STATE_DATAGRAM_CONNECT_COMPLETE,
++  };
++
++  // Which Connect* variant the caller used, so the datagram socket is
++  // connected the same way once the relay endpoint is known.
++  enum class ConnectMode {
++    kAny,
++    kNetwork,
++    kDefaultNetwork,
++  };
++
++  int ConnectInternal(ConnectMode mode,
++                      handles::NetworkHandle network,
++                      const IPEndPoint& proxy_endpoint,
++                      CompletionOnceCallback callback);
++
++  void OnIOComplete(int result);
++  int DoLoop(int last_io_result);
++  int DoControlConnect();
++  int DoControlConnectComplete(int result);
++  int DoGreetWrite();
++  int DoGreetWriteComplete(int result);
++  int DoGreetRead();
++  int DoGreetReadComplete(int result);
++  int DoAuthWrite();
++  int DoAuthWriteComplete(int result);
++  int DoAuthRead();
++  int DoAuthReadComplete(int result);
++  int DoAssociateWrite();
++  int DoAssociateWriteComplete(int result);
++  int DoAssociateRead();
++  int DoAssociateReadComplete(int result);
++  int DoDatagramConnect();
++  int DoDatagramConnectComplete(int result);
++
++  // Sends `bytes` on the control connection, looping until it is drained.
++  // `write_complete_state` handles a partial write; `done_state` runs once the
++  // whole buffer is out.
++  int StartControlWrite(std::vector<uint8_t> bytes,
++                        State write_complete_state,
++                        State done_state);
++  int ContinueControlWrite(State write_complete_state, State done_state);
++
++  // Reads up to `capacity` bytes of a reply, resuming into the same buffer on
++  // a partial read. Returns a net error or ERR_IO_PENDING.
++  int StartControlRead(size_t capacity, State complete_state);
++  int ContinueControlRead(State complete_state);
++
++  // Additional bytes the ASSOCIATE reply needs beyond its five-byte prefix, or
++  // std::nullopt when the prefix is malformed.
++  std::optional<size_t> AssociateReplyRemainder() const;
++
++  // Fills `relay_endpoint_` from a complete ASSOCIATE reply, applying the
++  // substitution rules. Returns a net error.
++  int ResolveRelayEndpoint();
++
++  // Starts the single outstanding read that watches the control connection for
++  // closure. It never completes under normal operation.
++  void StartControlWatch();
++  void OnControlWatchComplete(int result);
++
++  // Records a terminal error and fails any pending datagram read with it. A
++  // write into a dead association must fail rather than appear to succeed:
++  // QUIC would otherwise retransmit into a relay that is no longer listening
++  // and only notice at its idle timeout.
++  void LatchError(int error);
++
++  // Single-datagram read path.
++  int ReadLoop();
++  void OnDatagramReadComplete(int result);
++  // Returns true when `*out_result` is final, false when the datagram was
++  // dropped and another read must be issued.
++  bool DeframeSingle(int result, int* out_result);
++  void ClearReadState();
++
++  // Batched read path.
++  base::expected<DatagramsMetadata, Error> ReadMultipleLoop();
++  void OnDatagramReadMultipleComplete(
++      base::expected<DatagramsMetadata, Error> result);
++  // std::nullopt when every datagram in the batch was dropped.
++  std::optional<base::expected<DatagramsMetadata, Error>> DeframeMultiple(
++      base::expected<DatagramsMetadata, Error> result);
++  void ClearReadMultipleState();
++
++  void OnDatagramWriteComplete(int result);
++  int TranslateWriteResult(int result) const;
++
++  // The socket that carries data. Supplied by the caller, never replaced.
++  std::unique_ptr<DatagramClientSocket> datagram_socket_;
++  // Creates the TCP control socket. Not owned.
++  const raw_ptr<ClientSocketFactory> client_socket_factory_;
++  // Holds the association open. Destroying it ends the association.
++  std::unique_ptr<StreamSocket> control_socket_;
++
++  const std::optional<SOCKS5Credentials> credentials_;
++  const NetworkTrafficAnnotationTag traffic_annotation_;
++
++  // The complete constant prefix of every datagram this socket writes: RSV,
++  // FRAG, ATYP, DST.ADDR, DST.PORT. Derived once from `destination_`, so the
++  // overhead GetEncapsulation() reports can never go stale relative to the
++  // bytes actually written. Empty when `destination_` cannot be framed.
++  const std::vector<uint8_t> datagram_header_;
++  // ERR_SOCKS_CONNECTION_FAILED when `datagram_header_` is empty, else OK.
++  const int header_error_;
++
++  State next_state_ = STATE_NONE;
++  ConnectMode connect_mode_ = ConnectMode::kAny;
++  handles::NetworkHandle network_ = handles::kInvalidNetworkHandle;
++  bool connect_started_ = false;
++  bool associated_ = false;
++  bool relay_address_substituted_ = false;
++  int latched_error_ = OK;
++
++  IPEndPoint proxy_endpoint_;
++  IPEndPoint relay_endpoint_;
++
++  CompletionOnceCallback connect_callback_;
++
++  scoped_refptr<DrainableIOBuffer> control_write_buf_;
++  scoped_refptr<GrowableIOBuffer> control_read_buf_;
++  scoped_refptr<IOBufferWithSize> control_watch_buf_;
++
++  // Single-read state.
++  scoped_refptr<IOBuffer> read_user_buffer_;
++  size_t read_user_buffer_len_ = 0;
++  CompletionOnceCallback read_user_callback_;
++  scoped_refptr<IOBufferWithSize> read_frame_buffer_;
++
++  // Batched-read state.
++  scoped_refptr<IOBuffer> read_multiple_user_buffer_;
++  size_t read_multiple_user_buffer_len_ = 0;
++  size_t read_multiple_message_size_ = 0;
++  size_t read_multiple_frame_len_ = 0;
++  base::OnceCallback<void(base::expected<DatagramsMetadata, Error>)>
++      read_multiple_user_callback_;
++  scoped_refptr<IOBufferWithSize> read_multiple_frame_buffer_;
++
++  // Write state.
++  scoped_refptr<IOBufferWithSize> write_frame_buffer_;
++  size_t write_payload_len_ = 0;
++  CompletionOnceCallback write_user_callback_;
++
++  base::WeakPtrFactory<SOCKS5DatagramClientSocket> weak_factory_{this};
++};
++
++}  // namespace net
++
++#endif  // NET_SOCKET_SOCKS5_DATAGRAM_CLIENT_SOCKET_H_
+
+diff --git a/net/socket/socks5_datagram_client_socket.cc b/net/socket/socks5_datagram_client_socket.cc
+new file mode 100644
+--- /dev/null
++++ b/net/socket/socks5_datagram_client_socket.cc
+@@ -0,0 +1,1135 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#include "net/socket/socks5_datagram_client_socket.h"
++
++#include <algorithm>
++#include <string>
++#include <utility>
++
++#include "base/check.h"
++#include "base/check_op.h"
++#include "base/functional/bind.h"
++#include "base/notreached.h"
++#include "base/numerics/safe_conversions.h"
++#include "net/base/address_list.h"
++#include "net/base/io_buffer.h"
++#include "net/base/ip_address.h"
++#include "net/base/proxy_chain.h"
++#include "net/base/proxy_server.h"
++#include "net/log/net_log_with_source.h"
++#include "net/socket/client_socket_factory.h"
++#include "net/socket/socket_tag.h"
++#include "net/socket/stream_socket.h"
++
++namespace net {
++
++namespace {
++
++constexpr uint8_t kSOCKS5Version = 0x05;
++constexpr uint8_t kUdpAssociateCommand = 0x03;
++constexpr uint8_t kAuthMethodNone = 0x00;
++constexpr uint8_t kAuthMethodUserPass = 0x02;
++constexpr uint8_t kAuthSubnegotiationVersion = 0x01;
++constexpr uint8_t kAuthStatusSuccess = 0x00;
++constexpr uint8_t kReplySuccess = 0x00;
++constexpr uint8_t kAddressTypeIPv4 = 0x01;
++constexpr uint8_t kAddressTypeDomain = 0x03;
++constexpr uint8_t kAddressTypeIPv6 = 0x04;
++
++// VER + METHOD for the greeting reply, VER + STATUS for the RFC 1929 reply.
++constexpr size_t kTwoByteReplySize = 2;
++// VER, REP, RSV, ATYP and the first address byte: enough to size the rest.
++constexpr size_t kReplyPrefixSize = 5;
++
++// RSV(2) + FRAG(1) + ATYP(1) before the address, DST.PORT(2) after it.
++constexpr size_t kHeaderPrefixSize = 4;
++constexpr size_t kPortSize = 2;
++
++void AppendPort(uint16_t port, std::vector<uint8_t>* out) {
++  out->push_back(static_cast<uint8_t>(port >> 8));
++  out->push_back(static_cast<uint8_t>(port & 0xff));
++}
++
++uint16_t ReadPort(base::span<const uint8_t> bytes) {
++  return static_cast<uint16_t>((static_cast<uint16_t>(bytes[0]) << 8) |
++                               bytes[1]);
++}
++
++// The constant per-datagram prefix for `destination`, or an empty vector when
++// the destination cannot be framed within kMaxSocks5DatagramHeaderSize.
++std::vector<uint8_t> BuildDatagramHeader(const HostPortPair& destination) {
++  std::vector<uint8_t> header;
++  IPAddress literal;
++  if (literal.AssignFromIPLiteral(destination.host())) {
++    header.reserve(kHeaderPrefixSize + literal.size() + kPortSize);
++    header.insert(header.end(),
++                  {0x00, 0x00, 0x00,
++                   literal.IsIPv4() ? kAddressTypeIPv4 : kAddressTypeIPv6});
++    header.insert(header.end(), literal.bytes().begin(), literal.bytes().end());
++  } else {
++    const std::string& host = destination.host();
++    // RFC 1928 encodes the name length in a single octet.
++    if (host.empty() || host.size() > 255u) {
++      return {};
++    }
++    header.reserve(kHeaderPrefixSize + 1u + host.size() + kPortSize);
++    header.insert(header.end(), {0x00, 0x00, 0x00, kAddressTypeDomain,
++                                 static_cast<uint8_t>(host.size())});
++    header.insert(header.end(), host.begin(), host.end());
++  }
++  AppendPort(destination.port(), &header);
++  if (header.size() > kMaxSocks5DatagramHeaderSize) {
++    return {};
++  }
++  return header;
++}
++
++// Credentials that RFC 1929 cannot encode are dropped rather than truncated,
++// which makes the socket behave as if none were configured.
++std::optional<SOCKS5Credentials> SanitizeCredentials(
++    std::optional<SOCKS5Credentials> credentials) {
++  if (credentials && !credentials->IsValid()) {
++    return std::nullopt;
++  }
++  return credentials;
++}
++
++// The length of the RFC 1928 §7 header on a received datagram, or std::nullopt
++// when the datagram must be dropped. Dropping rather than erroring is right:
++// it is indistinguishable from packet loss, which QUIC already handles.
++std::optional<size_t> InboundHeaderLength(base::span<const uint8_t> datagram) {
++  if (datagram.size() < kReplyPrefixSize) {
++    return std::nullopt;
++  }
++  // RSV must be zero, and fragmentation is not implemented, so a fragment is
++  // dropped rather than reassembled.
++  if (datagram[0] != 0x00 || datagram[1] != 0x00 || datagram[2] != 0x00) {
++    return std::nullopt;
++  }
++  size_t header_length = 0;
++  switch (datagram[3]) {
++    case kAddressTypeIPv4:
++      header_length = kHeaderPrefixSize + 4u + kPortSize;
++      break;
++    case kAddressTypeIPv6:
++      header_length = kHeaderPrefixSize + 16u + kPortSize;
++      break;
++    case kAddressTypeDomain:
++      header_length = kHeaderPrefixSize + 1u + size_t{datagram[4]} + kPortSize;
++      break;
++    default:
++      return std::nullopt;
++  }
++  if (header_length > datagram.size()) {
++    return std::nullopt;
++  }
++  return header_length;
++}
++
++}  // namespace
++
++bool IsQuicOverSocks5Chain(const ProxyChain& chain) {
++  return chain.is_single_proxy() &&
++         chain.First().scheme() == ProxyServer::SCHEME_SOCKS5;
++}
++
++SOCKS5DatagramClientSocket::SOCKS5DatagramClientSocket(
++    std::unique_ptr<DatagramClientSocket> datagram_socket,
++    ClientSocketFactory* client_socket_factory,
++    const HostPortPair& destination,
++    std::optional<SOCKS5Credentials> credentials,
++    const NetworkTrafficAnnotationTag& traffic_annotation)
++    : datagram_socket_(std::move(datagram_socket)),
++      client_socket_factory_(client_socket_factory),
++      credentials_(SanitizeCredentials(std::move(credentials))),
++      traffic_annotation_(traffic_annotation),
++      datagram_header_(BuildDatagramHeader(destination)),
++      header_error_(datagram_header_.empty() ? ERR_SOCKS_CONNECTION_FAILED
++                                             : OK) {
++  CHECK(datagram_socket_);
++  CHECK(client_socket_factory_);
++}
++
++SOCKS5DatagramClientSocket::~SOCKS5DatagramClientSocket() {
++  Close();
++}
++
++// ---------------------------------------------------------------------------
++// Connect
++// ---------------------------------------------------------------------------
++
++int SOCKS5DatagramClientSocket::Connect(const IPEndPoint& address) {
++  // An association needs at least three round trips, which a synchronous API
++  // cannot run. Unreachable in practice: QuicSessionAttempt is forced onto the
++  // asynchronous session-creation path for a SOCKS5 chain.
++  return ERR_NOT_IMPLEMENTED;
++}
++
++int SOCKS5DatagramClientSocket::ConnectUsingNetwork(
++    handles::NetworkHandle network,
++    const IPEndPoint& address) {
++  return ERR_NOT_IMPLEMENTED;
++}
++
++int SOCKS5DatagramClientSocket::ConnectUsingDefaultNetwork(
++    const IPEndPoint& address) {
++  return ERR_NOT_IMPLEMENTED;
++}
++
++int SOCKS5DatagramClientSocket::ConnectAsync(const IPEndPoint& address,
++                                             CompletionOnceCallback callback) {
++  return ConnectInternal(ConnectMode::kAny, handles::kInvalidNetworkHandle,
++                         address, std::move(callback));
++}
++
++int SOCKS5DatagramClientSocket::ConnectUsingNetworkAsync(
++    handles::NetworkHandle network,
++    const IPEndPoint& address,
++    CompletionOnceCallback callback) {
++  return ConnectInternal(ConnectMode::kNetwork, network, address,
++                         std::move(callback));
++}
++
++int SOCKS5DatagramClientSocket::ConnectUsingDefaultNetworkAsync(
++    const IPEndPoint& address,
++    CompletionOnceCallback callback) {
++  return ConnectInternal(ConnectMode::kDefaultNetwork,
++                         handles::kInvalidNetworkHandle, address,
++                         std::move(callback));
++}
++
++int SOCKS5DatagramClientSocket::ConnectInternal(
++    ConnectMode mode,
++    handles::NetworkHandle network,
++    const IPEndPoint& proxy_endpoint,
++    CompletionOnceCallback callback) {
++  CHECK(!connect_started_);
++  CHECK(!callback.is_null());
++  connect_started_ = true;
++  if (header_error_ != OK) {
++    // The destination cannot be framed inside a relayed datagram that still
++    // leaves room for a 1200-byte Initial packet. Declining is required: a
++    // handshake started here could not complete.
++    return header_error_;
++  }
++  connect_mode_ = mode;
++  network_ = network;
++  proxy_endpoint_ = proxy_endpoint;
++  connect_callback_ = std::move(callback);
++  next_state_ = STATE_CONTROL_CONNECT;
++  int rv = DoLoop(OK);
++  if (rv == ERR_IO_PENDING) {
++    return ERR_IO_PENDING;
++  }
++  connect_callback_.Reset();
++  return rv;
++}
++
++void SOCKS5DatagramClientSocket::OnIOComplete(int result) {
++  CHECK_NE(STATE_NONE, next_state_);
++  int rv = DoLoop(result);
++  if (rv == ERR_IO_PENDING) {
++    return;
++  }
++  if (!connect_callback_.is_null()) {
++    std::move(connect_callback_).Run(rv);
++  }
++}
++
++int SOCKS5DatagramClientSocket::DoLoop(int last_io_result) {
++  CHECK_NE(next_state_, STATE_NONE);
++  int rv = last_io_result;
++  do {
++    State state = next_state_;
++    next_state_ = STATE_NONE;
++    switch (state) {
++      case STATE_CONTROL_CONNECT:
++        CHECK_EQ(OK, rv);
++        rv = DoControlConnect();
++        break;
++      case STATE_CONTROL_CONNECT_COMPLETE:
++        rv = DoControlConnectComplete(rv);
++        break;
++      case STATE_GREET_WRITE:
++        CHECK_EQ(OK, rv);
++        rv = DoGreetWrite();
++        break;
++      case STATE_GREET_WRITE_COMPLETE:
++        rv = DoGreetWriteComplete(rv);
++        break;
++      case STATE_GREET_READ:
++        CHECK_EQ(OK, rv);
++        rv = DoGreetRead();
++        break;
++      case STATE_GREET_READ_COMPLETE:
++        rv = DoGreetReadComplete(rv);
++        break;
++      case STATE_AUTH_WRITE:
++        CHECK_EQ(OK, rv);
++        rv = DoAuthWrite();
++        break;
++      case STATE_AUTH_WRITE_COMPLETE:
++        rv = DoAuthWriteComplete(rv);
++        break;
++      case STATE_AUTH_READ:
++        CHECK_EQ(OK, rv);
++        rv = DoAuthRead();
++        break;
++      case STATE_AUTH_READ_COMPLETE:
++        rv = DoAuthReadComplete(rv);
++        break;
++      case STATE_ASSOCIATE_WRITE:
++        CHECK_EQ(OK, rv);
++        rv = DoAssociateWrite();
++        break;
++      case STATE_ASSOCIATE_WRITE_COMPLETE:
++        rv = DoAssociateWriteComplete(rv);
++        break;
++      case STATE_ASSOCIATE_READ:
++        CHECK_EQ(OK, rv);
++        rv = DoAssociateRead();
++        break;
++      case STATE_ASSOCIATE_READ_COMPLETE:
++        rv = DoAssociateReadComplete(rv);
++        break;
++      case STATE_DATAGRAM_CONNECT:
++        CHECK_EQ(OK, rv);
++        rv = DoDatagramConnect();
++        break;
++      case STATE_DATAGRAM_CONNECT_COMPLETE:
++        rv = DoDatagramConnectComplete(rv);
++        break;
++      case STATE_NONE:
++        NOTREACHED();
++    }
++  } while (rv != ERR_IO_PENDING && next_state_ != STATE_NONE);
++  return rv;
++}
++
++int SOCKS5DatagramClientSocket::DoControlConnect() {
++  next_state_ = STATE_CONTROL_CONNECT_COMPLETE;
++  const NetLogWithSource& net_log = datagram_socket_->NetLog();
++  control_socket_ = client_socket_factory_->CreateTransportClientSocket(
++      AddressList(proxy_endpoint_), network_,
++      /*socket_performance_watcher=*/nullptr,
++      /*network_quality_estimator=*/nullptr, net_log.net_log(),
++      net_log.source());
++  return control_socket_->Connect(base::BindOnce(
++      &SOCKS5DatagramClientSocket::OnIOComplete, weak_factory_.GetWeakPtr()));
++}
++
++int SOCKS5DatagramClientSocket::DoControlConnectComplete(int result) {
++  if (result != OK) {
++    return result;
++  }
++  next_state_ = STATE_GREET_WRITE;
++  return OK;
++}
++
++int SOCKS5DatagramClientSocket::DoGreetWrite() {
++  // Without credentials the greeting is byte-identical to Chromium's, so a
++  // proxy cannot tell the two clients apart.
++  std::vector<uint8_t> greeting;
++  if (credentials_) {
++    greeting = {kSOCKS5Version, 0x02, kAuthMethodNone, kAuthMethodUserPass};
++  } else {
++    greeting = {kSOCKS5Version, 0x01, kAuthMethodNone};
++  }
++  return StartControlWrite(std::move(greeting), STATE_GREET_WRITE_COMPLETE,
++                           STATE_GREET_READ);
++}
++
++int SOCKS5DatagramClientSocket::DoGreetWriteComplete(int result) {
++  if (result < 0) {
++    return result;
++  }
++  control_write_buf_->DidConsume(result);
++  return ContinueControlWrite(STATE_GREET_WRITE_COMPLETE, STATE_GREET_READ);
++}
++
++int SOCKS5DatagramClientSocket::DoGreetRead() {
++  return StartControlRead(kTwoByteReplySize, STATE_GREET_READ_COMPLETE);
++}
++
++int SOCKS5DatagramClientSocket::DoGreetReadComplete(int result) {
++  if (result < 0) {
++    return result;
++  }
++  if (result == 0) {
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++  control_read_buf_->DidConsume(result);
++  if (control_read_buf_->RemainingCapacity() > 0) {
++    return ContinueControlRead(STATE_GREET_READ_COMPLETE);
++  }
++  base::span<const uint8_t> reply = control_read_buf_->span_before_offset();
++  if (reply[0] != kSOCKS5Version) {
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++  if (reply[1] == kAuthMethodNone) {
++    next_state_ = STATE_ASSOCIATE_WRITE;
++    return OK;
++  }
++  if (reply[1] == kAuthMethodUserPass && credentials_) {
++    next_state_ = STATE_AUTH_WRITE;
++    return OK;
++  }
++  // Includes 0xFF ("no acceptable methods"), which is what a proxy requiring
++  // credentials answers when none were configured.
++  return ERR_SOCKS_CONNECTION_FAILED;
++}
++
++int SOCKS5DatagramClientSocket::DoAuthWrite() {
++  CHECK(credentials_);
++  std::vector<uint8_t> request;
++  request.reserve(3u + credentials_->username.size() +
++                  credentials_->password.size());
++  request.push_back(kAuthSubnegotiationVersion);
++  request.push_back(static_cast<uint8_t>(credentials_->username.size()));
++  request.insert(request.end(), credentials_->username.begin(),
++                 credentials_->username.end());
++  request.push_back(static_cast<uint8_t>(credentials_->password.size()));
++  request.insert(request.end(), credentials_->password.begin(),
++                 credentials_->password.end());
++  return StartControlWrite(std::move(request), STATE_AUTH_WRITE_COMPLETE,
++                           STATE_AUTH_READ);
++}
++
++int SOCKS5DatagramClientSocket::DoAuthWriteComplete(int result) {
++  if (result < 0) {
++    return result;
++  }
++  control_write_buf_->DidConsume(result);
++  return ContinueControlWrite(STATE_AUTH_WRITE_COMPLETE, STATE_AUTH_READ);
++}
++
++int SOCKS5DatagramClientSocket::DoAuthRead() {
++  return StartControlRead(kTwoByteReplySize, STATE_AUTH_READ_COMPLETE);
++}
++
++int SOCKS5DatagramClientSocket::DoAuthReadComplete(int result) {
++  if (result < 0) {
++    return result;
++  }
++  if (result == 0) {
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++  control_read_buf_->DidConsume(result);
++  if (control_read_buf_->RemainingCapacity() > 0) {
++    return ContinueControlRead(STATE_AUTH_READ_COMPLETE);
++  }
++  base::span<const uint8_t> reply = control_read_buf_->span_before_offset();
++  // The sub-negotiation carries its own version, which is not the SOCKS
++  // version.
++  if (reply[0] != kAuthSubnegotiationVersion ||
++      reply[1] != kAuthStatusSuccess) {
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++  next_state_ = STATE_ASSOCIATE_WRITE;
++  return OK;
++}
++
++int SOCKS5DatagramClientSocket::DoAssociateWrite() {
++  // DST.ADDR and DST.PORT of an ASSOCIATE request name the address the client
++  // will send datagrams from. The datagram socket is not bound yet, so it is
++  // not known, and RFC 1928 §4 requires zeros in exactly that case.
++  std::vector<uint8_t> request = {kSOCKS5Version, kUdpAssociateCommand,
++                                  0x00,           kAddressTypeIPv4,
++                                  0x00,           0x00,
++                                  0x00,           0x00,
++                                  0x00,           0x00};
++  return StartControlWrite(std::move(request), STATE_ASSOCIATE_WRITE_COMPLETE,
++                           STATE_ASSOCIATE_READ);
++}
++
++int SOCKS5DatagramClientSocket::DoAssociateWriteComplete(int result) {
++  if (result < 0) {
++    return result;
++  }
++  control_write_buf_->DidConsume(result);
++  return ContinueControlWrite(STATE_ASSOCIATE_WRITE_COMPLETE,
++                              STATE_ASSOCIATE_READ);
++}
++
++int SOCKS5DatagramClientSocket::DoAssociateRead() {
++  return StartControlRead(kReplyPrefixSize, STATE_ASSOCIATE_READ_COMPLETE);
++}
++
++int SOCKS5DatagramClientSocket::DoAssociateReadComplete(int result) {
++  if (result < 0) {
++    return result;
++  }
++  if (result == 0) {
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++  control_read_buf_->DidConsume(result);
++  if (control_read_buf_->RemainingCapacity() > 0) {
++    return ContinueControlRead(STATE_ASSOCIATE_READ_COMPLETE);
++  }
++  if (static_cast<size_t>(control_read_buf_->offset()) == kReplyPrefixSize) {
++    // The prefix is in: size the remainder from ATYP and keep reading.
++    std::optional<size_t> remainder = AssociateReplyRemainder();
++    if (!remainder.has_value()) {
++      return ERR_SOCKS_CONNECTION_FAILED;
++    }
++    if (*remainder > 0) {
++      control_read_buf_->SetCapacity(
++          base::checked_cast<int>(kReplyPrefixSize + *remainder));
++      return ContinueControlRead(STATE_ASSOCIATE_READ_COMPLETE);
++    }
++  }
++  int rv = ResolveRelayEndpoint();
++  if (rv != OK) {
++    return rv;
++  }
++  next_state_ = STATE_DATAGRAM_CONNECT;
++  return OK;
++}
++
++std::optional<size_t> SOCKS5DatagramClientSocket::AssociateReplyRemainder()
++    const {
++  base::span<const uint8_t> reply = control_read_buf_->span_before_offset();
++  if (reply[0] != kSOCKS5Version || reply[2] != 0x00) {
++    return std::nullopt;
++  }
++  // The prefix already holds one address byte, so that byte is not counted
++  // again. For a domain name it is the length octet.
++  switch (reply[3]) {
++    case kAddressTypeIPv4:
++      return 4u - 1u + kPortSize;
++    case kAddressTypeIPv6:
++      return 16u - 1u + kPortSize;
++    case kAddressTypeDomain:
++      return size_t{reply[4]} + kPortSize;
++    default:
++      return std::nullopt;
++  }
++}
++
++int SOCKS5DatagramClientSocket::ResolveRelayEndpoint() {
++  base::span<const uint8_t> reply = control_read_buf_->span_before_offset();
++  if (reply[1] != kReplySuccess) {
++    // Includes 0x07 (command not supported), which is what a proxy without UDP
++    // ASSOCIATE answers. Failing fast is what lets the TCP job resume.
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++
++  IPAddress reported;
++  uint16_t port = 0;
++  bool usable = false;
++  switch (reply[3]) {
++    case kAddressTypeIPv4:
++      reported = IPAddress(reply.subspan(kHeaderPrefixSize, 4u));
++      port = ReadPort(reply.subspan(kHeaderPrefixSize + 4u, kPortSize));
++      usable = true;
++      break;
++    case kAddressTypeIPv6:
++      reported = IPAddress(reply.subspan(kHeaderPrefixSize, 16u));
++      port = ReadPort(reply.subspan(kHeaderPrefixSize + 16u, kPortSize));
++      usable = true;
++      break;
++    case kAddressTypeDomain: {
++      // A datagram socket has no resolver, and resolving the relay's name here
++      // would be a DNS query the stream path never makes.
++      const size_t name_length = size_t{reply[4]};
++      port = ReadPort(
++          reply.subspan(kHeaderPrefixSize + 1u + name_length, kPortSize));
++      usable = false;
++      break;
++    }
++    default:
++      return ERR_SOCKS_CONNECTION_FAILED;
++  }
++  if (port == 0) {
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++
++  // Substitution rules. Only the address is ever replaced; the port always
++  // comes from BND.PORT.
++  const IPAddress& proxy_address = proxy_endpoint_.address();
++  if (usable) {
++    if (reported.IsZero()) {
++      usable = false;  // "This host", and the most common real reply.
++    } else if (reported.IsLoopback() && !proxy_address.IsLoopback()) {
++      usable = false;  // The proxy reported its inside-the-box address.
++    } else if (reported.size() != proxy_address.size()) {
++      usable = false;  // Unreachable from the socket the caller created.
++    }
++  }
++  if (usable) {
++    relay_endpoint_ = IPEndPoint(reported, port);
++    relay_address_substituted_ = false;
++  } else {
++    relay_endpoint_ = IPEndPoint(proxy_address, port);
++    relay_address_substituted_ = true;
++  }
++  return OK;
++}
++
++int SOCKS5DatagramClientSocket::DoDatagramConnect() {
++  next_state_ = STATE_DATAGRAM_CONNECT_COMPLETE;
++  CompletionOnceCallback callback = base::BindOnce(
++      &SOCKS5DatagramClientSocket::OnIOComplete, weak_factory_.GetWeakPtr());
++  switch (connect_mode_) {
++    case ConnectMode::kAny:
++      return datagram_socket_->ConnectAsync(relay_endpoint_,
++                                            std::move(callback));
++    case ConnectMode::kNetwork:
++      return datagram_socket_->ConnectUsingNetworkAsync(
++          network_, relay_endpoint_, std::move(callback));
++    case ConnectMode::kDefaultNetwork:
++      return datagram_socket_->ConnectUsingDefaultNetworkAsync(
++          relay_endpoint_, std::move(callback));
++  }
++  NOTREACHED();
++}
++
++int SOCKS5DatagramClientSocket::DoDatagramConnectComplete(int result) {
++  if (result != OK) {
++    return result;
++  }
++  associated_ = true;
++  control_read_buf_.reset();
++  // The datagram socket is connected rather than bound, so the kernel now
++  // drops datagrams from any source but the relay. That restores exactly the
++  // source filtering a direct QUIC socket has.
++  StartControlWatch();
++  return latched_error_ == OK ? OK : latched_error_;
++}
++
++// ---------------------------------------------------------------------------
++// Control-connection I/O helpers
++// ---------------------------------------------------------------------------
++
++int SOCKS5DatagramClientSocket::StartControlWrite(std::vector<uint8_t> bytes,
++                                                  State write_complete_state,
++                                                  State done_state) {
++  const size_t size = bytes.size();
++  control_write_buf_ = base::MakeRefCounted<DrainableIOBuffer>(
++      base::MakeRefCounted<VectorIOBuffer>(std::move(bytes)), size);
++  return ContinueControlWrite(write_complete_state, done_state);
++}
++
++int SOCKS5DatagramClientSocket::ContinueControlWrite(
++    State write_complete_state,
++    State done_state) {
++  while (control_write_buf_->BytesRemaining() > 0) {
++    next_state_ = write_complete_state;
++    int rv = control_socket_->Write(
++        control_write_buf_.get(), control_write_buf_->BytesRemaining(),
++        base::BindOnce(&SOCKS5DatagramClientSocket::OnIOComplete,
++                       weak_factory_.GetWeakPtr()),
++        traffic_annotation_);
++    if (rv == ERR_IO_PENDING) {
++      return ERR_IO_PENDING;
++    }
++    if (rv <= 0) {
++      return rv == 0 ? ERR_SOCKS_CONNECTION_FAILED : rv;
++    }
++    control_write_buf_->DidConsume(rv);
++  }
++  control_write_buf_.reset();
++  next_state_ = done_state;
++  return OK;
++}
++
++int SOCKS5DatagramClientSocket::StartControlRead(size_t capacity,
++                                                 State complete_state) {
++  if (!control_read_buf_) {
++    control_read_buf_ = base::MakeRefCounted<GrowableIOBuffer>();
++  }
++  control_read_buf_->set_offset(0);
++  control_read_buf_->SetCapacity(base::checked_cast<int>(capacity));
++  return ContinueControlRead(complete_state);
++}
++
++int SOCKS5DatagramClientSocket::ContinueControlRead(State complete_state) {
++  next_state_ = complete_state;
++  return control_socket_->Read(
++      control_read_buf_.get(), control_read_buf_->RemainingCapacity(),
++      base::BindOnce(&SOCKS5DatagramClientSocket::OnIOComplete,
++                     weak_factory_.GetWeakPtr()));
++}
++
++// ---------------------------------------------------------------------------
++// Control-connection watch
++// ---------------------------------------------------------------------------
++
++void SOCKS5DatagramClientSocket::StartControlWatch() {
++  control_watch_buf_ = base::MakeRefCounted<IOBufferWithSize>(size_t{1});
++  int rv = control_socket_->Read(
++      control_watch_buf_.get(), 1,
++      base::BindOnce(&SOCKS5DatagramClientSocket::OnControlWatchComplete,
++                     weak_factory_.GetWeakPtr()));
++  if (rv != ERR_IO_PENDING) {
++    OnControlWatchComplete(rv);
++  }
++}
++
++void SOCKS5DatagramClientSocket::OnControlWatchComplete(int result) {
++  // RFC 1928 §7: the association ends with the control connection, so anything
++  // other than "still pending" is terminal. Latching it here is what makes the
++  // next Write() fail instead of succeeding into a relay that has stopped
++  // listening.
++  if (result > 0) {
++    // A conforming proxy sends nothing after the ASSOCIATE reply.
++    LatchError(ERR_SOCKS_CONNECTION_FAILED);
++  } else if (result == 0) {
++    LatchError(ERR_CONNECTION_CLOSED);
++  } else {
++    LatchError(result);
++  }
++}
++
++void SOCKS5DatagramClientSocket::LatchError(int error) {
++  CHECK_LT(error, 0);
++  CHECK_NE(error, ERR_IO_PENDING);
++  if (latched_error_ != OK) {
++    return;
++  }
++  latched_error_ = error;
++  if (!read_user_callback_.is_null()) {
++    CompletionOnceCallback callback = std::move(read_user_callback_);
++    ClearReadState();
++    std::move(callback).Run(error);
++    return;
++  }
++  if (!read_multiple_user_callback_.is_null()) {
++    auto callback = std::move(read_multiple_user_callback_);
++    ClearReadMultipleState();
++    std::move(callback).Run(base::unexpected(static_cast<Error>(error)));
++  }
++}
++
++// ---------------------------------------------------------------------------
++// Read
++// ---------------------------------------------------------------------------
++
++int SOCKS5DatagramClientSocket::Read(IOBuffer* buf,
++                                     int buf_len,
++                                     CompletionOnceCallback callback) {
++  if (latched_error_ != OK) {
++    return latched_error_;
++  }
++  if (!associated_) {
++    return ERR_SOCKET_NOT_CONNECTED;
++  }
++  CHECK_GT(buf_len, 0);
++  CHECK(read_user_callback_.is_null());
++  read_user_buffer_ = buf;
++  read_user_buffer_len_ = static_cast<size_t>(buf_len);
++  read_user_callback_ = std::move(callback);
++
++  const size_t frame_len = read_user_buffer_len_ + kMaxSocks5InboundHeaderSize;
++  if (!read_frame_buffer_ ||
++      static_cast<size_t>(read_frame_buffer_->size()) < frame_len) {
++    read_frame_buffer_ = base::MakeRefCounted<IOBufferWithSize>(frame_len);
++  }
++
++  int rv = ReadLoop();
++  if (rv == ERR_IO_PENDING) {
++    return ERR_IO_PENDING;
++  }
++  read_user_callback_.Reset();
++  ClearReadState();
++  return rv;
++}
++
++int SOCKS5DatagramClientSocket::ReadLoop() {
++  for (;;) {
++    int rv = datagram_socket_->Read(
++        read_frame_buffer_.get(),
++        base::checked_cast<int>(read_user_buffer_len_ +
++                                kMaxSocks5InboundHeaderSize),
++        base::BindOnce(&SOCKS5DatagramClientSocket::OnDatagramReadComplete,
++                       weak_factory_.GetWeakPtr()));
++    if (rv == ERR_IO_PENDING) {
++      return ERR_IO_PENDING;
++    }
++    int out = OK;
++    if (DeframeSingle(rv, &out)) {
++      return out;
++    }
++    // Dropped. The caller still has no result and a dropped datagram is loss,
++    // so read again. Each iteration needs a datagram to have arrived, so the
++    // loop is bounded by the relay's send rate.
++  }
++}
++
++void SOCKS5DatagramClientSocket::OnDatagramReadComplete(int result) {
++  if (read_user_callback_.is_null()) {
++    // Close(), or a latched control error, already resolved this read.
++    return;
++  }
++  int out = OK;
++  if (!DeframeSingle(result, &out)) {
++    int rv = ReadLoop();
++    if (rv == ERR_IO_PENDING) {
++      return;
++    }
++    out = rv;
++  }
++  CompletionOnceCallback callback = std::move(read_user_callback_);
++  ClearReadState();
++  std::move(callback).Run(out);
++}
++
++bool SOCKS5DatagramClientSocket::DeframeSingle(int result, int* out_result) {
++  if (result <= 0) {
++    *out_result = result == 0 ? ERR_CONNECTION_CLOSED : result;
++    return true;
++  }
++  base::span<const uint8_t> datagram =
++      read_frame_buffer_->span().first(static_cast<size_t>(result));
++  std::optional<size_t> header_length = InboundHeaderLength(datagram);
++  if (!header_length.has_value()) {
++    return false;
++  }
++  const size_t payload_len = datagram.size() - *header_length;
++  // A header-only datagram carries nothing, and returning 0 from Read() would
++  // mean end-of-file to the caller.
++  if (payload_len == 0 || payload_len > read_user_buffer_len_) {
++    return false;
++  }
++  read_user_buffer_->span().first(payload_len).copy_from(
++      datagram.subspan(*header_length, payload_len));
++  *out_result = base::checked_cast<int>(payload_len);
++  return true;
++}
++
++void SOCKS5DatagramClientSocket::ClearReadState() {
++  read_user_buffer_ = nullptr;
++  read_user_buffer_len_ = 0;
++}
++
++// ---------------------------------------------------------------------------
++// ReadMultiple
++// ---------------------------------------------------------------------------
++
++base::expected<DatagramsMetadata, Error>
++SOCKS5DatagramClientSocket::ReadMultiple(
++    IOBuffer* buf,
++    size_t buf_len,
++    size_t max_message_size,
++    base::OnceCallback<void(base::expected<DatagramsMetadata, Error>)>
++        callback) {
++  if (latched_error_ != OK) {
++    return base::unexpected(static_cast<Error>(latched_error_));
++  }
++  if (!associated_) {
++    return base::unexpected(ERR_SOCKET_NOT_CONNECTED);
++  }
++  CHECK_GT(max_message_size, 0u);
++  CHECK_GE(buf_len, max_message_size);
++  CHECK(!callback.is_null());
++  CHECK(read_multiple_user_callback_.is_null());
++
++  read_multiple_user_buffer_ = buf;
++  read_multiple_user_buffer_len_ = buf_len;
++  read_multiple_user_callback_ = std::move(callback);
++
++  // One inner slot per payload the caller can hold, each large enough for the
++  // payload plus the largest header a relay can put in front of it. The total
++  // is raised to the 64KiB floor UDPSocketPosix::ReadMultiple CHECKs.
++  const size_t slots = std::max(size_t{1}, buf_len / max_message_size);
++  read_multiple_message_size_ = max_message_size + kMaxSocks5InboundHeaderSize;
++  read_multiple_frame_len_ = std::max(slots * read_multiple_message_size_,
++                                      kMinimumReadMultipleBufferSize);
++  if (!read_multiple_frame_buffer_ ||
++      static_cast<size_t>(read_multiple_frame_buffer_->size()) <
++          read_multiple_frame_len_) {
++    read_multiple_frame_buffer_ =
++        base::MakeRefCounted<IOBufferWithSize>(read_multiple_frame_len_);
++  }
++
++  base::expected<DatagramsMetadata, Error> result = ReadMultipleLoop();
++  if (!result.has_value() && result.error() == ERR_IO_PENDING) {
++    return result;
++  }
++  read_multiple_user_callback_.Reset();
++  ClearReadMultipleState();
++  return result;
++}
++
++base::expected<DatagramsMetadata, Error>
++SOCKS5DatagramClientSocket::ReadMultipleLoop() {
++  for (;;) {
++    base::expected<DatagramsMetadata, Error> raw =
++        datagram_socket_->ReadMultiple(
++            read_multiple_frame_buffer_.get(), read_multiple_frame_len_,
++            read_multiple_message_size_,
++            base::BindOnce(
++                &SOCKS5DatagramClientSocket::OnDatagramReadMultipleComplete,
++                weak_factory_.GetWeakPtr()));
++    if (!raw.has_value() && raw.error() == ERR_IO_PENDING) {
++      return raw;
++    }
++    std::optional<base::expected<DatagramsMetadata, Error>> deframed =
++        DeframeMultiple(std::move(raw));
++    if (deframed.has_value()) {
++      return std::move(*deframed);
++    }
++    // Every datagram in the batch was dropped. QuicChromiumPacketReader CHECKs
++    // that a successful result is non-empty, so read again rather than return
++    // an empty batch.
++  }
++}
++
++void SOCKS5DatagramClientSocket::OnDatagramReadMultipleComplete(
++    base::expected<DatagramsMetadata, Error> result) {
++  if (read_multiple_user_callback_.is_null()) {
++    return;
++  }
++  std::optional<base::expected<DatagramsMetadata, Error>> deframed =
++      DeframeMultiple(std::move(result));
++  if (!deframed.has_value()) {
++    base::expected<DatagramsMetadata, Error> again = ReadMultipleLoop();
++    if (!again.has_value() && again.error() == ERR_IO_PENDING) {
++      return;
++    }
++    deframed = std::move(again);
++  }
++  auto callback = std::move(read_multiple_user_callback_);
++  ClearReadMultipleState();
++  std::move(callback).Run(std::move(*deframed));
++}
++
++std::optional<base::expected<DatagramsMetadata, Error>>
++SOCKS5DatagramClientSocket::DeframeMultiple(
++    base::expected<DatagramsMetadata, Error> result) {
++  if (!result.has_value()) {
++    return result;
++  }
++  base::span<const uint8_t> frame = read_multiple_frame_buffer_->span();
++  base::span<uint8_t> out = read_multiple_user_buffer_->span();
++  // The caller's declared length, never more than its buffer actually holds.
++  const size_t capacity = std::min(read_multiple_user_buffer_len_, out.size());
++  DatagramsMetadata deframed;
++  size_t written = 0;
++  for (const DatagramMetadata& datagram : result.value()) {
++    if (datagram.offset > frame.size() ||
++        datagram.length > frame.size() - datagram.offset) {
++      continue;
++    }
++    base::span<const uint8_t> bytes =
++        frame.subspan(datagram.offset, datagram.length);
++    std::optional<size_t> header_length = InboundHeaderLength(bytes);
++    if (!header_length.has_value()) {
++      continue;
++    }
++    const size_t payload_len = bytes.size() - *header_length;
++    // Truncating would corrupt a packet; dropping is loss, which QUIC handles.
++    if (payload_len == 0 || payload_len > capacity - written) {
++      continue;
++    }
++    out.subspan(written, payload_len)
++        .copy_from(bytes.subspan(*header_length, payload_len));
++    // The TOS byte is reported as zero: the only TOS available here belongs to
++    // the relay-to-client hop, not to the packet the destination sent.
++    deframed.push_back(DatagramMetadata{written, payload_len, 0});
++    written += payload_len;
++  }
++  if (deframed.empty()) {
++    return std::nullopt;
++  }
++  return base::expected<DatagramsMetadata, Error>(std::move(deframed));
++}
++
++void SOCKS5DatagramClientSocket::ClearReadMultipleState() {
++  read_multiple_user_buffer_ = nullptr;
++  read_multiple_user_buffer_len_ = 0;
++}
++
++// ---------------------------------------------------------------------------
++// Write
++// ---------------------------------------------------------------------------
++
++int SOCKS5DatagramClientSocket::Write(
++    IOBuffer* buf,
++    int buf_len,
++    CompletionOnceCallback callback,
++    const NetworkTrafficAnnotationTag& traffic_annotation) {
++  if (latched_error_ != OK) {
++    return latched_error_;
++  }
++  if (!associated_) {
++    return ERR_SOCKET_NOT_CONNECTED;
++  }
++  CHECK_GT(buf_len, 0);
++  CHECK(write_user_callback_.is_null());
++  const size_t payload_len = static_cast<size_t>(buf_len);
++  const size_t framed_len = datagram_header_.size() + payload_len;
++  if (!write_frame_buffer_ ||
++      static_cast<size_t>(write_frame_buffer_->size()) < framed_len) {
++    write_frame_buffer_ = base::MakeRefCounted<IOBufferWithSize>(framed_len);
++  }
++  // Socket::Write forbids modifying the caller's buffer, so the frame is
++  // assembled in this socket's own buffer.
++  base::span<uint8_t> frame = write_frame_buffer_->span();
++  frame.first(datagram_header_.size())
++      .copy_from(base::span<const uint8_t>(datagram_header_));
++  frame.subspan(datagram_header_.size(), payload_len)
++      .copy_from(buf->span().first(payload_len));
++
++  write_payload_len_ = payload_len;
++  write_user_callback_ = std::move(callback);
++  int rv = datagram_socket_->Write(
++      write_frame_buffer_.get(), base::checked_cast<int>(framed_len),
++      base::BindOnce(&SOCKS5DatagramClientSocket::OnDatagramWriteComplete,
++                     weak_factory_.GetWeakPtr()),
++      traffic_annotation);
++  if (rv == ERR_IO_PENDING) {
++    return ERR_IO_PENDING;
++  }
++  write_user_callback_.Reset();
++  return TranslateWriteResult(rv);
++}
++
++void SOCKS5DatagramClientSocket::OnDatagramWriteComplete(int result) {
++  if (write_user_callback_.is_null()) {
++    return;
++  }
++  CompletionOnceCallback callback = std::move(write_user_callback_);
++  std::move(callback).Run(TranslateWriteResult(result));
++}
++
++int SOCKS5DatagramClientSocket::TranslateWriteResult(int result) const {
++  if (result < 0) {
++    return result;
++  }
++  // The result must be reported in the caller's frame, or the writer sees a
++  // short write for a packet that was in fact sent whole.
++  if (static_cast<size_t>(result) !=
++      datagram_header_.size() + write_payload_len_) {
++    // A datagram is written whole or not at all, and the tail of a framed
++    // packet cannot be resent because it carries no header.
++    return ERR_MSG_TOO_BIG;
++  }
++  return base::checked_cast<int>(write_payload_len_);
++}
++
++// ---------------------------------------------------------------------------
++// Socket options and addresses
++// ---------------------------------------------------------------------------
++
++void SOCKS5DatagramClientSocket::Close() {
++  next_state_ = STATE_NONE;
++  associated_ = false;
++  connect_callback_.Reset();
++  // A read or write in flight is abandoned without running its callback, which
++  // is what Close() means for every other socket.
++  read_user_callback_.Reset();
++  read_multiple_user_callback_.Reset();
++  write_user_callback_.Reset();
++  ClearReadState();
++  ClearReadMultipleState();
++  control_write_buf_.reset();
++  control_read_buf_.reset();
++  control_watch_buf_.reset();
++  // Destroying the control connection is what ends the association.
++  if (control_socket_) {
++    control_socket_->Disconnect();
++    control_socket_.reset();
++  }
++  datagram_socket_->Close();
++}
++
++int SOCKS5DatagramClientSocket::GetPeerAddress(IPEndPoint* address) const {
++  if (!proxy_endpoint_.address().IsValid()) {
++    return ERR_SOCKET_NOT_CONNECTED;
++  }
++  // The proxy's endpoint, not the relay's: QuicChromiumPacketReader reports
++  // this as every packet's peer address and QuicConnection compares it against
++  // the address the connection was built with.
++  *address = proxy_endpoint_;
++  return OK;
++}
++
++int SOCKS5DatagramClientSocket::GetLocalAddress(IPEndPoint* address) const {
++  return datagram_socket_->GetLocalAddress(address);
++}
++
++void SOCKS5DatagramClientSocket::UseNonBlockingIO() {
++  datagram_socket_->UseNonBlockingIO();
++}
++
++int SOCKS5DatagramClientSocket::SetDoNotFragment() {
++  // Applies to the outer datagram on the client-to-relay hop, which is the hop
++  // whose MTU this host can discover. ERR_NOT_IMPLEMENTED is passed through
++  // because callers already tolerate exactly that one error.
++  return datagram_socket_->SetDoNotFragment();
++}
++
++int SOCKS5DatagramClientSocket::SetRecvTos() {
++  // Deliberately not enabled. The TOS byte of a relayed datagram belongs to
++  // the relay-to-client hop; reporting it as the destination's would be worse
++  // than reporting none. GetLastTos() and every datagram's metadata report
++  // ECN_NOT_ECT instead, which is consistent with GetEncapsulation() saying
++  // this socket does not preserve ECN.
++  return OK;
++}
++
++int SOCKS5DatagramClientSocket::SetTos(DiffServCodePoint dscp,
++                                       EcnCodePoint ecn) {
++  // The DSCP of the outer datagram is this host's to set. The ECN bits are
++  // not: a relay cannot carry them to the destination, so they are never
++  // marked.
++  return datagram_socket_->SetTos(dscp, ECN_NO_CHANGE);
++}
++
++void SOCKS5DatagramClientSocket::SetMsgConfirm(bool confirm) {
++  datagram_socket_->SetMsgConfirm(confirm);
++}
++
++const NetLogWithSource& SOCKS5DatagramClientSocket::NetLog() const {
++  // No new NetLog source or event type is introduced for the relay.
++  return datagram_socket_->NetLog();
++}
++
++DscpAndEcn SOCKS5DatagramClientSocket::GetLastTos() const {
++  return DscpAndEcn{DSCP_DEFAULT, ECN_NOT_ECT};
++}
++
++int SOCKS5DatagramClientSocket::SetReceiveBufferSize(int32_t size) {
++  return datagram_socket_->SetReceiveBufferSize(size);
++}
++
++int SOCKS5DatagramClientSocket::SetSendBufferSize(int32_t size) {
++  return datagram_socket_->SetSendBufferSize(size);
++}
++
++handles::NetworkHandle SOCKS5DatagramClientSocket::GetBoundNetwork() const {
++  return datagram_socket_->GetBoundNetwork();
++}
++
++void SOCKS5DatagramClientSocket::ApplySocketTag(const SocketTag& tag) {
++  datagram_socket_->ApplySocketTag(tag);
++  if (control_socket_) {
++    control_socket_->ApplySocketTag(tag);
++  }
++}
++
++void SOCKS5DatagramClientSocket::EnableRecvOptimization() {
++  datagram_socket_->EnableRecvOptimization();
++}
++
++int SOCKS5DatagramClientSocket::SetMulticastInterface(
++    uint32_t interface_index) {
++  return datagram_socket_->SetMulticastInterface(interface_index);
++}
++
++void SOCKS5DatagramClientSocket::SetIOSNetworkServiceType(
++    int ios_network_service_type) {
++  datagram_socket_->SetIOSNetworkServiceType(ios_network_service_type);
++}
++
++DatagramEncapsulation SOCKS5DatagramClientSocket::GetEncapsulation() const {
++  // Derived once at construction, so a maximum packet size computed from it
++  // cannot go stale relative to the bytes actually written.
++  return DatagramEncapsulation{datagram_header_.size(),
++                               /*preserves_ecn=*/false};
++}
++
++}  // namespace net
+
+diff --git a/net/socket/socks5_datagram_client_socket_unittest.cc b/net/socket/socks5_datagram_client_socket_unittest.cc
+new file mode 100644
+--- /dev/null
++++ b/net/socket/socks5_datagram_client_socket_unittest.cc
+@@ -0,0 +1,567 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#include "net/socket/socks5_datagram_client_socket.h"
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include <deque>
++#include <initializer_list>
++#include <memory>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <utility>
++#include <vector>
++
++#include "base/containers/span.h"
++#include "base/functional/bind.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/run_loop.h"
++#include "base/strings/string_view_util.h"
++#include "net/base/host_port_pair.h"
++#include "net/base/io_buffer.h"
++#include "net/base/ip_address.h"
++#include "net/base/ip_endpoint.h"
++#include "net/base/net_errors.h"
++#include "net/base/proxy_chain.h"
++#include "net/base/proxy_server.h"
++#include "net/base/test_completion_callback.h"
++#include "net/socket/datagram_client_socket.h"
++#include "net/socket/socket_test_util.h"
++#include "net/test/gtest_util.h"
++#include "net/test/test_with_task_environment.h"
++#include "net/traffic_annotation/network_traffic_annotation_test_helper.h"
++#include "testing/gmock/include/gmock/gmock.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "testing/platform_test.h"
++
++using net::test::IsError;
++using net::test::IsOk;
++
++namespace net {
++namespace {
++
++constexpr char kProxyIp[] = "10.0.0.1";
++constexpr uint16_t kProxyPort = 1080;
++constexpr uint16_t kRelayPort = 40000;  // 0x9C40
++constexpr char kDestinationHost[] = "www.example.test";
++constexpr uint16_t kDestinationPort = 443;  // 0x01BB
++
++IPEndPoint ProxyEndPoint() {
++  IPAddress address;
++  CHECK(address.AssignFromIPLiteral(kProxyIp));
++  return IPEndPoint(address, kProxyPort);
++}
++
++IPEndPoint EndPoint(std::string_view literal, uint16_t port) {
++  IPAddress address;
++  CHECK(address.AssignFromIPLiteral(literal));
++  return IPEndPoint(address, port);
++}
++
++std::string Bytes(std::initializer_list<uint8_t> bytes) {
++  std::string out;
++  out.reserve(bytes.size());
++  for (uint8_t byte : bytes) {
++    out.push_back(static_cast<char>(byte));
++  }
++  return out;
++}
++
++// The 5 + 16 + 2 byte header this socket frames for kDestinationHost:443.
++std::string ExpectedDomainHeader() {
++  const std::string_view host(kDestinationHost);
++  std::string header =
++      Bytes({0x00, 0x00, 0x00, 0x03, static_cast<uint8_t>(host.size())});
++  header.append(host);
++  header.append(Bytes({kDestinationPort >> 8, kDestinationPort & 0xff}));
++  return header;
++}
++
++// A datagram as a relay delivers it: an RFC 1928 §7 header plus the payload.
++std::string RelayedDatagram(std::string_view payload, uint8_t frag = 0x00) {
++  std::string out = Bytes({0x00, 0x00, frag, 0x01, 93, 184, 216, 34,
++                           kDestinationPort >> 8, kDestinationPort & 0xff});
++  out.append(payload);
++  return out;
++}
++
++class SOCKS5DatagramClientSocketTest : public PlatformTest,
++                                       public WithTaskEnvironment {
++ public:
++  // Stores `value` where it outlives every mock that points into it.
++  const std::string& Own(std::string value) {
++    owned_.push_back(std::move(value));
++    return owned_.back();
++  }
++
++  // Builds the socket over a mock TCP control connection carrying `reads` and
++  // `writes`, and a mock UDP socket carrying `udp_reads` and `udp_writes`.
++  std::unique_ptr<SOCKS5DatagramClientSocket> Build(
++      std::vector<MockRead> reads,
++      std::vector<MockWrite> writes,
++      std::vector<MockRead> udp_reads,
++      std::vector<MockWrite> udp_writes,
++      std::optional<SOCKS5Credentials> credentials = std::nullopt,
++      const HostPortPair& destination =
++          HostPortPair(kDestinationHost, kDestinationPort)) {
++    control_reads_ = std::move(reads);
++    control_writes_ = std::move(writes);
++    udp_reads_ = std::move(udp_reads);
++    udp_writes_ = std::move(udp_writes);
++    control_data_ = std::make_unique<SequencedSocketData>(control_reads_,
++                                                          control_writes_);
++    factory_.AddTcpSocketDataProvider(control_data_.get());
++    udp_data_ = std::make_unique<SequencedSocketData>(udp_reads_, udp_writes_);
++    return std::make_unique<SOCKS5DatagramClientSocket>(
++        std::make_unique<MockUDPClientSocket>(udp_data_.get()), &factory_,
++        destination, std::move(credentials), TRAFFIC_ANNOTATION_FOR_TESTS);
++  }
++
++  // 05 01 00 — the unauthenticated greeting, byte-identical to upstream's.
++  const std::string& GreetNoAuth() { return Own(Bytes({0x05, 0x01, 0x00})); }
++  // 05 02 00 02 — offers both methods, and the proxy chooses.
++  const std::string& GreetWithAuth() {
++    return Own(Bytes({0x05, 0x02, 0x00, 0x02}));
++  }
++  const std::string& GreetReply(uint8_t method) {
++    return Own(Bytes({0x05, method}));
++  }
++  // RFC 1929: VER=1, ULEN, UNAME, PLEN, PASSWD.
++  const std::string& AuthRequest() {
++    return Own(Bytes({0x01, 0x02, 'i', 'd', 0x03, 'p', 'w', 'd'}));
++  }
++  const std::string& AuthReply(uint8_t status) {
++    return Own(Bytes({0x01, status}));
++  }
++  // 05 03 00 01 00000000 0000 — UDP ASSOCIATE naming the all-zero source that
++  // RFC 1928 §4 requires when the client cannot know its own address yet.
++  const std::string& AssociateRequest() {
++    return Own(Bytes({0x05, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
++                      0x00}));
++  }
++  const std::string& AssociateReply(uint8_t rep,
++                                    std::initializer_list<uint8_t> address) {
++    std::string reply = Bytes({0x05, rep, 0x00});
++    reply.append(Bytes(address));
++    reply.append(Bytes({kRelayPort >> 8, kRelayPort & 0xff}));
++    return Own(std::move(reply));
++  }
++  // BND.ADDR 0.0.0.0: the most common real answer.
++  const std::string& AssociateReplyUnspecified() {
++    return AssociateReply(0x00, {0x01, 0x00, 0x00, 0x00, 0x00});
++  }
++
++ protected:
++  // Declared before the providers so the providers are destroyed first: a
++  // SocketDataProvider holds a raw span over its mock arrays.
++  std::deque<std::string> owned_;
++  std::vector<MockRead> control_reads_;
++  std::vector<MockWrite> control_writes_;
++  std::vector<MockRead> udp_reads_;
++  std::vector<MockWrite> udp_writes_;
++  MockClientSocketFactory factory_;
++  std::unique_ptr<SequencedSocketData> control_data_;
++  std::unique_ptr<SequencedSocketData> udp_data_;
++  TestCompletionCallback callback_;
++};
++
++// --- The chain predicate -----------------------------------------------------
++
++TEST_F(SOCKS5DatagramClientSocketTest, OnlySingleHopSocks5ChainsCarryQuic) {
++  const ProxyServer socks5 = ProxyServer::FromSchemeHostAndPort(
++      ProxyServer::SCHEME_SOCKS5, "proxy.test", 1080);
++  const ProxyServer socks4 = ProxyServer::FromSchemeHostAndPort(
++      ProxyServer::SCHEME_SOCKS4, "proxy.test", 1080);
++  const ProxyServer https = ProxyServer::FromSchemeHostAndPort(
++      ProxyServer::SCHEME_HTTPS, "proxy.test", 443);
++
++  EXPECT_TRUE(IsQuicOverSocks5Chain(ProxyChain(socks5)));
++  EXPECT_FALSE(IsQuicOverSocks5Chain(ProxyChain::Direct()));
++  EXPECT_FALSE(IsQuicOverSocks5Chain(ProxyChain()));
++  EXPECT_FALSE(IsQuicOverSocks5Chain(ProxyChain(socks4)));
++  EXPECT_FALSE(IsQuicOverSocks5Chain(ProxyChain(https)));
++  // A chain with more than one proxy is never accepted: there is no way to
++  // frame an inner hop's association, and ProxyChain rejects a mixed chain
++  // outright, so neither form reaches the datagram path.
++  EXPECT_FALSE(IsQuicOverSocks5Chain(ProxyChain({https, socks5})));
++  EXPECT_FALSE(IsQuicOverSocks5Chain(ProxyChain({socks5, socks5})));
++}
++
++// --- Handshake ---------------------------------------------------------------
++
++TEST_F(SOCKS5DatagramClientSocketTest, UnauthenticatedHandshakeIsUpstreamBytes) {
++  auto socket = Build(
++      {MockRead(ASYNC, 1, GreetReply(0x00)),
++       MockRead(ASYNC, 3, AssociateReplyUnspecified()),
++       // The control connection stays open and delivers nothing further.
++       MockRead(SYNCHRONOUS, ERR_IO_PENDING, 4)},
++      {MockWrite(ASYNC, 0, GreetNoAuth()),
++       MockWrite(ASYNC, 2, AssociateRequest())},
++      {}, {});
++
++  EXPECT_THAT(socket->ConnectAsync(ProxyEndPoint(), callback_.callback()),
++              IsError(ERR_IO_PENDING));
++  EXPECT_THAT(callback_.WaitForResult(), IsOk());
++  EXPECT_TRUE(control_data_->AllWriteDataConsumed());
++}
++
++TEST_F(SOCKS5DatagramClientSocketTest, AuthenticatedHandshake) {
++  auto socket = Build({MockRead(ASYNC, 1, GreetReply(0x02)),
++                       MockRead(ASYNC, 3, AuthReply(0x00)),
++                       MockRead(ASYNC, 5, AssociateReplyUnspecified()),
++                       MockRead(SYNCHRONOUS, ERR_IO_PENDING, 6)},
++                      {MockWrite(ASYNC, 0, GreetWithAuth()),
++                       MockWrite(ASYNC, 2, AuthRequest()),
++                       MockWrite(ASYNC, 4, AssociateRequest())},
++                      {}, {}, SOCKS5Credentials("id", "pwd"));
++
++  EXPECT_THAT(socket->ConnectAsync(ProxyEndPoint(), callback_.callback()),
++              IsError(ERR_IO_PENDING));
++  EXPECT_THAT(callback_.WaitForResult(), IsOk());
++  EXPECT_TRUE(control_data_->AllWriteDataConsumed());
++}
++
++TEST_F(SOCKS5DatagramClientSocketTest, RejectedAuthenticationFails) {
++  auto socket = Build({MockRead(ASYNC, 1, GreetReply(0x02)),
++                       MockRead(ASYNC, 3, AuthReply(0x01))},
++                      {MockWrite(ASYNC, 0, GreetWithAuth()),
++                       MockWrite(ASYNC, 2, AuthRequest())},
++                      {}, {}, SOCKS5Credentials("id", "pwd"));
++
++  EXPECT_THAT(socket->ConnectAsync(ProxyEndPoint(), callback_.callback()),
++              IsError(ERR_IO_PENDING));
++  EXPECT_THAT(callback_.WaitForResult(), IsError(ERR_SOCKS_CONNECTION_FAILED));
++}
++
++// A proxy that requires credentials answers 0xFF when none were offered.
++TEST_F(SOCKS5DatagramClientSocketTest, NoAcceptableMethodsFails) {
++  auto socket = Build({MockRead(ASYNC, 1, GreetReply(0xFF))},
++                      {MockWrite(ASYNC, 0, GreetNoAuth())}, {}, {});
++
++  EXPECT_THAT(socket->ConnectAsync(ProxyEndPoint(), callback_.callback()),
++              IsError(ERR_IO_PENDING));
++  EXPECT_THAT(callback_.WaitForResult(), IsError(ERR_SOCKS_CONNECTION_FAILED));
++}
++
++// The common case for a proxy with no datagram support. It must fail fast so
++// the TCP job resumes rather than hang.
++TEST_F(SOCKS5DatagramClientSocketTest, CommandNotSupportedFailsFast) {
++  auto socket =
++      Build({MockRead(ASYNC, 1, GreetReply(0x00)),
++             MockRead(ASYNC, 3,
++                      AssociateReply(0x07, {0x01, 0x00, 0x00, 0x00, 0x00}))},
++            {MockWrite(ASYNC, 0, GreetNoAuth()),
++             MockWrite(ASYNC, 2, AssociateRequest())},
++            {}, {});
++
++  EXPECT_THAT(socket->ConnectAsync(ProxyEndPoint(), callback_.callback()),
++              IsError(ERR_IO_PENDING));
++  EXPECT_THAT(callback_.WaitForResult(), IsError(ERR_SOCKS_CONNECTION_FAILED));
++}
++
++// A destination whose header would not leave room for a 1200-byte Initial
++// packet is declined rather than advertised, and nothing is sent to the proxy.
++TEST_F(SOCKS5DatagramClientSocketTest, OverlongDestinationIsDeclined) {
++  auto socket = Build({}, {}, {}, {}, std::nullopt,
++                      HostPortPair(std::string(250, 'a'), kDestinationPort));
++
++  EXPECT_THAT(socket->ConnectAsync(ProxyEndPoint(), callback_.callback()),
++              IsError(ERR_SOCKS_CONNECTION_FAILED));
++}
++
++// --- Relay-address substitution ---------------------------------------------
++
++class SOCKS5DatagramRelayAddressTest : public SOCKS5DatagramClientSocketTest {
++ protected:
++  std::unique_ptr<SOCKS5DatagramClientSocket> Associate(
++      const std::string& reply) {
++    auto socket = Build({MockRead(ASYNC, 1, GreetReply(0x00)),
++                         MockRead(ASYNC, 3, reply),
++                         MockRead(SYNCHRONOUS, ERR_IO_PENDING, 4)},
++                        {MockWrite(ASYNC, 0, GreetNoAuth()),
++                         MockWrite(ASYNC, 2, AssociateRequest())},
++                        {}, {});
++    EXPECT_THAT(socket->ConnectAsync(ProxyEndPoint(), callback_.callback()),
++                IsError(ERR_IO_PENDING));
++    EXPECT_THAT(callback_.WaitForResult(), IsOk());
++    return socket;
++  }
++};
++
++TEST_F(SOCKS5DatagramRelayAddressTest, UnspecifiedAddressUsesProxyAddress) {
++  auto socket = Associate(AssociateReplyUnspecified());
++  EXPECT_TRUE(socket->relay_address_was_substituted_for_testing());
++  EXPECT_EQ(EndPoint(kProxyIp, kRelayPort),
++            socket->relay_endpoint_for_testing());
++}
++
++TEST_F(SOCKS5DatagramRelayAddressTest, RoutableAddressIsHonoured) {
++  auto socket = Associate(AssociateReply(0x00, {0x01, 10, 9, 9, 9}));
++  EXPECT_FALSE(socket->relay_address_was_substituted_for_testing());
++  EXPECT_EQ(EndPoint("10.9.9.9", kRelayPort),
++            socket->relay_endpoint_for_testing());
++}
++
++TEST_F(SOCKS5DatagramRelayAddressTest, LoopbackAddressIsSubstituted) {
++  auto socket = Associate(AssociateReply(0x00, {0x01, 127, 0, 0, 1}));
++  EXPECT_TRUE(socket->relay_address_was_substituted_for_testing());
++  EXPECT_EQ(EndPoint(kProxyIp, kRelayPort),
++            socket->relay_endpoint_for_testing());
++}
++
++TEST_F(SOCKS5DatagramRelayAddressTest, MismatchedFamilyIsSubstituted) {
++  auto socket = Associate(AssociateReply(
++      0x00, {0x04, 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++             0x00, 0x00, 0x00, 0x00, 0x00, 0x01}));
++  EXPECT_TRUE(socket->relay_address_was_substituted_for_testing());
++  EXPECT_EQ(EndPoint(kProxyIp, kRelayPort),
++            socket->relay_endpoint_for_testing());
++}
++
++// A named relay cannot be used: resolving it here would be a DNS query the
++// stream path never makes.
++TEST_F(SOCKS5DatagramRelayAddressTest, DomainNameIsSubstituted) {
++  auto socket = Associate(AssociateReply(0x00, {0x03, 0x03, 'a', 'b', 'c'}));
++  EXPECT_TRUE(socket->relay_address_was_substituted_for_testing());
++  EXPECT_EQ(EndPoint(kProxyIp, kRelayPort),
++            socket->relay_endpoint_for_testing());
++}
++
++// --- Framing ----------------------------------------------------------------
++
++class SOCKS5DatagramFramingTest : public SOCKS5DatagramClientSocketTest {
++ protected:
++  std::unique_ptr<SOCKS5DatagramClientSocket> Associate(
++      std::vector<MockRead> udp_reads,
++      std::vector<MockWrite> udp_writes,
++      const HostPortPair& destination =
++          HostPortPair(kDestinationHost, kDestinationPort),
++      int watch_read = -1) {
++    std::vector<MockRead> reads = {MockRead(ASYNC, 1, GreetReply(0x00)),
++                                   MockRead(ASYNC, 3,
++                                            AssociateReplyUnspecified())};
++    if (watch_read < 0) {
++      reads.push_back(MockRead(SYNCHRONOUS, ERR_IO_PENDING, 4));
++    } else {
++      // Pause, so a test can decide exactly when the control connection dies.
++      reads.push_back(MockRead(ASYNC, ERR_IO_PENDING, 4));
++      reads.push_back(MockRead(ASYNC, watch_read, 5));
++    }
++    auto socket = Build(std::move(reads),
++                        {MockWrite(ASYNC, 0, GreetNoAuth()),
++                         MockWrite(ASYNC, 2, AssociateRequest())},
++                        std::move(udp_reads), std::move(udp_writes),
++                        std::nullopt, destination);
++    EXPECT_THAT(socket->ConnectAsync(ProxyEndPoint(), callback_.callback()),
++                IsError(ERR_IO_PENDING));
++    EXPECT_THAT(callback_.WaitForResult(), IsOk());
++    return socket;
++  }
++};
++
++TEST_F(SOCKS5DatagramFramingTest, WritePrependsDomainHeader) {
++  const std::string& framed = Own(ExpectedDomainHeader() + "quic-packet");
++  auto socket = Associate({}, {MockWrite(SYNCHRONOUS, 0, framed)});
++
++  auto buf = base::MakeRefCounted<StringIOBuffer>("quic-packet");
++  // The caller is told how many of *its* bytes went out, never the framed
++  // length, or QuicChromiumPacketWriter would see a short write.
++  EXPECT_EQ(11, socket->Write(buf.get(), buf->size(), callback_.callback(),
++                              TRAFFIC_ANNOTATION_FOR_TESTS));
++}
++
++TEST_F(SOCKS5DatagramFramingTest, WriteUsesIpv4HeaderForAnIpLiteral) {
++  const std::string& framed =
++      Own(Bytes({0x00, 0x00, 0x00, 0x01, 10, 11, 12, 13, 0x01, 0xBB}) +
++          "packet");
++  auto socket = Associate({}, {MockWrite(SYNCHRONOUS, 0, framed)},
++                          HostPortPair("10.11.12.13", kDestinationPort));
++
++  auto buf = base::MakeRefCounted<StringIOBuffer>("packet");
++  EXPECT_EQ(6, socket->Write(buf.get(), buf->size(), callback_.callback(),
++                             TRAFFIC_ANNOTATION_FOR_TESTS));
++  EXPECT_EQ(10u, socket->GetEncapsulation().overhead);
++}
++
++// The overhead the writer sizes packets from is the header actually framed,
++// and it is the same value every time it is asked.
++TEST_F(SOCKS5DatagramFramingTest, ReportedOverheadMatchesTheFramedHeader) {
++  auto socket = Associate({}, {});
++  EXPECT_EQ(ExpectedDomainHeader().size(),
++            socket->GetEncapsulation().overhead);
++  EXPECT_EQ(ExpectedDomainHeader().size(),
++            socket->GetEncapsulation().overhead);
++  // A relay cannot carry the inner packet's ECN either way, so the socket says
++  // so instead of letting QUIC advertise it.
++  EXPECT_FALSE(socket->GetEncapsulation().preserves_ecn);
++}
++
++TEST_F(SOCKS5DatagramFramingTest, ReadStripsTheHeader) {
++  auto socket =
++      Associate({MockRead(SYNCHRONOUS, 0, Own(RelayedDatagram("inner-quic")))},
++                {});
++
++  auto buf = base::MakeRefCounted<IOBufferWithSize>(size_t{64});
++  ASSERT_EQ(10, socket->Read(buf.get(), buf->size(), callback_.callback()));
++  EXPECT_EQ("inner-quic", std::string(base::as_string_view(
++                              buf->span().first(size_t{10}))));
++}
++
++TEST_F(SOCKS5DatagramFramingTest, ReadDropsFragmentedAndMalformedDatagrams) {
++  auto socket = Associate(
++      {// FRAG != 0: fragmentation is not implemented, and dropping is
++       // indistinguishable from loss, which QUIC already handles.
++       MockRead(ASYNC, 0, Own(RelayedDatagram("fragment", 0x01))),
++       // An unknown ATYP is dropped too.
++       MockRead(ASYNC, 1, Own(Bytes({0x00, 0x00, 0x00, 0x09, 0x01, 0x02}))),
++       MockRead(ASYNC, 2, Own(RelayedDatagram("good")))},
++      {});
++
++  auto buf = base::MakeRefCounted<IOBufferWithSize>(size_t{64});
++  EXPECT_THAT(socket->Read(buf.get(), buf->size(), callback_.callback()),
++              IsError(ERR_IO_PENDING));
++  // The two junk datagrams are skipped and the read resolves with the third.
++  ASSERT_EQ(4, callback_.WaitForResult());
++  EXPECT_EQ("good", std::string(
++                        base::as_string_view(buf->span().first(size_t{4}))));
++}
++
++TEST_F(SOCKS5DatagramFramingTest, ReadMultiplePacksPayloadsWithoutHeaders) {
++  auto socket =
++      Associate({MockRead(SYNCHRONOUS, 0, Own(RelayedDatagram("aaaa"))),
++                 MockRead(SYNCHRONOUS, 1, Own(RelayedDatagram("bbbbbb"))),
++                 MockRead(SYNCHRONOUS, ERR_IO_PENDING, 2)},
++                {});
++
++  auto buf =
++      base::MakeRefCounted<IOBufferWithSize>(kMinimumReadMultipleBufferSize);
++  base::expected<DatagramsMetadata, Error> result = socket->ReadMultiple(
++      buf.get(), kMinimumReadMultipleBufferSize, 1024u,
++      base::BindOnce([](base::expected<DatagramsMetadata, Error>) {
++        ADD_FAILURE() << "the callback ran for a synchronous read";
++      }));
++  ASSERT_TRUE(result.has_value());
++  ASSERT_EQ(2u, result->size());
++  // Offsets index the caller's buffer and are packed: no header bytes and no
++  // gaps, so a stale offset from the inner buffer cannot be handed back.
++  EXPECT_EQ(0u, (*result)[0].offset);
++  EXPECT_EQ(4u, (*result)[0].length);
++  EXPECT_EQ(4u, (*result)[1].offset);
++  EXPECT_EQ(6u, (*result)[1].length);
++  // The only TOS byte available belongs to the relay-to-client hop, so it is
++  // reported as zero rather than as the destination's.
++  EXPECT_EQ(0u, (*result)[0].tos);
++  EXPECT_EQ(0u, (*result)[1].tos);
++  EXPECT_EQ("aaaabbbbbb", std::string(base::as_string_view(
++                              buf->span().first(size_t{10}))));
++}
++
++TEST_F(SOCKS5DatagramFramingTest, GetLastTosReportsNoEcn) {
++  auto socket = Associate({}, {});
++  EXPECT_EQ(DSCP_DEFAULT, socket->GetLastTos().dscp);
++  EXPECT_EQ(ECN_NOT_ECT, socket->GetLastTos().ecn);
++  // Failing here would abort session creation, so it succeeds without
++  // enabling receive-side TOS.
++  EXPECT_THAT(socket->SetRecvTos(), IsOk());
++}
++
++// --- Addresses --------------------------------------------------------------
++
++TEST_F(SOCKS5DatagramFramingTest, PeerAddressIsTheProxyNotTheRelay) {
++  auto socket = Associate({}, {});
++  IPEndPoint peer;
++  ASSERT_THAT(socket->GetPeerAddress(&peer), IsOk());
++  // Must equal the address the QUIC connection was built with, or every packet
++  // looks like a server address change.
++  EXPECT_EQ(ProxyEndPoint(), peer);
++  EXPECT_NE(socket->relay_endpoint_for_testing(), peer);
++}
++
++TEST_F(SOCKS5DatagramClientSocketTest, PeerAddressBeforeConnectFails) {
++  auto socket = Build({}, {}, {}, {});
++  IPEndPoint peer;
++  EXPECT_THAT(socket->GetPeerAddress(&peer), IsError(ERR_SOCKET_NOT_CONNECTED));
++}
++
++TEST_F(SOCKS5DatagramClientSocketTest, SynchronousConnectIsNotImplemented) {
++  auto socket = Build({}, {}, {}, {});
++  EXPECT_THAT(socket->Connect(ProxyEndPoint()), IsError(ERR_NOT_IMPLEMENTED));
++}
++
++TEST_F(SOCKS5DatagramClientSocketTest, ReadBeforeAssociationFails) {
++  auto socket = Build({}, {}, {}, {});
++  auto buf = base::MakeRefCounted<IOBufferWithSize>(size_t{64});
++  EXPECT_THAT(socket->Read(buf.get(), buf->size(), callback_.callback()),
++              IsError(ERR_SOCKET_NOT_CONNECTED));
++}
++
++// --- Control-connection lifetime --------------------------------------------
++
++// RFC 1928 §7 ends the association with the control connection, so a write
++// after it closes must fail rather than succeed into a relay that has stopped
++// listening: QUIC would otherwise only notice at its idle timeout.
++TEST_F(SOCKS5DatagramFramingTest, ControlClosureFailsSubsequentWrites) {
++  auto socket = Associate({}, {}, HostPortPair(kDestinationHost,
++                                               kDestinationPort),
++                          /*watch_read=*/0);
++  control_data_->Resume();
++  base::RunLoop().RunUntilIdle();
++
++  auto buf = base::MakeRefCounted<StringIOBuffer>("packet");
++  EXPECT_THAT(socket->Write(buf.get(), buf->size(), callback_.callback(),
++                            TRAFFIC_ANNOTATION_FOR_TESTS),
++              IsError(ERR_CONNECTION_CLOSED));
++  auto read_buf = base::MakeRefCounted<IOBufferWithSize>(size_t{64});
++  EXPECT_THAT(
++      socket->Read(read_buf.get(), read_buf->size(), callback_.callback()),
++      IsError(ERR_CONNECTION_CLOSED));
++}
++
++// A pending read is failed at once rather than left waiting for a datagram
++// that can no longer arrive.
++TEST_F(SOCKS5DatagramFramingTest, ControlClosureFailsAPendingRead) {
++  auto socket = Associate({MockRead(SYNCHRONOUS, ERR_IO_PENDING, 0)}, {},
++                          HostPortPair(kDestinationHost, kDestinationPort),
++                          /*watch_read=*/0);
++
++  TestCompletionCallback read_callback;
++  auto read_buf = base::MakeRefCounted<IOBufferWithSize>(size_t{64});
++  ASSERT_THAT(
++      socket->Read(read_buf.get(), read_buf->size(), read_callback.callback()),
++      IsError(ERR_IO_PENDING));
++
++  control_data_->Resume();
++  EXPECT_THAT(read_callback.WaitForResult(), IsError(ERR_CONNECTION_CLOSED));
++}
++
++// Unexpected stream data from the proxy is terminal too: a conforming proxy
++// sends nothing after the ASSOCIATE reply.
++TEST_F(SOCKS5DatagramFramingTest, UnexpectedControlDataIsTerminal) {
++  std::vector<MockRead> reads = {
++      MockRead(ASYNC, 1, GreetReply(0x00)),
++      MockRead(ASYNC, 3, AssociateReplyUnspecified()),
++      MockRead(ASYNC, ERR_IO_PENDING, 4),
++      MockRead(ASYNC, 5, Own(Bytes({0x05})))};
++  auto socket = Build(std::move(reads),
++                      {MockWrite(ASYNC, 0, GreetNoAuth()),
++                       MockWrite(ASYNC, 2, AssociateRequest())},
++                      {}, {});
++  ASSERT_THAT(socket->ConnectAsync(ProxyEndPoint(), callback_.callback()),
++              IsError(ERR_IO_PENDING));
++  ASSERT_THAT(callback_.WaitForResult(), IsOk());
++
++  control_data_->Resume();
++  base::RunLoop().RunUntilIdle();
++
++  auto buf = base::MakeRefCounted<StringIOBuffer>("packet");
++  EXPECT_THAT(socket->Write(buf.get(), buf->size(), callback_.callback(),
++                            TRAFFIC_ANNOTATION_FOR_TESTS),
++              IsError(ERR_SOCKS_CONNECTION_FAILED));
++}
++
++}  // namespace
++}  // namespace net
+
+diff --git a/net/BUILD.gn b/net/BUILD.gn
+--- a/net/BUILD.gn
++++ b/net/BUILD.gn
+@@ -986,5 +986,6 @@
+     "socket/connect_job_params_factory.h",
+     "socket/connection_attempts.h",
++    "socket/datagram_client_socket.cc",
+     "socket/datagram_client_socket.h",
+     "socket/datagram_server_socket.h",
+     "socket/datagram_socket.h",
+@@ -1018,6 +1019,8 @@
+     "socket/socket_tag.h",
+     "socket/socks5_client_socket.cc",
+     "socket/socks5_client_socket.h",
++    "socket/socks5_datagram_client_socket.cc",
++    "socket/socks5_datagram_client_socket.h",
+     "socket/socks_client_socket.cc",
+     "socket/socks_client_socket.h",
+     "socket/socks_connect_job.cc",
+@@ -3130,6 +3133,7 @@
+     "socket/socket_pool_additional_capacity_unittest.cc",
+     "socket/socket_tag_unittest.cc",
+     "socket/socks5_client_socket_unittest.cc",
++    "socket/socks5_datagram_client_socket_unittest.cc",
+     "socket/socks_client_socket_unittest.cc",
+     "socket/socks_connect_job_unittest.cc",
+     "socket/ssl_client_socket_unittest.cc",

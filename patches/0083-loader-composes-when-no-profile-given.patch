@@ -1,0 +1,69 @@
+Subject: base: compose a profile when the launch did not supply one
+
+The loader's only source of a profile is --apostate-profile, so a binary run
+with no arguments presents the host. That is the right default for a debug run
+and the wrong one for the product: a user who double-clicks the browser expects
+a device, not their own machine, and the seed model in docs/FINGERPRINTS.md §5
+exists precisely so that launch can be both unique and stable.
+
+This is the one hunk that joins the two halves. The switch still wins, because
+it is the strongest layer in §10 and because patch 0005 propagates it to every
+child, so a renderer keeps parsing the switch its browser was given and never
+composes anything itself. Only when the switch is absent does the browser ask
+the compositor, and the compositor returns the same base64 JSON the switch
+would have carried — so there is one parser, one format, and one profile
+object no matter which path produced it.
+
+ComposeProfileForCurrentProcess() returns nullopt for a child process, for
+--fingerprint=host, and when the compiled catalogue cannot serve the launch.
+nullopt reaches exactly the code path that already existed, which is host
+inheritance.
+
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -7,8 +7,10 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <memory>
++#include <optional>
+ #include <utility>
+ 
++#include "base/apostate/compose.h"
+ #include "base/base64.h"
+ #include "base/base_switches.h"
+ #include "base/command_line.h"
+@@ -99,11 +101,31 @@
+       return static_cast<const Profile*>(nullptr);
+     }
+     const CommandLine* command_line = CommandLine::ForCurrentProcess();
+-    if (!command_line->HasSwitch(switches::kApostateProfile)) {
++    if (command_line->HasSwitch(::switches::kApostateProfile)) {
++      return static_cast<const Profile*>(ParseOrNull(
++          command_line->GetSwitchValueASCII(::switches::kApostateProfile)));
++    }
++
++    // No switch: compose one. Returns nullopt in a child process, under
++    // --fingerprint=host, and when the catalogue cannot serve this launch;
++    // each of those means inherit the host, which is what the caller below
++    // already does with a null profile.
++    std::optional<std::string> composed = ComposeProfileForCurrentProcess();
++    if (!composed) {
+       return static_cast<const Profile*>(nullptr);
+     }
+-    return static_cast<const Profile*>(ParseOrNull(
+-        command_line->GetSwitchValueASCII(switches::kApostateProfile)));
++
++    // Write it back onto this process's command line so the children inherit
++    // it. Patch 0005 propagates --apostate-profile to every child, and a
++    // composed profile that never reaches the renderer is worse than none: the
++    // browser would size its thread pools from the claim while the renderer
++    // reported the host's cores, and navigator.hardwareConcurrency would
++    // contradict the profile. Composition cannot repeat in the child — it is
++    // sandboxed and cannot read the seed file — so the switch is the only
++    // path, and it is the one that already exists.
++    CommandLine::ForCurrentProcess()->AppendSwitchASCII(
++        ::switches::kApostateProfile, *composed);
++    return static_cast<const Profile*>(ParseOrNull(*composed));
+   }();
+   return profile;
+ }

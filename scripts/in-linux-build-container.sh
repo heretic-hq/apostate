@@ -129,5 +129,6 @@ env_args=(--env DEPOT_TOOLS_UPDATE=0 --env DEPOT_TOOLS_METRICS=0 --env HOME=/tmp
           --env VPYTHON_ROOT=/tmp/vpython-root --env XDG_CACHE_HOME=/tmp/.cache
           --env "APOSTATE_WORKSPACE=$workspace" --env "APOSTATE_BUILD_IMAGE_ID=$image_id")
 if [[ -n "${APOSTATE_JOBS:-}" ]]; then env_args+=(--env "APOSTATE_JOBS=$APOSTATE_JOBS"); fi
+if [[ -n "${APOSTATE_FRESH_BUILD:-}" ]]; then env_args+=(--env "APOSTATE_FRESH_BUILD=$APOSTATE_FRESH_BUILD"); fi
 docker run --rm --init --user "$run_user" --workdir "$REPO_ROOT" \
   "${mounts[@]}" "${env_args[@]}" --entrypoint /bin/bash "$image_id" "$command_path" "$@"

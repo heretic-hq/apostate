@@ -71,8 +71,11 @@ bash "$REPO_ROOT/scripts/run-chromium-hooks.sh" "$target"
 
 if [ "$(uname -s)" = "Linux" ] && [ -x "$SRC/build/install-build-deps.sh" ]; then
   say "installing chromium build dependencies"
-  "$SRC/build/install-build-deps.sh" --no-prompt --no-chromeos-fonts || \
-    warn "install-build-deps reported a problem; check before configuring"
+  # Hard failure, not a warning. A missing host dependency does not go away:
+  # it reappears an hour into the compile as an unresolved header or a link
+  # error with no connection to its cause. Failing here costs a minute.
+  "$SRC/build/install-build-deps.sh" --no-prompt --no-chromeos-fonts ||
+    die "install-build-deps.sh failed; the build cannot succeed without it"
 fi
 
 say "chromium at $(git -C "$SRC" describe --tags 2>/dev/null || git -C "$SRC" rev-parse --short HEAD)"

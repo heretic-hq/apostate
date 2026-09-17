@@ -1,17 +1,21 @@
 target_os = "win"
 target_cpu = "x64"
 
-# Use Chromium's bundled Clang and LLD. The Windows runner must provide the
-# pinned Visual Studio and Windows SDK installations below.
+# Use Chromium's bundled Clang and LLD.
 is_clang = true
 use_lld = true
-visual_studio_path = "C:/Program Files/Microsoft Visual Studio/2022/BuildTools"
-windows_sdk_path = "C:/Program Files (x86)/Windows Kits/10"
-win_sdk_version = "10.0.26100.0"
+
+# The Visual Studio and Windows SDK locations are deliberately NOT pinned here.
+# Setting visual_studio_path obliges you to also set visual_studio_version,
+# windows_sdk_version and wdk_path (see the asserts in
+# build/config/win/visual_studio_version.gni), and it forces
+# visual_studio_runtime_dirs to empty, so the CRT redistributables never reach
+# the package. Instead scripts/lib.sh exports DEPOT_TOOLS_WIN_TOOLCHAIN=0 and
+# vs_toolchain.py resolves all six values from the local install as one
+# consistent set. That also survives the runner image moving to a new VS
+# build, which a hand-written path does not.
 
 # Keep packaging and reproducibility independent of runner-local build state.
 is_component_build = false
 use_remoteexec = false
 use_siso = false
-
-use_goma = false

@@ -53,13 +53,63 @@ enable_dsyms = false
 # config forces 1,716 features across 1,375 studies into their *testing* state,
 # which is not the state real Chrome ships.
 #
-# Historical measurement from the 152.0.7977.82 baseline: this configuration
-# enabled ReduceAcceptLanguage, so FrameFetchContext::AddReducedAcceptLanguageIfNecessary
-# set Accept-Language in the renderer. The behavior is retained for pinned .83
-# until re-measured on .83; stock Chrome leaves it unset there and appends it in
-# URLRequestHttpJob::AddExtraHeaders.
-# differed from Chrome in an unpatched build of our own pins — Accept-Language
-# at index 15 instead of 24 — a difference no amount of JS-surface work can
-# reach. Fixing it at the GN level rather than with --disable-field-trial-config
-# keeps us from adding a command-line switch (axiom: no new observables).
+# Two measured consequences on our own pins, both caused by the testing config
+# and both removed by this arg:
+#
+#   * navigator.languages was truncated to a single entry. The testing config
+#     enables ReduceAcceptLanguage (fieldtrial_testing_config.json:21406),
+#     which is FEATURE_DISABLED_BY_DEFAULT upstream
+#     (services/network/public/cpp/features.cc:209), and
+#     NavigatorLanguage::EnsureUpdatedLanguage then replaces the parsed list
+#     with its first element alone
+#     (third_party/blink/renderer/core/frame/navigator_language.cc). Measured:
+#     a profile carrying "pl-PL,pl,en-US,en" reported ["pl-PL"], while every
+#     Chrome capture reports two entries for "en-US,en". The profile data was
+#     never at fault.
+#   * Accept-Language moved in the header order — index 15 rather than 24 —
+#     because FrameFetchContext::AddReducedAcceptLanguageIfNecessary set it in
+#     the renderer, where stock Chrome leaves it unset and appends it in
+#     URLRequestHttpJob::AddExtraHeaders.
+#
+# Both readings are from the 152.0.7977.82 baseline and stand until re-captured
+# on .83. Fixing this at the GN level rather than with
+# --disable-reduce-accept-language keeps us from adding a command-line switch
+# (axiom: no new observables).
 disable_fieldtrial_testing_config = true
+
+# Google API keys, supplied by the operator at configure time. Unset is the
+# default and the honest state: with no key every Google-API-backed feature
+# behaves exactly as it does today.
+#
+# This is not cosmetic. Two page-visible surfaces follow from it:
+#
+#   * The nineteen localService:false speech voices. Chromium's network speech
+#     synthesis component extension serves them, it speaks by posting to
+#     https://www.google.com/speech-api/v2/synthesize with this key, and patch
+#     0075 registers the extension only when a key is configured — because
+#     patch 0043 forbids listing a voice that cannot speak. Keyless: zero
+#     network voices, where every Chrome capture has nineteen.
+#   * The "You are missing API keys" infobar that
+#     chrome/browser/ui/startup/infobar_utils.cc:188 raises on the first tab of
+#     a keyless build. An infobar consumes window chrome height, so it is
+#     visible to any page comparing outerHeight with innerHeight.
+#
+# The keys are read from the environment, so they never enter this repository
+# and never enter the generated args.gn — gn resolves getenv() at gen time.
+# Obtain them under Chromium's docs/api_keys.md; the ToS is accepted by the
+# entity that obtains them, and a key baked into a published binary is
+# extractable by anyone who downloads it, so publish keys only when the quota
+# is yours to spend.
+#
+# Two things the operator owns and the binary cannot check:
+#
+#   * A key that exists is not a key authorised for the speech endpoint.
+#     Verify that one utterance actually produces audio before publishing a
+#     keyed build. Nothing in the binary can establish that without a network
+#     round trip, and making one at startup would add an observable.
+#   * A baked key makes the output depend on the build environment, so
+#     scripts/verify-reproducible.sh must compare two builds made with the same
+#     key environment (or with none).
+google_api_key = getenv("GOOGLE_API_KEY")
+google_default_client_id = getenv("GOOGLE_DEFAULT_CLIENT_ID")
+google_default_client_secret = getenv("GOOGLE_DEFAULT_CLIENT_SECRET")

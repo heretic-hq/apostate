@@ -12,6 +12,3 @@ use_lld = true
 is_component_build = false
 use_remoteexec = false
 use_siso = false
-
-
-use_goma = false

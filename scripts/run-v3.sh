@@ -27,7 +27,7 @@ case "$ANGLE_BACKEND" in
 esac
 
 TARGET="${APOSTATE_TARGET:-$(target_default)}"
-CHROME="$SRC/out/$TARGET/chrome"
+CHROME="$(browser_binary "$TARGET")"
 PORT="${APOSTATE_V3_PORT:-8177}"
 OUTDIR="$(mktemp -d /tmp/v3run.XXXXXX)"
 
@@ -89,11 +89,23 @@ if [ -n "${APOSTATE_V3_WIDEVINE_DIR:-}" ]; then
 fi
 
 say "launching browser (ANGLE backend: $ANGLE_BACKEND)"
-# APOSTATE_V3_HEADFUL=1 runs under Xvfb for comparisons that require a headed
-# browser. Display permissions are pre-granted in either launch mode.
+# APOSTATE_V3_HEADFUL=1 runs a headed browser for comparisons that need one.
+# Display permissions are pre-granted in either launch mode.
+#
+# Xvfb is a Linux requirement, not a headful one: macOS has a window server
+# already, so wrapping in xvfb-run there is both impossible and unnecessary.
+# Requiring it unconditionally made the headful path Linux-only, which is why
+# screen.details was being compared headless against a headed anchor capture
+# and failing on isInternal and label. Headless reports isInternal false and an
+# empty label because the process genuinely has no display; every other
+# screen.* field is identical between the two modes.
 if [ -n "${APOSTATE_V3_HEADFUL:-}" ]; then
-  command -v xvfb-run >/dev/null || die "APOSTATE_V3_HEADFUL set but xvfb-run is missing"
-  LAUNCH=(xvfb-run -a --server-args="-screen 0 ${APOSTATE_V3_SCREEN:-1920x1080x24}" "$CHROME")
+  if [ "$(uname -s)" = Darwin ]; then
+    LAUNCH=("$CHROME")
+  else
+    command -v xvfb-run >/dev/null || die "APOSTATE_V3_HEADFUL set but xvfb-run is missing"
+    LAUNCH=(xvfb-run -a --server-args="-screen 0 ${APOSTATE_V3_SCREEN:-1920x1080x24}" "$CHROME")
+  fi
   MODE=()
 else
   LAUNCH=("$CHROME")

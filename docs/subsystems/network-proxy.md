@@ -16,22 +16,40 @@ persisted profile data.
 | WebSocket stream | supported | supported | supported | supported |
 | SOCKS5 UDP ASSOCIATE | n/a | n/a | n/a | supported |
 | Proxied QUIC / HTTP/3 | unsupported | unsupported | unsupported | supported |
-| WebRTC UDP/STUN/TURN | unsupported | unsupported | unsupported | unsupported |
+| WebRTC UDP/STUN/TURN | unsupported | unsupported | unsupported | supported |
 
-“Supported” means the native path can use the configured endpoint and, when
+"Supported" means the native path can use the configured endpoint and, when
 supplied, launch-only credentials. Proxied QUIC is supported only through a
 **single-hop SOCKS5** chain: a multi-proxy chain, a SOCKS4 proxy, an HTTP
 proxy or an HTTPS proxy still refuses QUIC with `ERR_NO_SUPPORTED_PROXIES`,
 because none of them can relay a datagram. QUIC over a QUIC proxy remains
 Chromium's own MASQUE path and is untouched.
 
-WebRTC UDP, STUN and TURN remain **unsupported**. The datagram socket added
-here is reachable only from `QuicSessionPool`; WebRTC builds its sockets
-through a different factory and applies its own policy, so nothing about this
-change routes WebRTC through the proxy. When any proxy is configured, the Node
-launcher still adds `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`
-unless the caller already supplied that switch, so WebRTC may be unavailable
-rather than proxy-routed. That is containment, not relay.
+WebRTC UDP, STUN and TURN are relayed through a single-hop SOCKS5 chain by patch
+`0086`. Every WebRTC datagram travels through an RFC 1928 UDP association, so a
+peer sees the proxy as the packet source and the candidates the page is given
+are the proxy's. Patches `0073` and `0074` rewrite only the SDP candidate text,
+which on its own left the candidate stating one address while the datagrams left
+from a real interface.
+
+Under a proxy that cannot carry a datagram, no UDP socket is created: no host
+candidate, no srflx candidate and no UDP relay candidate. TCP is unaffected, so
+a TURN server reached over `turn:...?transport=tcp` or `turns:` still yields a
+relay candidate through `P2PSocketTcp`, which already routes through
+`ProxyResolvingClientSocketFactory`. With no proxy configured the behaviour is
+unchanged.
+
+Two residuals while the relay is in use. The host candidate carries the
+association's ingress address, the address the proxy told the browser to send
+to, and whether that is the same port a peer observes as the packet source
+depends on the proxy implementation; the address peers actually see reaches the
+page as the srflx candidate that the page's own STUN server produces over the
+same association. And the enterprise `WebRtcUdpPortRange` constraint no longer
+applies, because the port a page sees is the proxy's rather than one this host
+chose.
+
+`--fingerprint-webrtc-udp=direct` forces direct UDP and is an explicit opt-in to
+publishing the host's real address; `block` never creates the socket.
 
 Apostate does not silently fall back from a failed datagram association to a
 direct socket. When UDP ASSOCIATE fails, the QUIC attempt fails and Chromium's
@@ -594,7 +612,9 @@ Datagram support adds:
   answers `REP 0x07`.
 - A packet capture on the host showing no datagram to the destination and no
   destination DNS query, only proxy traffic.
-- WebRTC UDP/STUN/TURN smoke probes remain explicitly marked unsupported.
+- A packet capture during a WebRTC connectivity check showing every datagram
+  leaving through the proxy association and none to the peer directly, and no
+  UDP socket created at all under a non-relayable proxy.
 
 Package-level GeoIP proxy transport is separate from native Chromium proxy
 authentication. It uses Node's request APIs and proxy agents only to resolve

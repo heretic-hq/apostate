@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from .binary import ensure_binary
-from .config import LaunchConfig, translate_options
+from .config import LaunchConfig, check_fingerprint_switches, translate_options
 from .errors import ConfigurationError, LaunchError, ProfileError
 from .geoip import GeoIPResult, resolve_geoip
 from .profile_validation import validate_profile
@@ -176,12 +176,30 @@ def _resolve_plan(config: LaunchConfig, *, resolver: Any = None, catalogue: Any 
                       geoip=network_result, diagnostics=diagnostics)
 
 
+#: Profile ids the resolver uses for the two native-composition paths. Both
+#: deliver their selection through ``--fingerprint``; everything else is an
+#: explicit profile delivered through ``--apostate-profile``.
+_NATIVE_SELECTION = ("host-inherited", "native-composed")
+
+
 def _native_args(plan: LaunchPlan, *, persistent: bool = False) -> list[str]:
     config = plan.config
+    check_fingerprint_switches(config.args)
     args: list[str] = []
     if config.headless:
         args.append("--headless=new")
     args.extend(("--no-first-run", "--no-default-browser-check"))
+
+    native_selection = (plan.resolution is None
+                        or plan.resolution.profile_id in _NATIVE_SELECTION)
+    if native_selection and not _has_switch(config.args, "--fingerprint"):
+        # The compositor is the browser process's. The package hands it the
+        # selectors; it draws a fresh seed itself when none is given.
+        if config.fingerprint is not None:
+            args.append(f"--fingerprint={config.fingerprint}")
+        if config.fingerprint_platform is not None:
+            args.append(f"--fingerprint-platform={config.fingerprint_platform}")
+
     encoded = _profile_payload(plan.profile)
     if encoded:
         args.append("--apostate-profile=" + encoded)
@@ -194,6 +212,20 @@ def _native_args(plan: LaunchPlan, *, persistent: bool = False) -> list[str]:
     return args
 
 
+def _has_switch(args: Any, name: str) -> bool:
+    return any(item == name or item.startswith(name + "=") for item in args)
+
+
+#: What to install when no Playwright-compatible driver is importable. Patchright
+#: is listed first because it is the hardened fork this API was shaped against.
+_DRIVER_HINT = (
+    "no Playwright-compatible driver is installed. Run one of:\n"
+    "    pip install patchright && patchright install-deps\n"
+    "    pip install playwright\n"
+    "Neither needs `playwright install`: Apostate supplies its own browser."
+)
+
+
 def _load_sync_backend() -> Any:
     for module_name in ("patchright.sync_api", "playwright.sync_api"):
         try:
@@ -202,7 +234,7 @@ def _load_sync_backend() -> Any:
             continue
         except ImportError as exc:
             raise LaunchError(f"unable to import the {module_name.split('.')[0]} sync API") from exc
-    raise LaunchError("launch requires a Patchright-compatible Playwright installation")
+    raise LaunchError(_DRIVER_HINT)
 
 
 def _load_async_backend() -> Any:
@@ -213,7 +245,7 @@ def _load_async_backend() -> Any:
             continue
         except ImportError as exc:
             raise LaunchError(f"unable to import the {module_name.split('.')[0]} async API") from exc
-    raise LaunchError("async launch requires a Patchright-compatible Playwright installation")
+    raise LaunchError(_DRIVER_HINT)
 
 
 def _backend_error(exc: Exception) -> LaunchError:
@@ -225,6 +257,80 @@ def _backend_error(exc: Exception) -> LaunchError:
             text = text.split(token, 1)[0].rstrip() + " [proxy details redacted]"
             break
     return LaunchError(f"native Apostate browser launch failed: {text or 'unknown error'}")
+
+
+def _own_driver(target: Any, driver: Any) -> Any:
+    """Make *target* stop the Playwright driver it was created from.
+
+    ``sync_playwright().start()`` installs an event loop in this thread and
+    spawns a driver subprocess. Handing back only the browser leaks both: the
+    driver outlives ``browser.close()``, and the installed loop makes the next
+    sync launch in the same process fail with "Sync API inside the asyncio
+    loop". A script that launches in a loop -- the common shape for this
+    product -- then breaks on its second iteration. So whatever the caller is
+    given closes the driver that produced it.
+    """
+    # A custom or fake backend may return anything, including a plain mapping.
+    # Only a driver-backed object has a close() to chain onto.
+    original = getattr(target, "close", None)
+    if not callable(original):
+        return target
+
+    def close(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return original(*args, **kwargs)
+        finally:
+            try:
+                driver.stop()
+            except Exception:
+                pass
+
+    try:
+        target.close = close
+        # Hold a reference so the driver is not collected while the browser lives.
+        target.apostate_driver = driver
+    except (AttributeError, TypeError):
+        return target
+    return target
+
+
+async def _own_driver_async(target: Any, driver: Any) -> Any:
+    original = getattr(target, "close", None)
+    if not callable(original):
+        return target
+
+    async def close(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await original(*args, **kwargs)
+        finally:
+            try:
+                await driver.stop()
+            except Exception:
+                pass
+
+    try:
+        target.close = close
+        target.apostate_driver = driver
+    except (AttributeError, TypeError):
+        return target
+    return target
+
+
+def _resolve_executable(binary_path: Any, *, cache_dir: Any = None, manifest: Any = None,
+                        downloader: Any = None, target: str | None = None) -> Path:
+    """Return a runnable executable, acquiring the release artifact if needed."""
+    if binary_path is None:
+        return ensure_binary(cache_dir=cache_dir, manifest=manifest,
+                             downloader=downloader, target=target)
+    binary = Path(binary_path).expanduser()
+    if not binary.is_file():
+        raise LaunchError(
+            f"Apostate browser binary was not found: {binary}. Omit binary_path to let "
+            "the package download and verify the release artifact."
+        )
+    if not os.access(binary, os.X_OK):
+        raise LaunchError(f"Apostate browser binary is not executable: {binary}")
+    return binary
 
 
 def launch(*, fingerprint: int | str | None = None, fingerprint_platform: str | None = None,
@@ -243,22 +349,19 @@ def launch(*, fingerprint: int | str | None = None, fingerprint_platform: str | 
                                proxy=proxy, headless=headless, user_data_dir=user_data_dir, args=args)
     plan = _resolve_plan(config, resolver=resolver, catalogue=catalogue,
                          geoip_provider=geoip_provider, geoip_timeout=geoip_timeout)
-    if binary_path is None:
-        binary = ensure_binary(cache_dir=cache_dir, manifest=manifest, downloader=downloader)
-    else:
-        binary = Path(binary_path).expanduser()
-        if not binary.is_file():
-            raise LaunchError(f"Apostate browser binary was not found: {binary}")
-        if not os.access(binary, os.X_OK):
-            raise LaunchError("Apostate browser binary is not executable")
+    # The driver check comes first on purpose. Acquisition is a ~150 MB
+    # download; failing afterwards with "no driver installed" spends the
+    # user's bandwidth to tell them something knowable up front.
     sync_playwright = _load_sync_backend()
+    binary = _resolve_executable(binary_path, cache_dir=cache_dir, manifest=manifest,
+                                 downloader=downloader)
     playwright = sync_playwright().start()
     launch_options = dict(playwright_options)
     launch_options.update(executable_path=str(binary), headless=config.headless, args=_native_args(plan))
     if config.proxy is not None and "proxy" not in launch_options:
         launch_options["proxy"] = _playwright_proxy(config.proxy)
     try:
-        return playwright.chromium.launch(**launch_options)
+        return _own_driver(playwright.chromium.launch(**launch_options), playwright)
     except Exception as exc:
         try:
             playwright.stop()
@@ -300,16 +403,14 @@ def launch_persistent_context(user_data_dir: str | Path, *, context_options: Map
                          catalogue=options.pop("catalogue", None),
                          geoip_provider=options.pop("geoip_provider", None),
                          geoip_timeout=options.pop("geoip_timeout", 10.0))
-    binary_path = options.pop("binary_path", None)
-    if binary_path is None:
-        binary = ensure_binary(cache_dir=options.pop("cache_dir", None),
-                               manifest=options.pop("manifest", None),
-                               downloader=options.pop("downloader", None))
-    else:
-        binary = Path(binary_path).expanduser()
-        if not binary.is_file() or not os.access(binary, os.X_OK):
-            raise LaunchError(f"Apostate browser binary is unavailable or not executable: {binary}")
-    async_api = options.pop("_async", False)
+    # Driver first: see launch(). A missing driver is knowable before spending
+    # a ~150 MB download to discover it.
+    sync_playwright = _load_sync_backend()
+    binary = _resolve_executable(options.pop("binary_path", None),
+                                 cache_dir=options.pop("cache_dir", None),
+                                 manifest=options.pop("manifest", None),
+                                 downloader=options.pop("downloader", None))
+    options.pop("_async", None)
     if options.get("user_data_dir") is not None:
         raise ConfigurationError("user_data_dir is the positional persistent-context path")
     launch_options = dict(context_options or {})
@@ -318,7 +419,6 @@ def launch_persistent_context(user_data_dir: str | Path, *, context_options: Map
                           args=_native_args(plan, persistent=True), user_data_dir=str(path))
     if config.proxy is not None and "proxy" not in launch_options:
         launch_options["proxy"] = _playwright_proxy(config.proxy)
-    sync_playwright = _load_sync_backend()
     playwright = sync_playwright().start()
     try:
         context = playwright.chromium.launch_persistent_context(**launch_options)
@@ -328,7 +428,7 @@ def launch_persistent_context(user_data_dir: str | Path, *, context_options: Map
         except Exception:
             pass
         raise _backend_error(exc) from exc
-    return context
+    return _own_driver(context, playwright)
 
 
 async def launch_async(**options: Any) -> Any:
@@ -341,22 +441,19 @@ async def launch_async(**options: Any) -> Any:
                                user_data_dir=options.pop("user_data_dir", None), args=options.pop("args", None))
     plan = _resolve_plan(config, resolver=options.pop("resolver", None), catalogue=options.pop("catalogue", None),
                          geoip_provider=options.pop("geoip_provider", None), geoip_timeout=options.pop("geoip_timeout", 10.0))
-    binary_path = options.pop("binary_path", None)
-    if binary_path is None:
-        binary = ensure_binary(cache_dir=options.pop("cache_dir", None), manifest=options.pop("manifest", None),
-                               downloader=options.pop("downloader", None))
-    else:
-        binary = Path(binary_path).expanduser()
-        if not binary.is_file() or not os.access(binary, os.X_OK):
-            raise LaunchError(f"Apostate browser binary is unavailable or not executable: {binary}")
+    # Driver first: see launch().
     async_playwright = _load_async_backend()
+    binary = _resolve_executable(options.pop("binary_path", None),
+                                 cache_dir=options.pop("cache_dir", None),
+                                 manifest=options.pop("manifest", None),
+                                 downloader=options.pop("downloader", None))
     playwright = await async_playwright().start()
     launch_options = dict(options)
     launch_options.update(executable_path=str(binary), headless=config.headless, args=_native_args(plan))
     if config.proxy is not None and "proxy" not in launch_options:
         launch_options["proxy"] = _playwright_proxy(config.proxy)
     try:
-        return await playwright.chromium.launch(**launch_options)
+        return await _own_driver_async(await playwright.chromium.launch(**launch_options), playwright)
     except Exception as exc:
         try:
             await playwright.stop()
@@ -390,15 +487,12 @@ async def launch_persistent_context_async(user_data_dir: str | Path, *, context_
                                user_data_dir=path, args=options.pop("args", None))
     plan = _resolve_plan(config, resolver=options.pop("resolver", None), catalogue=options.pop("catalogue", None),
                          geoip_provider=options.pop("geoip_provider", None), geoip_timeout=options.pop("geoip_timeout", 10.0))
-    binary_path = options.pop("binary_path", None)
-    if binary_path is None:
-        binary = ensure_binary(cache_dir=options.pop("cache_dir", None), manifest=options.pop("manifest", None),
-                               downloader=options.pop("downloader", None))
-    else:
-        binary = Path(binary_path).expanduser()
-        if not binary.is_file() or not os.access(binary, os.X_OK):
-            raise LaunchError(f"Apostate browser binary is unavailable or not executable: {binary}")
+    # Driver first: see launch().
     async_playwright = _load_async_backend()
+    binary = _resolve_executable(options.pop("binary_path", None),
+                                 cache_dir=options.pop("cache_dir", None),
+                                 manifest=options.pop("manifest", None),
+                                 downloader=options.pop("downloader", None))
     playwright = await async_playwright().start()
     launch_options = dict(context_options or {})
     launch_options.update(options)
@@ -407,7 +501,8 @@ async def launch_persistent_context_async(user_data_dir: str | Path, *, context_
     if config.proxy is not None and "proxy" not in launch_options:
         launch_options["proxy"] = _playwright_proxy(config.proxy)
     try:
-        return await playwright.chromium.launch_persistent_context(**launch_options)
+        return await _own_driver_async(
+            await playwright.chromium.launch_persistent_context(**launch_options), playwright)
     except Exception as exc:
         try:
             await playwright.stop()

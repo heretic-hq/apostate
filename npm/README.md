@@ -1,38 +1,38 @@
-# apostate
+# @heretic-hq/apostate
 
-Python interface to the Apostate anti-detect Chromium build. A real browser
+Node.js interface to the Apostate anti-detect Chromium build. A real browser
 binary whose fingerprint is modified in C++ at the source level, driven through
-the Playwright API you already use.
+the Playwright or Puppeteer API you already use.
 
 Free and open source. No licence key, no account, no telemetry, no paid tier.
 
 ## Install
 
 ```sh
-pip install apostate
-pip install patchright   # or: pip install playwright
+npm install @heretic-hq/apostate
+npm install patchright   # or: playwright-core, or puppeteer-core
 ```
 
 The browser is not bundled. On first use the package downloads the ~150 MB
 archive for your platform from the GitHub release, checks its SHA-256 against a
-manifest shipped inside the package, extracts it, and reuses it afterwards. You
-do not need `playwright install` — Apostate supplies its own browser.
+manifest shipped inside the package, extracts it, and reuses it afterwards. No
+driver needs to download a browser of its own — Apostate supplies it.
 
 Supported hosts: `macos-arm64`, `linux-x64`, `linux-arm64`, `windows-x64`.
 
 ## Launch
 
-`launch()` returns a Playwright `Browser`. An existing Playwright script works
-with only the import changed.
+`launch()` returns whatever driver you installed: a Playwright `Browser` or a
+Puppeteer `Browser`. An existing script works with only the import changed.
 
-```python
-from apostate import launch
+```javascript
+import { launch } from "@heretic-hq/apostate";
 
-browser = launch()
-page = browser.new_page()
-page.goto("https://example.com")
-print(page.title())
-browser.close()
+const browser = await launch();
+const page = await browser.newPage();
+await page.goto("https://example.com");
+console.log(await page.title());
+await browser.close();
 ```
 
 With no arguments the browser draws a fresh fingerprint seed and composes a
@@ -44,36 +44,37 @@ all agree with each other. Every launch is a different device.
 A fresh seed every launch means a site you revisit sees a different device each
 time. Pass a seed to get the same one back:
 
-```python
-browser = launch(fingerprint=42)
+```javascript
+const browser = await launch({ fingerprint: 42 });
 ```
 
 Same seed, same fingerprint, on every launch and on every machine. This is the
-only thing that makes an identity persist; a persistent `user_data_dir` keeps
+only thing that makes an identity persist; a persistent `userDataDir` keeps
 cookies but does not pin the device.
 
 ### Other options
 
-```python
-browser = launch(
-    fingerprint=42,
-    fingerprint_platform="windows",   # present as a Windows desktop
-    proxy="http://user:pass@host:8080",
-    headless=False,
-    args=["--fingerprint-hardware-concurrency=8"],
-)
+```javascript
+const browser = await launch({
+  fingerprint: 42,
+  fingerprintPlatform: "windows",   // present as a Windows desktop
+  proxy: "http://user:pass@host:8080",
+  headless: false,
+  args: ["--fingerprint-hardware-concurrency=8"],
+});
 ```
 
 | Option | Default | Meaning |
 |---|---|---|
 | `fingerprint` | a fresh random seed | Seed for the whole identity. `"host"` (also `"off"`, `"false"`, `"0"`, `"disable"`, `"disabled"`) inherits the real machine and composes nothing. |
-| `fingerprint_platform` | the build's own platform | `windows`, `macos` or `linux`. Needs that platform's fonts installed — see below. Cannot be combined with host inheritance. |
+| `fingerprintPlatform` | the build's own platform | `windows`, `macos` or `linux`. Needs that platform's fonts installed — see below. Cannot be combined with host inheritance. |
 | `locale`, `timezone` | derived from the seed | Override just these. |
-| `geoip` | `True` | Derive locale and timezone from the proxy's exit IP. |
+| `geoip` | `true` | Derive locale and timezone from the proxy's exit IP. |
 | `proxy` | none | `http://`, `https://`, `socks5://`; credentials are kept out of the command line. |
-| `headless` | `True` | |
-| `user_data_dir` | off-the-record | Persist cookies and storage. |
+| `headless` | `true` | |
+| `userDataDir` | off-the-record | Persist cookies and storage. |
 | `args` | none | Extra switches passed to the browser. |
+| `driver` | first one installed | Force a specific driver by package name. |
 
 ### Fonts for a cross-platform persona
 
@@ -90,32 +91,17 @@ The browser assumes you have done this and does not check. What it will not do
 is claim a face that is absent: the font list a page sees is filtered down from
 what the host actually has, never added to.
 
-Also available: `launch_context()`, `launch_persistent_context()`, and
-`launch_async()` / `launch_context_async()` /
-`launch_persistent_context_async()` for the async API.
-
-### Checking what you got
-
-```python
-browser = launch(fingerprint=42)
-page = browser.new_page()
-print(page.evaluate("navigator.hardwareConcurrency"))
-```
-
-Or ask the browser directly, without launching a session:
-
-```sh
-python -m apostate run -- --fingerprint=42 --fingerprint-explain
-```
+`launchProcess()` returns the raw child process instead, for when no driver is
+installed and you only need the browser running.
 
 ## Command line
 
 ```sh
-python -m apostate install        # download, verify and extract
-python -m apostate path           # print the executable path
-python -m apostate info           # install and manifest state as JSON
-python -m apostate run -- --version
-python -m apostate clear          # delete the cache
+npx apostate install        # download, verify and extract
+npx apostate path           # print the executable path
+npx apostate info           # install and manifest state as JSON
+npx apostate run -- --version
+npx apostate clear          # delete the cache
 ```
 
 ## DRM (Widevine)
@@ -129,10 +115,14 @@ default `launch()` uses a throwaway profile, so there is no CDM and
 If you need DRM, or you want that call to answer the way a real browser does,
 provision a CDM that is already on your machine:
 
-```sh
-python -m apostate provision-drm --list     # what was found
-python -m apostate provision-drm            # install the newest
+```javascript
+import { provisionWidevine } from "@heretic-hq/apostate";
+
+await provisionWidevine({ source: "/path/to/WidevineCdm" });
 ```
+
+The pip package can find one for you: `python -m apostate provision-drm --list`.
+Both packages share one browser install, so provisioning from either serves both.
 
 That copies it into the browser's preinstalled-component directory, where it
 registers at startup for every profile including a throwaway one, with no
@@ -150,7 +140,7 @@ command but have not been verified.
 The install lives under `~/Library/Caches/apostate` on macOS,
 `$XDG_CACHE_HOME/apostate` (or `~/.cache/apostate`) on Linux, and
 `%LOCALAPPDATA%\apostate\cache` on Windows, keyed by Chromium version and
-platform. `APOSTATE_CACHE_DIR` overrides it. The npm package uses the same
+platform. `APOSTATE_CACHE_DIR` overrides it. The pip package uses the same
 layout, so both share one install.
 
 | Variable | Effect |
@@ -174,9 +164,9 @@ key to hold or rotate; verification is an optional extra step:
 gh attestation verify apostate-152.0.7977.83-macos-arm64.tar.zst --repo heretic-hq/apostate
 ```
 
-That needs the archive, so run `python -m apostate install --keep-archive`
-first, or download it from the release page.
+That needs the archive, so run `npx apostate install --keep-archive` first, or
+download it from the release page.
 
 ## Licence
 
-GPL-3.0-only. The browser binary is GPL-3.0-or-later.
+GPL-3.0-or-later.

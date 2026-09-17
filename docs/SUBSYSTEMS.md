@@ -196,13 +196,24 @@ implemented** for a single-hop SOCKS5 chain (patches `0079`, `0080`).
 HTTP, HTTPS, SOCKS4 and multi-proxy chains still refuse QUIC with
 `ERR_NO_SUPPORTED_PROXIES`, because none of them can relay a datagram.
 
-**WebRTC UDP/STUN/TURN remains unsupported** and is not relayed through the
-proxy. The datagram socket is reachable only from `QuicSessionPool`; WebRTC
-constructs its sockets through a different factory and applies its own policy.
-The launcher still adds Chromium's existing `disable_non_proxied_udp` policy
-when a proxy is configured, preventing direct WebRTC UDP fallback; that is
-containment, not proxy routing. WebRTC may fail closed rather than produce
-proxy-exit candidates.
+**WebRTC UDP is relayed through a single-hop SOCKS5 proxy** by patch `0086`.
+Every WebRTC datagram, STUN and TURN included, travels through an RFC 1928 UDP
+association, so a peer sees the proxy as the packet source and the candidates
+the page is given are the proxy's. Patches `0073` and `0074` rewrite only the
+SDP candidate text, which on its own left the candidate stating one address
+while the datagrams came from a real interface.
+
+A proxy that cannot carry a datagram, meaning HTTP, HTTPS, SOCKS4, a multi-proxy
+chain, a PAC script or per-scheme rules, gets no UDP socket at all: no host
+candidate, no srflx candidate and no UDP relay candidate. TCP is unaffected, so
+a TURN server reached over `turn:...?transport=tcp` or `turns:` still produces a
+relay candidate through `P2PSocketTcp` and its proxy-resolving socket factory.
+With no proxy configured the behaviour is unchanged.
+
+`--fingerprint-webrtc-udp=direct` forces direct UDP and is an explicit opt-in to
+publishing the real address; `block` never creates the socket. The relayed path
+also loses the enterprise `WebRtcUdpPortRange` constraint, because the port a
+page sees belongs to the proxy rather than to this host.
 
 Also owns proxy-induced observables that are not protocol features: DNS,
 connect and SSL timings visible through Resource Timing, `Proxy-Connection`

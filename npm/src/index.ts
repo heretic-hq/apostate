@@ -11,10 +11,13 @@ import { isIP } from "node:net";
 import {
   chmod,
   copyFile,
+  cp,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rename,
   rm,
   stat,
@@ -56,11 +59,45 @@ const CATALOGUE_MODEL = "anchors+dispersion";
 const RETIRED_CATALOGUE_KEYS = ["families", "family_count", "distributions"];
 const CATALOGUE_POLICY_FAMILIES = { locale: true, theme: true };
 const HOST_INHERITANCE_SEED = "host";
+// All six are exactly equivalent and case-insensitive in the binary. `off` is
+// what users arriving from other anti-detect wrappers type.
+const HOST_INHERITANCE_SEEDS = {
+  host: true, off: true, false: true, "0": true, disable: true, disabled: true,
+};
 // docs/FINGERPRINTS.md section 7: the compositor is the browser process's and is
-// the only implementation, so a seed or persona cannot be materialised here.
-const COMPOSITION_UNAVAILABLE_MESSAGE = "composition happens in the browser process; the in-binary compositor is not yet wired to this package, so a fingerprint seed or platform persona cannot be materialised here; pass an explicit profile file or inline profile object, or request host inheritance with fingerprint \"host\"";
-const HOST_PERSONA_MESSAGE = "host inheritance disables every layer below it, so a platform persona cannot be applied without the in-binary compositor";
+// the only implementation. The package does not compose; it hands the browser
+// the selectors and lets the browser process compose. Measured on the shipped
+// macos-arm64 artifact at 152.0.7977.83: --fingerprint=42 yields en-GB /
+// Europe/London, a bare launch draws a fresh identity, --fingerprint=host
+// inherits the host.
+const HOST_PERSONA_MESSAGE = "host inheritance disables every layer below it, so a platform persona cannot be applied at the same time";
 const EXPLICIT_PROFILE_WARNING = "explicit profile bypasses composition; its coherence and servability are the author's responsibility, not the catalogue's";
+const ROTATING_SEED_WARNING = "no fingerprint seed given: the browser draws a fresh seed on every launch, so this identity does not persist. Pass fingerprint: <seed> for a stable identity";
+// Every --fingerprint* switch the binary reads. Chromium silently ignores an
+// unknown switch, which would leave a surface host-inherited while the operator
+const FINGERPRINT_SWITCHES = {
+  "--apostate-profile": true,
+  "--fingerprint": true,
+  "--fingerprint-anchor": true,
+  "--fingerprint-device-memory": true,
+  "--fingerprint-explain": true,
+  "--fingerprint-gpu-renderer": true,
+  "--fingerprint-gpu-vendor": true,
+  "--fingerprint-hardware-concurrency": true,
+  "--fingerprint-locale": true,
+  "--fingerprint-platform": true,
+  "--fingerprint-screen-height": true,
+  "--fingerprint-screen-width": true,
+  "--fingerprint-timezone": true,
+  "--fingerprint-webrtc-ip": true,
+  "--fingerprint-webrtc-udp": true,
+};
+// Longest --fingerprint value the binary accepts before exiting non-zero.
+const MAX_SEED_LENGTH = 512;
+// Where a published release lives, used only to build a download URL. The
+// digest always comes from the manifest in this package, so a wrong base URL
+// fails verification rather than installing something else.
+const RELEASE_REPOSITORY = "heretic-hq/apostate";
 
 const PERSONA_ALIASES = new Map([
   ["darwin", "macos"],
@@ -164,6 +201,13 @@ export class BrowserLaunchError extends ApostateError {
   constructor(message, details = {}) {
     super(message, "BROWSER_LAUNCH_FAILED", details);
     this.name = "BrowserLaunchError";
+  }
+}
+
+export class WidevineError extends ApostateError {
+  constructor(message, details = {}) {
+    super(message, "WIDEVINE_NOT_FOUND", details);
+    this.name = "WidevineError";
   }
 }
 
@@ -683,30 +727,50 @@ export function resolveProfile(options = {}) {
   const persona = requestedPlatform === undefined || requestedPlatform === null || requestedPlatform === ""
     ? null
     : normalizePersona(requestedPlatform);
-  if (hasFingerprint && String(fingerprint).trim().toLowerCase() === HOST_INHERITANCE_SEED) {
+  if (hasFingerprint && HOST_INHERITANCE_SEEDS[String(fingerprint).trim().toLowerCase()] === true) {
     if (persona !== null) {
-      throw new ProfileResolutionError(HOST_PERSONA_MESSAGE, { fingerprint_platform: persona }, "APOSTATE_COMPOSITION_UNAVAILABLE");
+      // The binary refuses this combination too. Under host inheritance nothing
+      // is composed, so a persona cannot be honoured, and quietly presenting
+      // the operator's real machine when they asked for a Windows desktop is
+      // the worst outcome available.
+      throw new ProfileResolutionError(HOST_PERSONA_MESSAGE, { fingerprint_platform: persona }, "APOSTATE_HOST_INHERITANCE_PERSONA");
     }
     return {
       profile: null,
       source: "host-inherited",
-      profileId: null,
+      profileId: "host-inherited",
       identity: null,
       catalogueVersion: CATALOGUE_VERSION,
       chromiumVersion: CHROMIUM_VERSION,
       warnings: [],
     };
   }
-  throw new ProfileResolutionError(
-    COMPOSITION_UNAVAILABLE_MESSAGE,
-    {
-      fingerprint: hasFingerprint ? fingerprint : null,
-      fingerprint_platform: persona,
-      catalogue_version: CATALOGUE_VERSION,
-      model: CATALOGUE_MODEL,
-    },
-    "APOSTATE_COMPOSITION_UNAVAILABLE",
-  );
+  // A seed, a persona, or no selector at all: the browser process composes.
+  // The package sends only the selectors and no profile envelope, because an
+  // envelope outranks the seed and would silently suppress composition.
+  return {
+    profile: null,
+    source: "native-composed",
+    profileId: "native-composed",
+    identity: null,
+    catalogueVersion: CATALOGUE_VERSION,
+    chromiumVersion: CHROMIUM_VERSION,
+    warnings: hasFingerprint ? [] : [ROTATING_SEED_WARNING],
+  };
+}
+
+function checkFingerprintSwitches(args) {
+  for (const item of args) {
+    if (typeof item !== "string" || !item.startsWith("--fingerprint")) continue;
+    const name = item.split("=", 1)[0];
+    if (FINGERPRINT_SWITCHES[name] !== true) {
+      throw new ProfileResolutionError(
+        `${name} is not a switch this browser reads; Chromium would ignore it and leave that surface host-inherited. Supported: ${Object.keys(FINGERPRINT_SWITCHES).sort().join(", ")}`,
+        { switch: name },
+        "APOSTATE_UNKNOWN_FINGERPRINT_SWITCH",
+      );
+    }
+  }
 }
 
 
@@ -1088,8 +1152,20 @@ function stripSourceCapture(value) {
 function nativeProfilePayload(profile) {
   return validateProfile(stripSourceCapture(profile ?? {}));
 }
-function buildLaunchArguments(config) {
+// Profile ids the resolver uses for the two native-composition paths. Both
+// deliver their selection through --fingerprint; anything else is an explicit
+// profile delivered through --apostate-profile.
+const NATIVE_SELECTION = { "host-inherited": true, "native-composed": true };
+
+function buildLaunchArguments(config, resolution) {
+  checkFingerprintSwitches(config.args);
   const args = config.args.filter((arg) => !arg.startsWith("--apostate-profile=") && !arg.startsWith("--proxy-server=") && !arg.startsWith("--user-data-dir="));
+  if (NATIVE_SELECTION[resolution?.profileId] === true && !hasSwitch(args, "--fingerprint")) {
+    // The compositor is the browser process's. The package hands it the
+    // selectors; it draws a fresh seed itself when none is given.
+    if (config.fingerprint !== null && config.fingerprint !== undefined) args.push(`--fingerprint=${config.fingerprint}`);
+    if (config.fingerprint_platform !== null && config.fingerprint_platform !== undefined) args.push(`--fingerprint-platform=${config.fingerprint_platform}`);
+  }
   const credentials = launchProxyCredentials(config.proxy);
   const devicePayload = nativeProfilePayload(config.profile);
   if (Object.keys(devicePayload).length > 0 || credentials !== null) {
@@ -1121,8 +1197,16 @@ async function isRegularFile(path) {
   }
 }
 
+// Must agree byte-for-byte with python/apostate/binary.py::_default_cache_dir.
+// A user with both packages installed should share one 600 MB install, not
+// download the browser twice into two different conventions.
 function defaultCacheDir() {
-  return process.env.APOSTATE_CACHE_DIR || join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "apostate");
+  if (process.env.APOSTATE_CACHE_DIR) return process.env.APOSTATE_CACHE_DIR;
+  if (process.platform === "win32") {
+    return join(process.env.LOCALAPPDATA || process.env.TEMP || homedir(), "apostate", "cache");
+  }
+  if (process.platform === "darwin") return join(homedir(), "Library", "Caches", "apostate");
+  return join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "apostate");
 }
 
 function expectedArtifactName(target) {
@@ -1317,12 +1401,34 @@ function safeArchiveMemberName(value) {
   return name;
 }
 
-function safeArchiveMode(mode, name) {
-  const type = mode & 0o170000;
-  if (type !== 0 && type !== 0o100000 && type !== 0o040000) {
-    throw new BinaryExtractionError(`Archive member ${JSON.stringify(name)} is a link or special file.`);
+// `.github/release/artifact-policy.json` says reject every symbolic link. That
+// rule cannot be satisfied and also ship macOS: the macos-arm64 artifact reaches
+// its framework payload through five relative symlinks
+// (Chromium Framework.framework/Versions/Current -> 152.0.7977.83 and four
+// siblings), and a bundle without them does not launch. The property the rule
+// protects is containment, so containment is what is enforced -- a relative
+// target that stays inside the extraction root is accepted, an absolute target
+// or one that climbs out is refused.
+function checkContainedLink(name, link) {
+  const target = String(link ?? "").replaceAll("\\", "/");
+  if (!target || target.startsWith("/") || target.includes("\0") || /^[A-Za-z]:\//.test(target)) {
+    throw new BinaryExtractionError(`Archive member ${JSON.stringify(name)} links outside the archive: ${JSON.stringify(target)}.`);
+  }
+  const parts = name.split("/").slice(0, -1);
+  for (const part of target.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (parts.length === 0) {
+        throw new BinaryExtractionError(`Archive member ${JSON.stringify(name)} links outside the archive: ${JSON.stringify(target)}.`);
+      }
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
   }
 }
+
+
 
 function scanZipArchive(bytes) {
   const minimumEnd = 22;
@@ -1358,74 +1464,89 @@ function scanZipArchive(bytes) {
     if (nextOffset > bytes.length || nextOffset > directoryOffset + directorySize) {
       throw new BinaryExtractionError("ZIP central directory entry is truncated.");
     }
-    const name = bytes.subarray(nameStart, nameStart + nameLength).toString(flags & 0x0800 ? "utf8" : "latin1");
-    safeArchiveMemberName(name);
-    if ((versionMadeBy >>> 8) === 3) safeArchiveMode((bytes.readUInt32LE(offset + 38) >>> 16) & 0xffff, name);
+    const name = safeArchiveMemberName(bytes.subarray(nameStart, nameStart + nameLength).toString(flags & 0x0800 ? "utf8" : "latin1"));
+    if ((versionMadeBy >>> 8) === 3) {
+      // Unix-made zip: only regular files, directories and symlinks may land.
+      const kind = ((bytes.readUInt32LE(offset + 38) >>> 16) & 0xffff) & 0o170000;
+      if (kind !== 0 && kind !== 0o100000 && kind !== 0o040000 && kind !== 0o120000) {
+        throw new BinaryExtractionError(`Archive member ${JSON.stringify(name)} is a special file.`);
+      }
+    }
     offset = nextOffset;
   }
   if (offset > directoryOffset + directorySize) throw new BinaryExtractionError("ZIP central directory extends beyond its declared size.");
 }
 
-async function runTarList(archivePath, destination, verbose) {
-  const attempts = [
-    ["--use-compress-program=zstd"],
-    [],
-  ];
+// bsdtar (macOS, and tar.exe on Windows 10+) autodetects zstd; GNU tar needs to
+// be told. Plain first, because `--use-compress-program=zstd` fails on bsdtar.
+const TAR_COMPRESSION_ATTEMPTS = [[], ["--zstd"], ["--use-compress-program=zstd"]];
+
+async function runTar(operands, cwd, capture = false) {
   let firstError;
-  for (const prefix of attempts) {
+  for (const prefix of TAR_COMPRESSION_ATTEMPTS) {
     try {
-      return await runCommand("tar", [...prefix, verbose ? "-tvf" : "-tf", archivePath], destination, true);
+      return await runCommand("tar", [...prefix, ...operands], cwd, capture);
     } catch (error) {
       firstError ??= error;
     }
   }
-  throw new BinaryExtractionError(`Unable to inspect tar archive before extraction: ${firstError?.message ?? "tar failed"}.`);
+  throw new BinaryExtractionError(`Unable to read tar archive: ${firstError?.message ?? "tar failed"}.`);
 }
 
 async function scanTarArchive(archivePath, destination) {
-  const names = (await runTarList(archivePath, destination, false)).split(/\r?\n/).filter((line) => line.length > 0);
-  const details = (await runTarList(archivePath, destination, true)).split(/\r?\n/).filter((line) => line.length > 0);
+  // `-tf` gives exact names, one per line. `-tvf` gives the mode column and,
+  // for a symlink, `<name> -> <target>`. The target is read by anchoring on the
+  // exact name from `-tf` rather than by parsing the verbose columns.
+  const names = (await runTar(["-tf", archivePath], destination, true)).split(/\r?\n/).filter((line) => line.length > 0);
+  const details = (await runTar(["-tvf", archivePath], destination, true)).split(/\r?\n/).filter((line) => line.length > 0);
   if (names.length !== details.length) throw new BinaryExtractionError("Tar archive listing is ambiguous; refusing extraction.");
-  names.forEach((name, index) => {
-    safeArchiveMemberName(name);
-    const mode = details[index].slice(0, 10);
-    if (!/^[\-dlhbcps][\-rwx]{9}(?:\s|$)/.test(details[index])) {
+  names.forEach((raw, index) => {
+    const name = safeArchiveMemberName(raw);
+    const detail = details[index];
+    if (!/^[\-dlhbcps][\-rwxSsTt]{9}/.test(detail)) {
       throw new BinaryExtractionError("Tar archive member metadata is malformed.");
     }
-    if (mode[0] !== "-" && mode[0] !== "d") safeArchiveMode(0o120000, name);
+    const kind = detail[0];
+    if (kind === "l") {
+      const marker = `${raw} -> `;
+      const at = detail.indexOf(marker);
+      if (at < 0) throw new BinaryExtractionError(`Unable to read the link target of ${JSON.stringify(name)}.`);
+      checkContainedLink(name, detail.slice(at + marker.length));
+      return;
+    }
+    if (kind === "h") {
+      const marker = `${raw} link to `;
+      const at = detail.indexOf(marker);
+      if (at < 0) throw new BinaryExtractionError(`Unable to read the link target of ${JSON.stringify(name)}.`);
+      safeArchiveMemberName(detail.slice(at + marker.length));
+      return;
+    }
+    if (kind !== "-" && kind !== "d") {
+      throw new BinaryExtractionError(`Archive member ${JSON.stringify(name)} is a special file.`);
+    }
   });
 }
 
-async function scanArchive(bytes, archivePath, destination, context) {
-  if (context.artifact.endsWith(".zip")) {
-    scanZipArchive(bytes);
-  } else if (context.artifact.endsWith(".tar.zst")) {
-    await scanTarArchive(archivePath, destination);
-  } else {
-    throw new BinaryExtractionError(`unsupported archive format ${context.artifact}`);
-  }
-}
-
-
 async function defaultExtract(bytes, destination, context) {
   const archivePath = join(destination, context.artifact);
+  const tree = join(destination, "tree");
   await writeFile(archivePath, bytes, { mode: 0o600 });
+  await mkdir(tree, { recursive: true });
   try {
-    await scanArchive(bytes, archivePath, destination, context);
     if (context.artifact.endsWith(".zip")) {
-      await runCommand("unzip", ["-q", archivePath, "-d", destination], destination);
+      scanZipArchive(bytes);
+      // tar.exe reads zip on Windows 10+; unzip is not installed by default.
+      await runTar(["-xf", archivePath, "-C", tree], destination);
     } else if (context.artifact.endsWith(".tar.zst")) {
-      try {
-        await runCommand("tar", ["--use-compress-program=zstd", "-xf", archivePath, "-C", destination], destination);
-      } catch (firstError) {
-        await runCommand("tar", ["-xf", archivePath, "-C", destination], destination).catch(() => { throw firstError; });
-      }
+      await scanTarArchive(archivePath, destination);
+      await runTar(["-xf", archivePath, "-C", tree], destination);
     } else {
-      throw new Error(`unsupported archive format ${context.artifact}`);
+      throw new BinaryExtractionError(`unsupported archive format ${context.artifact}`);
     }
   } finally {
     await rm(archivePath, { force: true });
   }
+  return tree;
 }
 
 function withinDirectory(root, candidate) {
@@ -1433,70 +1554,153 @@ function withinDirectory(root, candidate) {
   return relativePath === "" || (!isAbsolute(relativePath) && relativePath !== ".." && !relativePath.startsWith(".." + sep));
 }
 
+// Suffixes an artifact name may carry, longest first so `.tar.zst` wins.
+const ARCHIVE_SUFFIXES = [".tar.zst", ".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".tar", ".zip", ".zst"];
+
+// Every release archive wraps its tree in a directory named exactly after the
+// archive, `apostate-<version>-<target>/`. Dropping that level keeps the
+// installed path short and the executable's relative path independent of the
+// archive's name. The name must match: hoisting any lone directory would also
+// unwrap an archive whose single top-level entry is meaningful -- `Chromium.app/`
+// is the obvious one -- and silently move the executable.
+async function hoistSingleRoot(root, archiveName) {
+  let expected = archiveName;
+  for (const suffix of ARCHIVE_SUFFIXES) {
+    if (expected.toLowerCase().endsWith(suffix)) {
+      expected = expected.slice(0, -suffix.length);
+      break;
+    }
+  }
+  const entries = await readdir(root, { withFileTypes: true });
+  if (entries.length !== 1 || !entries[0].isDirectory() || entries[0].name !== expected) return root;
+  return join(root, entries[0].name);
+}
+
+// Where the browser executable sits inside each platform's archive.
+const EXECUTABLE_LAYOUT = {
+  "macos-arm64": "Chromium.app/Contents/MacOS/Chromium",
+  "linux-x64": "chrome",
+  "linux-arm64": "chrome",
+  "windows-x64": "chrome.exe",
+};
+const EXECUTABLE_NAMES = {
+  chrome: true, "chrome.exe": true, Chromium: true, chromium: true,
+  "chromium-browser": true, "chromium.exe": true,
+};
+
+// Returns the executable's path RELATIVE to the install root. Chromium cannot
+// run as a lone file -- it needs its framework, ICU data and .pak resources --
+// so the tree stays intact and only the executable's location is recorded.
 async function findExtractedBinary(root, requestedPath, target) {
   if (requestedPath) {
     const candidate = resolve(root, requestedPath);
     if (!withinDirectory(root, candidate) || !(await isRegularFile(candidate))) {
       throw new BinaryExtractionError("Manifest binary_path does not identify a file inside the extracted archive.");
     }
-    return candidate;
+    return relative(root, candidate);
   }
-  const names = target === "windows-x64" ? new Set(["apostate.exe", "apostate"]) : new Set(["apostate"]);
+  const expected = EXECUTABLE_LAYOUT[target];
+  if (expected && await isRegularFile(join(root, expected))) return expected;
   const results = [];
   async function walk(directory) {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) await walk(path);
-      else if (entry.isFile() && names.has(entry.name)) results.push(path);
+      else if (entry.isFile() && EXECUTABLE_NAMES[entry.name] === true) results.push(path);
     }
   }
   await walk(root);
   if (results.length !== 1) {
-    throw new BinaryExtractionError(results.length === 0 ? "Extracted archive does not contain apostate executable." : "Extracted archive contains more than one apostate executable.");
+    throw new BinaryExtractionError(results.length === 0
+      ? `Extracted archive does not contain a recognized browser executable for ${target}.`
+      : `Extracted archive contains ${results.length} candidate executables for ${target}.`);
   }
-  return results[0];
+  return relative(root, results[0]);
 }
+
+// Marker format. Bumped when the on-disk layout changes so an install written
+// by an older package is replaced rather than misread. Format 1 cached a lone
+// copied executable, which could not start.
+const INSTALL_FORMAT = 2;
 
 function cachePaths(cacheDir, target) {
   const root = join(resolve(cacheDir), CHROMIUM_VERSION, target);
   return {
     root,
+    install: join(root, "install"),
     archive: join(root, expectedArtifactName(target)),
-    binary: join(root, target === "windows-x64" ? "apostate.exe" : "apostate"),
-    metadata: join(root, "binary-info.json"),
+    metadata: join(root, "install.json"),
   };
 }
 
 function missingBinary(target, cacheDir, proxy, reason) {
   const details = { target, cache_dir: resolve(cacheDir), proxy: redactProxy(proxy) };
   const suffix = reason ? ` ${reason}` : "";
-  return new MissingBinaryError(`Apostate Chromium ${CHROMIUM_VERSION} for ${target} is not installed in ${details.cache_dir}.${suffix} Run ensureBinary() with a release manifest or provide executablePath.`, details);
+  return new MissingBinaryError(`Apostate Chromium ${CHROMIUM_VERSION} for ${target} is not installed in ${details.cache_dir}.${suffix} Call ensureBinary() to download it, or pass executablePath.`, details);
 }
 
-async function validCachedBinary(paths, target, artifact) {
-  if (!(await isRegularFile(paths.archive)) || !(await isRegularFile(paths.binary)) || !(await isRegularFile(paths.metadata))) return false;
+// A wrong base URL cannot install the wrong thing: the digest always comes from
+// the manifest shipped inside this package, so a mismatch fails verification.
+function artifactUrlFor(manifest, artifact) {
+  if (typeof artifact.url === "string" && artifact.url) return artifact.url;
+  if (typeof artifact.download_url === "string" && artifact.download_url) return artifact.download_url;
+  const name = artifact.artifact;
+  const base = process.env.APOSTATE_DOWNLOAD_BASE_URL || manifest.base_url;
+  if (typeof base === "string" && base) return new URL(name, base.endsWith("/") ? base : `${base}/`).toString();
+  const repository = manifest.repository ?? RELEASE_REPOSITORY;
+  // docs/RELEASE.md step 2: releases are tagged vMAJOR.MINOR.PATCH.
+  const tag = manifest.tag ?? `v${manifest.package_version ?? PACKAGE_VERSION}`;
+  return `https://github.com/${repository}/releases/download/${tag}/${name}`;
+}
+
+async function validCachedInstall(paths, target, artifact) {
+  if (!(await isRegularFile(paths.metadata))) return null;
   try {
     const metadata = JSON.parse(await readFile(paths.metadata, "utf8"));
-    if (!isObject(metadata) || metadata.package_version !== PACKAGE_VERSION || metadata.chromium_version !== CHROMIUM_VERSION || metadata.catalogue_version !== CATALOGUE_VERSION) return false;
-    if (metadata.target !== target || metadata.platform !== target || metadata.artifact !== expectedArtifactName(target)) return false;
-    if (typeof artifact?.sha256 !== "string" || !/^[0-9a-f]{64}$/i.test(artifact.sha256)) return false;
-    if (metadata.sha256?.toLowerCase() !== artifact.sha256.toLowerCase()) return false;
-    const archive = await readFile(paths.archive);
-    await verifyArtifact(archive, artifact);
-    const actualHash = createHash("sha256").update(await readFile(paths.binary)).digest("hex");
-    return typeof metadata.binary_sha256 === "string" && actualHash.toLowerCase() === metadata.binary_sha256.toLowerCase();
+    if (!isObject(metadata) || metadata.format !== INSTALL_FORMAT) return null;
+    if (metadata.package_version !== PACKAGE_VERSION || metadata.chromium_version !== CHROMIUM_VERSION) return null;
+    if (metadata.platform !== target || metadata.artifact !== expectedArtifactName(target)) return null;
+    if (typeof artifact?.sha256 !== "string" || !/^[0-9a-f]{64}$/i.test(artifact.sha256)) return null;
+    if (String(metadata.artifact_sha256).toLowerCase() !== artifact.sha256.toLowerCase()) return null;
+    if (typeof metadata.executable !== "string" || !metadata.executable) return null;
+    const executable = resolve(paths.install, metadata.executable);
+    if (!withinDirectory(paths.install, executable) || !(await isRegularFile(executable))) return null;
+    // Re-hash only the file about to be exec'd. The archive is not retained and
+    // the install was swapped in atomically, so re-reading the whole tree on
+    // every launch would be a cost with no matching threat.
+    const actual = createHash("sha256").update(await readFile(executable)).digest("hex");
+    if (actual.toLowerCase() !== String(metadata.executable_sha256).toLowerCase()) return null;
+    return executable;
   } catch {
-    return false;
+    return null;
   }
+}
+
+async function replaceTree(staged, destination) {
+  let retired = null;
+  try {
+    await lstat(destination);
+    retired = `${destination}.stale-${process.pid}-${Date.now()}`;
+    await rename(destination, retired);
+  } catch {
+    retired = null;
+  }
+  try {
+    await rename(staged, destination);
+  } catch (error) {
+    if (retired) await rename(retired, destination);
+    throw error;
+  }
+  if (retired) await rm(retired, { recursive: true, force: true });
 }
 
 
 export async function ensureBinary(options = {}) {
   if (typeof options === "string") options = { binaryPath: options };
   if (!isObject(options)) throw new TypeError("ensureBinary options must be an object.");
-  const explicitBinary = options.binaryPath ?? options.executablePath;
-  if (explicitBinary !== undefined && explicitBinary !== null) {
+  const explicitBinary = options.binaryPath ?? options.executablePath ?? process.env.APOSTATE_BINARY;
+  if (explicitBinary !== undefined && explicitBinary !== null && explicitBinary !== "") {
     const path = resolve(String(explicitBinary));
     if (!(await isRegularFile(path))) throw missingBinary(normalizeTarget(options.target), options.cacheDir ?? defaultCacheDir(), options.proxy, `The configured binary path ${path} does not exist.`);
     return path;
@@ -1511,20 +1715,23 @@ export async function ensureBinary(options = {}) {
     if (manifestDeclaresUnpublished(manifest)) throw unpublishedArtifactError(manifest);
     throw new UnpublishedArtifactError(`Apostate binary for ${target} is not published for this release.`, { target });
   }
-  if (!options.force && await validCachedBinary(paths, target, artifact)) return paths.binary;
+  if (!options.force) {
+    const cached = await validCachedInstall(paths, target, artifact);
+    if (cached) return cached;
+  }
   let archive;
   try {
-    if (artifact.path || artifact.local_path || artifact.file) {
-      archive = await readFile(resolve(artifact.path ?? artifact.local_path ?? artifact.file));
+    const local = artifact.path ?? artifact.local_path ?? artifact.file;
+    if (local) {
+      archive = await readFile(resolve(String(local)));
     } else {
-      const url = artifact.url ?? artifact.download_url ?? (manifest.base_url ? new URL(artifact.artifact, manifest.base_url).toString() : null);
-      if (!url) throw new BinaryDownloadError(`Release manifest has no download URL for ${target}.`);
-      archive = await downloadUrl(url, options, "binary artifact");
+      archive = await downloadUrl(artifactUrlFor(manifest, artifact), options, "binary artifact");
     }
   } catch (error) {
     if (error instanceof ApostateError) throw error;
     throw new BinaryDownloadError(`Unable to obtain ${artifact.artifact}: ${sanitizeErrorMessage(error?.message ?? error, normalizeProxy(options.proxy))}.`, { proxy: redactProxy(options.proxy) });
   }
+  // Nothing below opens the archive until this returns.
   await verifyArtifact(archive, artifact);
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
   const temporary = await mkdtemp(join(paths.root, ".extract-"));
@@ -1537,23 +1744,43 @@ export async function ensureBinary(options = {}) {
       proxy: normalizeProxy(options.proxy),
       proxy_redacted: redactProxy(options.proxy),
     });
-    const candidate = await findExtractedBinary(temporary, typeof result === "string" ? result : artifact.binary_path ?? artifact.binaryPath, target);
-    await rm(paths.binary, { force: true });
-    await rename(candidate, paths.binary);
-    await writeFile(paths.archive, archive, { mode: 0o600 });
-    if (target !== "windows-x64") await chmod(paths.binary, 0o755);
-    const binarySha256 = createHash("sha256").update(await readFile(paths.binary)).digest("hex");
+    // The extractor's contract is a DIRECTORY holding the whole distribution,
+    // not a path to the executable: Chromium cannot run without its framework
+    // and resources, so there is no single file to return.
+    const extracted = typeof result === "string" ? resolve(temporary, result) : join(temporary, "tree");
+    if (!withinDirectory(temporary, extracted)) {
+      throw new BinaryExtractionError("Extractor returned a path outside the extraction directory.");
+    }
+    if (!(await lstat(extracted).then((info) => info.isDirectory(), () => false))) {
+      throw new BinaryExtractionError("Extractor must return the directory holding the extracted distribution.");
+    }
+    const tree = await hoistSingleRoot(extracted, artifact.artifact);
+    const relativeExecutable = await findExtractedBinary(tree, artifact.binary_path ?? artifact.binaryPath, target);
+    const executable = join(tree, relativeExecutable);
+    if (target !== "windows-x64") await chmod(executable, 0o755);
+    const executableSha256 = createHash("sha256").update(await readFile(executable)).digest("hex");
+    await replaceTree(tree, paths.install);
+    if (["1", "true", "yes", "on"].includes(String(process.env.APOSTATE_KEEP_ARCHIVE ?? "").trim().toLowerCase())) {
+      // Retained only on request: `gh attestation verify` needs the archive,
+      // but keeping 150 MB beside a 600 MB install by default is not a cost a
+      // daily user should pay.
+      await writeFile(paths.archive, archive, { mode: 0o600 });
+    }
     await writeFile(paths.metadata, `${stableStringify({
-      package_version: PACKAGE_VERSION,
-      chromium_version: CHROMIUM_VERSION,
-      catalogue_version: CATALOGUE_VERSION,
-      target,
-      platform: target,
       artifact: artifact.artifact,
-      sha256: artifact.sha256.toLowerCase(),
-      binary_sha256: binarySha256,
+      artifact_sha256: artifact.sha256.toLowerCase(),
+      catalogue_version: CATALOGUE_VERSION,
+      chromium_version: CHROMIUM_VERSION,
+      executable: relativeExecutable,
+      executable_sha256: executableSha256,
+      format: INSTALL_FORMAT,
+      package_version: PACKAGE_VERSION,
+      platform: target,
     })}\n`, { mode: 0o600 });
-    return paths.binary;
+    // Provisioning is an optional extra; a browser that launches without DRM
+    // is far better than no browser at all, so a failure here is not fatal.
+    await applyWidevine(paths.install, target, cacheDir, CHROMIUM_VERSION).catch(() => null);
+    return join(paths.install, relativeExecutable);
   } catch (error) {
     if (error instanceof ApostateError) throw error;
     throw new BinaryExtractionError(`Unable to extract ${artifact.artifact}: ${sanitizeErrorMessage(error?.message ?? error, options.proxy)}.`, { target });
@@ -1569,17 +1796,21 @@ export async function binaryInfo(options = {}) {
   const paths = cachePaths(cacheDir, target);
   const manifest = await readOrDownloadManifest(options);
   const artifact = artifactFromManifest(manifest, target);
+  const cached = artifact ? await validCachedInstall(paths, target, artifact) : null;
   return {
     package_version: PACKAGE_VERSION,
     chromium_version: CHROMIUM_VERSION,
     catalogue_version: CATALOGUE_VERSION,
     target,
+    platform: target,
     artifact: artifact?.artifact ?? expectedArtifactName(target),
-    artifact_url: artifact?.url ?? artifact?.download_url ?? null,
+    artifact_url: artifact ? artifactUrlFor(manifest, artifact) : null,
     sha256: artifact?.sha256 ?? null,
     cache_dir: resolve(cacheDir),
-    binary_path: paths.binary,
-    cache_hit: artifact ? await validCachedBinary(paths, target, artifact) : false,
+    install_dir: paths.install,
+    executable: cached,
+    cache_hit: cached !== null,
+    archive_retained: await isRegularFile(paths.archive),
     available: Boolean(artifact),
   };
 }
@@ -1596,71 +1827,64 @@ export async function clearCache(options = {}) {
 
 function waitForExit(child, timeoutMs = 5000) {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  return new Promise((resolveExit) => {
-    let finished = false;
-    const finish = () => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      resolveExit();
-    };
-    const timer = setTimeout(finish, timeoutMs);
-    child.once("exit", finish);
-  });
+  const { promise, resolve: settle } = Promise.withResolvers();
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timer);
+    settle();
+  };
+  const timer = setTimeout(finish, timeoutMs);
+  child.once("exit", finish);
+  return promise;
 }
 
 function spawnBrowser(binary, args, options) {
-  return new Promise((resolveBrowser, rejectBrowser) => {
-    let child;
-    try {
-      child = spawn(binary, args, {
-        cwd: options.cwd,
-        env: options.env ? { ...process.env, ...options.env } : process.env,
-        stdio: options.stdio ?? "ignore",
-      });
-    } catch (error) {
-      rejectBrowser(new BrowserLaunchError(`Unable to launch Apostate Chromium: ${sanitizeErrorMessage(error?.message ?? error, options.proxy)}.`, { proxy: redactProxy(options.proxy) }));
-      return;
-    }
-    let settled = false;
-    const fail = (error) => {
-      if (settled) return;
-      settled = true;
-      rejectBrowser(new BrowserLaunchError(`Unable to launch Apostate Chromium: ${sanitizeErrorMessage(error?.message ?? error, options.proxy)}.`, { proxy: redactProxy(options.proxy) }));
-    };
-    child.once("error", fail);
-    child.once("spawn", () => {
-      if (settled) return;
-      settled = true;
-      resolveBrowser(child);
+  const { promise, resolve: settle, reject: fail } = Promise.withResolvers();
+  const launchError = (error) => new BrowserLaunchError(
+    `Unable to launch Apostate Chromium: ${sanitizeErrorMessage(error?.message ?? error, options.proxy)}.`,
+    { proxy: redactProxy(options.proxy) },
+  );
+  let child;
+  try {
+    child = spawn(binary, args, {
+      cwd: options.cwd,
+      env: options.env ? { ...process.env, ...options.env } : process.env,
+      stdio: options.stdio ?? "ignore",
     });
+  } catch (error) {
+    fail(launchError(error));
+    return promise;
+  }
+  let settled = false;
+  child.once("error", (error) => {
+    if (settled) return;
+    settled = true;
+    fail(launchError(error));
   });
+  child.once("spawn", () => {
+    if (settled) return;
+    settled = true;
+    settle(child);
+  });
+  return promise;
 }
 
-export class ApostateBrowser {
+// A bare child process with no protocol client, for callers that drive the
+// browser some other way or only want it on screen. `launch()` returns a real
+// Playwright or Puppeteer browser instead.
+export class ApostateProcess {
   constructor(child, executablePath, launchConfig, diagnostics) {
     this.process = child;
     this.executablePath = executablePath;
     this.launchConfig = launchConfig;
     this.diagnostics = diagnostics;
-    this._contexts = new Set();
     this._closed = false;
   }
 
   isConnected() {
     return !this._closed && this.process.exitCode === null && this.process.signalCode === null && !this.process.killed;
-  }
-
-  contexts() {
-    return [...this._contexts];
-  }
-
-  async newContext(options = {}) {
-    if (!this.isConnected()) throw new BrowserLaunchError("Browser is not connected.");
-    if (!isObject(options)) throw new TypeError("Context options must be an object.");
-    const context = new ApostateBrowserContext(this, { ...this.launchConfig, ...options }, false);
-    this._contexts.add(context);
-    return context;
   }
 
   async close() {
@@ -1671,55 +1895,124 @@ export class ApostateBrowser {
       await waitForExit(this.process);
       if (this.process.exitCode === null && this.process.signalCode === null) this.process.kill("SIGKILL");
     }
-    this._contexts.clear();
-  }
-
-  async newPage() {
-    throw new UnsupportedFeatureError("The dependency-free package does not implement a browser protocol client; use a Patchright-compatible client against the launched process.");
   }
 }
 
-export class ApostateBrowserContext {
-  constructor(browser, launchConfig, persistent) {
-    this.browser = browser;
-    this.launchConfig = launchConfig;
-    this.persistent = persistent;
-    this._closed = false;
-  }
+// Drivers in preference order. Patchright is the hardened Playwright fork this
+// API was shaped against; puppeteer-core is last because it ships no browser of
+// its own, which is exactly what is wanted here.
+const DRIVER_MODULES = ["patchright", "playwright", "playwright-core", "puppeteer", "puppeteer-core"];
+const DRIVER_HINT = "no Playwright-compatible or Puppeteer driver is installed. Run one of:\n"
+  + "    npm install patchright\n"
+  + "    npm install playwright-core\n"
+  + "    npm install puppeteer-core\n"
+  + "None of them needs to download a browser: Apostate supplies its own.";
 
-  isClosed() {
-    return this._closed || !this.browser.isConnected();
+async function loadDriver(requested) {
+  const names = requested ? [requested] : DRIVER_MODULES;
+  const failures = [];
+  for (const name of names) {
+    try {
+      // Dynamic by necessity: every driver is an OPTIONAL peer that the user
+      // chooses and that is normally absent. A static import would make this
+      // package hard-depend on all five, fail to resolve at load time when any
+      // is missing, and force a browser download that Apostate supplies
+      // itself. The specifier comes from a fixed registry, not user input.
+      const loaded = await import(name);
+      const api = loaded?.default ?? loaded;
+      // Playwright exposes `chromium.launch`; Puppeteer exposes `launch`.
+      const chromium = api?.chromium ?? loaded?.chromium;
+      if (chromium && typeof chromium.launch === "function") return { name, kind: "playwright", chromium };
+      if (typeof api?.launch === "function") return { name, kind: "puppeteer", puppeteer: api };
+      failures.push(`${name} exposes neither chromium.launch nor launch`);
+    } catch (error) {
+      if (error?.code !== "ERR_MODULE_NOT_FOUND" && error?.code !== "MODULE_NOT_FOUND") {
+        failures.push(`${name}: ${error?.message ?? error}`);
+      }
+    }
   }
-
-  async newPage() {
-    throw new UnsupportedFeatureError("The dependency-free package does not implement a browser protocol client; use a Patchright-compatible client against the launched process.");
-  }
-
-  async close() {
-    if (this._closed) return;
-    this._closed = true;
-    this.browser._contexts.delete(this);
-    if (this.persistent) await this.browser.close();
-  }
+  throw new BrowserLaunchError(failures.length > 0 ? `${DRIVER_HINT}\n${failures.join("\n")}` : DRIVER_HINT);
 }
 
+function playwrightProxy(proxy) {
+  if (!proxy) return undefined;
+  const parsed = new URL(proxy);
+  const result = { server: proxyEndpoint(proxy) };
+  if (parsed.username) result.username = decodeURIComponent(parsed.username);
+  if (parsed.password) result.password = decodeURIComponent(parsed.password);
+  return result;
+}
+
+// Returns a real browser object from whichever driver is installed: a
+// Playwright `Browser` (newPage, newContext, close) or a Puppeteer `Browser`.
+// An existing Playwright or Puppeteer script works by changing only the import.
 export async function launch(options = {}) {
   if (!isObject(options)) throw new TypeError("Launch options must be an object.");
   const prepared = await prepareLaunch(options);
+  // Driver first on purpose. Acquisition is a ~150 MB download; failing
+  // afterwards with "no driver installed" spends the user's bandwidth to tell
+  // them something knowable up front.
+  const driver = await loadDriver(options.driver);
   const binary = options.executablePath ?? options.binaryPath ?? await ensureBinary(options);
-  const args = buildLaunchArguments(prepared.config);
+  const args = buildLaunchArguments(prepared.config, prepared.resolution);
+  const env = {
+    ...(options.env ?? {}),
+    ...(prepared.config.timezone ? { TZ: prepared.config.timezone } : {}),
+  };
+  // The seed and persona switches already carry the identity, so `headless` is
+  // the only launch flag the driver owns; everything else is in `args`.
+  const common = {
+    executablePath: binary,
+    headless: prepared.config.headless,
+    args,
+    env: { ...process.env, ...env },
+  };
+  try {
+    if (driver.kind === "playwright") {
+      const proxy = playwrightProxy(prepared.config.proxy);
+      const browser = prepared.config.user_data_dir
+        ? await driver.chromium.launchPersistentContext(prepared.config.user_data_dir, { ...common, ...(proxy ? { proxy } : {}) })
+        : await driver.chromium.launch({ ...common, ...(proxy ? { proxy } : {}) });
+      browser.apostateDiagnostics = prepared.diagnostics;
+      browser.apostateExecutablePath = binary;
+      return browser;
+    }
+    const browser = await driver.puppeteer.launch({
+      ...common,
+      // Puppeteer takes the user data dir as an option, not a switch.
+      ...(prepared.config.user_data_dir ? { userDataDir: prepared.config.user_data_dir } : {}),
+    });
+    browser.apostateDiagnostics = prepared.diagnostics;
+    browser.apostateExecutablePath = binary;
+    return browser;
+  } catch (error) {
+    if (error instanceof ApostateError) throw error;
+    throw new BrowserLaunchError(`Unable to launch Apostate Chromium through ${driver.name}: ${sanitizeErrorMessage(error?.message ?? error, prepared.config.proxy)}.`, { driver: driver.name, proxy: redactProxy(prepared.config.proxy) });
+  }
+}
+
+// The raw child process, with no protocol client. Use this when no driver is
+// installed and you only need the browser running.
+export async function launchProcess(options = {}) {
+  if (!isObject(options)) throw new TypeError("Launch options must be an object.");
+  const prepared = await prepareLaunch(options);
+  const binary = options.executablePath ?? options.binaryPath ?? await ensureBinary(options);
+  const args = buildLaunchArguments(prepared.config, prepared.resolution);
   const env = {
     ...(options.env ?? {}),
     ...(prepared.config.timezone ? { TZ: prepared.config.timezone } : {}),
   };
   const child = await spawnBrowser(binary, args, { ...options, env });
-  return new ApostateBrowser(child, binary, prepared.config, prepared.diagnostics);
+  return new ApostateProcess(child, binary, prepared.config, prepared.diagnostics);
 }
 
 export async function launchContext(options = {}) {
   const browser = await launch(options);
   try {
-    return await browser.newContext();
+    // A Playwright persistent context is already a context; Puppeteer has none.
+    if (typeof browser.newContext === "function") return await browser.newContext();
+    if (typeof browser.createBrowserContext === "function") return await browser.createBrowserContext();
+    return browser;
   } catch (error) {
     await browser.close();
     throw error;
@@ -1732,13 +2025,130 @@ export async function launchPersistentContext(userDataDir, options = {}) {
   if (options.userDataDir !== undefined && resolve(options.userDataDir) !== resolve(userDataDir)) {
     throw new TypeError("launchPersistentContext received conflicting userDataDir values.");
   }
-  const browser = await launch({ ...options, userDataDir });
-  return new ApostateBrowserContext(browser, browser.launchConfig, true);
+  await mkdir(resolve(userDataDir), { recursive: true });
+  return launch({ ...options, userDataDir });
 }
+
+// --- Widevine DRM provisioning -------------------------------------------
+//
+// Chromium fetches the Widevine CDM from Google at runtime into the profile
+// directory, and Apostate cannot ship it -- third_party/widevine/LICENSE
+// forbids redistribution. An ephemeral profile, which is what launch() uses by
+// default, therefore has no CDM, and requestMediaKeySystemAccess rejects with
+// NotSupportedError where a real user's Chrome resolves. A site reads that in
+// one call.
+//
+// A CDM placed in the browser's preinstalled-component directory registers at
+// startup for every profile, including a fresh ephemeral one, with no network
+// and without writing into the profile. That is the directory the artifact
+// already loads MEIPreload from, and where Google Chrome keeps its own copy,
+// in the same layout with no version subdirectory.
+//
+// Nothing is redistributed: the bytes travel from Google to the operator's
+// machine exactly as they do for Chrome, and this only copies a file already
+// on that machine. It is deliberately NOT part of launch(): on a machine with
+// no CDM there is nothing to copy, and a silent no-op would leave a caller
+// believing DRM works. Measured working on macos-arm64 only; the Linux and
+// Windows layouts come from the documented component paths and are unverified.
+const WIDEVINE_COMPONENT = "WidevineCdm";
+const WIDEVINE_LAYOUT = {
+  "macos-arm64": { subdir: "mac_arm64", library: "libwidevinecdm.dylib", relative: "Chromium.app/Contents/Frameworks/Chromium Framework.framework/Versions/{version}/Libraries" },
+  "linux-x64": { subdir: "linux_x64", library: "libwidevinecdm.so", relative: "" },
+  "linux-arm64": { subdir: "linux_arm64", library: "libwidevinecdm.so", relative: "" },
+  "windows-x64": { subdir: "win_x64", library: "widevinecdm.dll", relative: "" },
+};
+const WIDEVINE_VERIFIED_TARGETS = { "macos-arm64": true };
+
+// Shared with the pip package on purpose: same cache root, same store, so
+// provisioning once serves both.
+function widevineStore(cacheDir) {
+  return join(resolve(cacheDir), WIDEVINE_COMPONENT.toLowerCase());
+}
+
+async function copyWidevine(source, destination, subdir, library) {
+  if (!(await isRegularFile(join(source, "_platform_specific", subdir, library)))) {
+    throw new WidevineError(`${source} does not contain _platform_specific/${subdir}/${library}.`);
+  }
+  const staged = `${destination}.part`;
+  await rm(staged, { recursive: true, force: true });
+  await mkdir(join(staged, "_platform_specific"), { recursive: true });
+  for (const name of ["manifest.json", "LICENSE"]) {
+    if (await isRegularFile(join(source, name))) await copyFile(join(source, name), join(staged, name));
+  }
+  if (!(await isRegularFile(join(staged, "manifest.json")))) {
+    await rm(staged, { recursive: true, force: true });
+    throw new WidevineError(`${source} has no manifest.json; it is not a CDM directory.`);
+  }
+  await cp(join(source, "_platform_specific", subdir), join(staged, "_platform_specific", subdir), { recursive: true });
+  await rm(destination, { recursive: true, force: true });
+  await rename(staged, destination);
+}
+
+// Re-applied after every extraction: `--force` and a Chromium upgrade both
+// replace the install tree, and DRM must not silently vanish when they do.
+async function applyWidevine(install, target, cacheDir, version) {
+  const layout = WIDEVINE_LAYOUT[target];
+  if (!layout) return null;
+  const store = widevineStore(cacheDir);
+  if (!(await isRegularFile(join(store, "_platform_specific", layout.subdir, layout.library)))) return null;
+  // Do not conjure an install tree. Writing into a path that holds no browser
+  // would leave an orphan directory that looks installed and is not.
+  if (!(await lstat(install).then((i) => i.isDirectory(), () => false))) return null;
+  const destination = join(install, layout.relative.replace("{version}", version), WIDEVINE_COMPONENT);
+  await copyWidevine(store, destination, layout.subdir, layout.library);
+  return destination;
+}
+
+export async function provisionWidevine(options = {}) {
+  if (!isObject(options)) throw new TypeError("provisionWidevine options must be an object.");
+  const target = normalizeTarget(options.target);
+  const layout = WIDEVINE_LAYOUT[target];
+  if (!layout) throw new WidevineError(`No Widevine layout is known for ${target}.`, { target });
+  const source = options.source;
+  if (!source) {
+    throw new WidevineError(
+      "provisionWidevine needs source: a WidevineCdm directory already on this machine. "
+      + "The pip package can find one for you (`python -m apostate provision-drm --list`); "
+      + "Chromium writes it into a persistent --user-data-dir after playing DRM video once.",
+      { target });
+  }
+  const cacheDir = options.cacheDir ?? options.cache_dir ?? defaultCacheDir();
+  let chosen = resolve(String(source));
+  if (!(await isRegularFile(join(chosen, "_platform_specific", layout.subdir, layout.library)))) {
+    // The component updater writes a version directory; a bundle has none.
+    const entries = await readdir(chosen, { withFileTypes: true }).catch(() => []);
+    const versioned = entries.filter((e) => e.isDirectory()).map((e) => e.name).sort().reverse();
+    let found = null;
+    for (const name of versioned) {
+      if (await isRegularFile(join(chosen, name, "_platform_specific", layout.subdir, layout.library))) {
+        found = join(chosen, name);
+        break;
+      }
+    }
+    if (!found) throw new WidevineError(`${chosen} does not contain _platform_specific/${layout.subdir}/${layout.library}.`, { target });
+    chosen = found;
+  }
+  const store = widevineStore(cacheDir);
+  await mkdir(dirname(store), { recursive: true });
+  await copyWidevine(chosen, store, layout.subdir, layout.library);
+  const manifestVersion = JSON.parse(await readFile(join(store, "manifest.json"), "utf8")).version ?? null;
+  const paths = cachePaths(cacheDir, target);
+  const installed = await applyWidevine(paths.install, target, cacheDir, CHROMIUM_VERSION);
+  return {
+    platform: target,
+    platform_verified: WIDEVINE_VERIFIED_TARGETS[target] === true,
+    source: chosen,
+    version: manifestVersion,
+    store,
+    installed,
+  };
+}
+export const provision_widevine = provisionWidevine;
 
 // Python-style names are useful when sharing launch code across wrappers.
 export const launch_context = launchContext;
 export const launch_persistent_context = launchPersistentContext;
+export const launch_process = launchProcess;
 export const ensure_binary = ensureBinary;
 export const binary_info = binaryInfo;
 export const clear_cache = clearCache;

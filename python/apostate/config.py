@@ -23,6 +23,36 @@ CATALOGUE_VERSION = 2
 PROFILE_SCHEMA_VERSION = 3
 SUPPORTED_PLATFORMS = frozenset({"windows", "macos", "linux"})
 
+#: Tokens the binary treats as "inherit the host and compose nothing". All six
+#: are exactly equivalent and case-insensitive; ``off`` is what users arriving
+#: from other anti-detect wrappers type, ``host`` is this repository's spelling.
+HOST_INHERITANCE_SEEDS = frozenset({"host", "off", "false", "0", "disable", "disabled"})
+
+#: Every ``--fingerprint*`` switch the binary reads. A misspelled switch is
+#: silently ignored by Chromium, which would present the operator's real
+#: machine while they believed a persona was applied, so an unknown one is
+#: refused here instead of at the far end of a launch.
+FINGERPRINT_SWITCHES = frozenset({
+    "--apostate-profile",
+    "--fingerprint",
+    "--fingerprint-anchor",
+    "--fingerprint-device-memory",
+    "--fingerprint-explain",
+    "--fingerprint-gpu-renderer",
+    "--fingerprint-gpu-vendor",
+    "--fingerprint-hardware-concurrency",
+    "--fingerprint-locale",
+    "--fingerprint-platform",
+    "--fingerprint-screen-height",
+    "--fingerprint-screen-width",
+    "--fingerprint-timezone",
+    "--fingerprint-webrtc-ip",
+    "--fingerprint-webrtc-udp",
+})
+
+#: Longest ``--fingerprint`` value the binary accepts before exiting non-zero.
+MAX_SEED_LENGTH = 512
+
 
 def _json_value(value: Any) -> Any:
     try:
@@ -68,6 +98,13 @@ def host_persona() -> str:
     raise ConfigurationError(f"unsupported host platform: {system or 'unknown'}")
 
 
+def is_host_seed(value: int | str | None) -> bool:
+    """Whether *value* asks the binary to inherit the host instead of composing."""
+    if value is None:
+        return False
+    return str(value).strip().lower() in HOST_INHERITANCE_SEEDS
+
+
 def _normalize_seed(value: int | str | None) -> int | str | None:
     if value is None:
         return None
@@ -75,11 +112,31 @@ def _normalize_seed(value: int | str | None) -> int | str | None:
         if value < 0:
             raise ConfigurationError("fingerprint must be nonnegative")
         return value
-    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", value.strip()):
-        return value.strip()
-    if isinstance(value, str) and value.strip():
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigurationError("fingerprint must be an integer, stable string, or None")
+    seed = value.strip()
+    if len(seed.encode("utf-8")) > MAX_SEED_LENGTH:
+        raise ConfigurationError(
+            f"fingerprint must be at most {MAX_SEED_LENGTH} bytes; the binary rejects a longer seed"
+        )
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", seed):
         raise ConfigurationError("fingerprint string must match [A-Za-z0-9][A-Za-z0-9._:-]*")
-    raise ConfigurationError("fingerprint must be an integer, stable string, or None")
+    return seed
+
+
+def check_fingerprint_switches(args: Any) -> None:
+    """Refuse an unknown ``--fingerprint*`` switch before a process is started."""
+    for item in args:
+        if not isinstance(item, str) or not item.startswith("--fingerprint"):
+            continue
+        name = item.split("=", 1)[0]
+        if name not in FINGERPRINT_SWITCHES:
+            raise ConfigurationError(
+                f"{name} is not a switch this browser reads; Chromium would ignore it and "
+                "leave that surface host-inherited. Supported: "
+                + ", ".join(sorted(FINGERPRINT_SWITCHES))
+            )
+
 
 def _normalize_args(value: Any) -> list[str]:
     if value is None:

@@ -52,25 +52,28 @@ There is no per-call fingerprint randomness. Repeated reads and fresh launches
 with the same resolved profile are expected to be stable. Variation happens at
 the profile-composition boundary.
 
-## Seed lifetime and the default launch
+## The default launch
 
-**With no arguments, a launch composes a profile.** The seed is drawn from OS
-entropy once, written to `<user-data-dir>/apostate/seed`, and reused on every
-later launch that uses the same user-data directory. Host inheritance is no
-longer the default; it is requested explicitly with `--fingerprint=host`.
+A launch with no arguments composes a profile. Every launch draws a fresh seed
+from OS entropy and composes a fresh coherent device, whether or not
+`--user-data-dir` is set. Nothing about the identity is written to disk.
 
 | Launch | Seed source | Result |
 | --- | --- | --- |
-| no arguments | OS entropy, once, then persisted | unique per browser profile |
-| `--fingerprint=<seed>` | the argument | reproducible anywhere |
-| `--fingerprint=host` | none | host inheritance |
+| no arguments | fresh OS entropy, per launch | a new device every launch |
+| `--fingerprint=<seed>` | the argument | the same device anywhere, every launch |
+| `--fingerprint=host` | none | no composition; the host's own values |
 
-Seed lifetime is the user-data directory, not the launch. A new fingerprint on
-every launch of the same browser profile is itself a signal: returning-visitor
-checks, long-lived cookies and storage all expect the machine to stay the same
-machine. An ephemeral user-data directory therefore yields a new identity and a
-persistent one yields a stable identity, which is already what that directory
-means for cookies.
+There is no persisted seed. Earlier builds wrote one to the user-data directory
+and reused it, so relaunching the same directory reproduced the identity. That
+file is gone and the precedence step that read it is gone with it. A stable
+identity comes from `--fingerprint=<seed>`, which reproduces on another machine
+as well, which a file never did.
+
+The practical consequence for automation: Playwright's
+`launch_persistent_context` reuses one user-data directory by design, and under
+this default it presents a different device on every launch. Pass
+`--fingerprint=<seed>` for returning-visitor behaviour.
 
 The profile is fully materialized before the first renderer starts, and nothing
 inside the session varies.
@@ -99,15 +102,15 @@ Field meanings:
 
 | Field | Meaning |
 | --- | --- |
-| `fingerprint` | Integer or string seed for the deterministic compositor. `null` requests the default: a seed drawn once from OS entropy and persisted to `<user-data-dir>/apostate/seed`. The literal `host` requests host inheritance. |
-| `fingerprint_platform` | Platform persona, such as `windows`, `macos`, or `linux`. Opt-in: `null` uses the host's own platform as the persona. It changes OS identity, client hints, fonts, voices, locale, screen geometry and hardware buckets, and it **does not move the GPU cluster** — see below. |
+| `fingerprint` | Seed for the deterministic compositor: an integer, or any printable ASCII up to 512 bytes. `null` requests the default, a fresh seed per launch. The literal `host`, or `off`, `false`, `0`, `disable`, `disabled`, turns composition off. |
+| `fingerprint_platform` | Platform persona: `windows`, `macos` or `linux`. `null` uses the host's own platform. It changes OS identity, client hints, fonts, voices, locale, screen geometry and hardware buckets. It does not move the GPU cluster; see below. |
 | `profile` | Explicit profile file or inline profile object. `null` means no explicit profile. |
 | `locale` | Explicit locale or Accept-Language policy. `null` means use the precedence rules below. |
 | `timezone` | Explicit IANA timezone. `null` means use the precedence rules below. |
 | `geoip` | When `true`, resolve locale and timezone from the observed network exit before launch. |
 | `proxy` | Proxy URL and credentials, if any. Credentials are used for launch and are never written to diagnostics or logs. |
 | `headless` | Whether Chromium is launched headless. |
-| `user_data_dir` | Persistent profile directory. It is also the seed's lifetime. `null` selects the integration's temporary-directory policy, which means a new identity per launch. |
+| `user_data_dir` | Persistent profile directory for cookies, storage and history. It does not hold the identity. `null` selects the integration's temporary-directory policy. |
 | `args` | Additional Chromium arguments. Integrations must preserve the canonical profile and localization semantics when adding them. |
 
 Package APIs may expose idiomatic camelCase aliases, but aliases map to this
@@ -122,9 +125,10 @@ Profile selection is resolved in this order, from strongest to weakest:
 ```text
 explicit profile file
   > inline profile object
+  > host mode
+  > per-field override switches
   > fingerprint seed plus platform persona
-  > persisted seed for this user-data-dir
-  > newly drawn seed, persisted
+  > a fresh seed drawn for this launch
 ```
 
 An explicit profile file is validated before launch and **bypasses
@@ -206,89 +210,86 @@ The schema groups fields as follows:
 | `gpu`, `gl_limits`, `gl_extensions`, `gl_precisions` | Renderer/vendor identity, WebGL limits, extensions and shader precision | These are native target inputs. Limits are capped by native capability; unsupported extensions cannot be added. Exact equality requires native behavior validation, not renderer identity alone. |
 | `webgpu` | Adapter vendor, architecture, features, limits | Native target inputs. Features and limits are intersected with the native adapter; unsupported capabilities are not invented. |
 | `locale`, `theme`, `input` | Timezone, language list, color scheme, pointer/hover | Locale and timezone can be overridden by the launch precedence rules. |
-| `media`, `speech` | Hardware decode codecs, device counts, device labels and group pairing, registered voices | Names do not create codecs, devices, or speech providers. Network voices are a build capability, not a profile value. |
-| `keyboard`, `fonts` | Layout map, generic family mappings, enumeration allowlist, provisioned font directory | Enumeration is subtractive and always servable; addition requires the font files, either present on the host or provisioned. Unmeasured font and keyboard data stays inherited. |
+| `media`, `speech` | Hardware decode codecs, device counts, registered voices | Names do not create codecs, devices, or speech providers. `media.hw_decode_codecs` sets what `MediaCapabilities` reports as `powerEfficient` and deliberately does not touch `supported`, which answers from the decoders this build actually has. Device counts are a floor: inputs are added to reach the count and the host's own devices are never removed. Network voices are a build capability, not a profile value. |
+| `keyboard`, `fonts` | Layout map, generic family mappings, enumeration allowlist | Enumeration only ever removes families; adding one needs the font file on the machine, which the operator installs and the browser assumes is done. See [docs/FONTS.md](FONTS.md). Unmeasured font and keyboard data stays inherited. |
+| `network` | `effective_type`, `http_rtt_ms`, `downlink_mbps`, `save_data` | The emitter clamps `http_rtt_ms` into the band Chromium derives `effective_type` from and floors `downlink_mbps` at that type's own typical throughput, so the pair cannot contradict itself. `save_data` also drives the `Save-Data` request header and the `prefers-reduced-data` media feature. |
+| `battery` | `present`, `charging`, `level`, `charging_time_seconds`, `discharging_time_seconds` | `present: false` reports what a real desktop reports: charging true, level 1.0, `chargingTime` 0, `dischargingTime` `Infinity`. The API stays exposed either way, because hiding it is what desktop Chrome does not do. Presence is conditioned on the panel axis, which is what encodes a laptop display. |
 
 A profile does not replay opaque canvas or audio bytes. Those surfaces are
 served by native Chromium emitters using validated inputs. Where the native
 implementation cannot honor a profile value, the value remains constrained by
 native capability or is inherited; it is not fabricated.
 
-### Anchor validation status
+### Anchors and what selecting one claims
 
-Selecting an anchor supplies native target inputs; it does not claim that every
-resulting observable is physically equivalent on a host that is not the
-reference device. An anchor is WebGL-validated only after a native run checks
-the full behavior cluster: vendor and renderer identity, extension exposure,
-numeric limits, shader precision, and falsification boundaries such as
-allocations and shader compilation that exercise the reported values. A renderer
-string or schema validity alone is insufficient. Native caps, feature
-intersections and inherited values make the affected surfaces limited or
-provisional until that run passes.
+Selecting an anchor supplies the GPU capability inputs. It does not claim that
+every resulting observable matches the reference device on a host that is not
+that device. Native limits, feature intersections and inherited values can all
+leave a surface below the anchor's own measurement, and `--fingerprint-explain`
+names those.
 
-Two anchors in the current catalogue were measured on a Chromium other than the
-release pin, and each carries a `build_caveat` recording it. Capability tables
-are build-bound, so equality of those clusters to a pinned-build capture is not
-established by that evidence, and the resolver surfaces the caveat as a warning.
+Three anchors in the current catalogue were measured on a Chromium other than
+152.0.7977.83, and each carries a `build_caveat` recording it. Capability tables
+move between builds, so those three clusters can differ from this binary in
+version-bearing fields. The resolver reports the caveat as a warning.
 
-## Provenance classes
+## Where a value came from
 
-Dispersion options, anchors, profile reports, and release evidence use these
-classes:
+Every dispersion option, anchor and profile report carries one of these labels,
+and `--fingerprint-explain` prints it per surface:
 
-- `physical-ground-truth`: a direct, consented capture from a physical device.
-- `compatibility-capture`: our collector measured a profile emitted by an
-  external compatibility runtime. **No catalogue entry carries this class any
-  more.** Every entry that did was retired with catalogue version 1, because
-  across all fourteen families the WebGL1 capability digest, the WebGL2
-  capability digest and the canvas pixel digest were each a single shared value
-  spanning supposedly distinct Intel, NVIDIA, AMD and Apple GPUs.
-- `catalogue-value`: a normalized value or combination authored from platform
-  release history and constrained by Chromium and platform rules. Authored, not
-  measured, and labelled as such in each option's own `note`.
-- `native-derived`: a value emitted by the current Apostate/Chromium build from
-  source inputs. Assert-only when it appears in a profile.
-- `proxy-derived`: a value determined at launch from the actual network exit.
-- `host-inherited`: a value intentionally left to the host.
+- `physical-ground-truth`: a consented capture from a physical device.
+- `catalogue-value`: a value authored from platform release history and
+  constrained by Chromium and platform rules. Authored rather than measured, and
+  each option says so in its own `note`.
+- `native-derived`: a value this build emits from its own source inputs.
+- `proxy-derived`: a value resolved at launch from the network exit.
+- `host-inherited`: a value left to the host.
+- `compatibility-capture`: a value our collector measured from another
+  runtime's output rather than from a physical device. Exactly one entry carries
+  it, the software-rasteriser anchor `linux-swiftshader-google-6922d61bab83`,
+  which was captured from a stock Chromium and claims no hardware.
 
-A composed profile combines more than one class. Reporting must preserve those
-classifications instead of collapsing them into a claim of physical hardware
-authenticity. Public catalogue data contains Apostate-owned, normalized values
-only; raw third-party fingerprint corpora are not part of the product.
+A composed profile mixes several of these. The report keeps them apart rather
+than presenting the whole profile as a measured machine. The catalogue holds
+normalized values authored here; it does not redistribute third-party
+fingerprint corpora.
+
+That label used to mean something worse and was cleared out once. Fourteen
+catalogue entries carried it under catalogue version 1 and all fourteen were
+removed: the WebGL1 capability digest, the WebGL2 capability digest and the
+canvas pixel digest were each a single shared value across supposedly distinct
+Intel, NVIDIA, AMD and Apple GPUs. They were identity-string swaps taken on one
+Mac. The one surviving use is a software rasteriser measured from stock
+Chromium, where "not a physical device" is the accurate description rather than
+a euphemism.
 
 ## Composition limitations
 
-Composition broadens the set of presentable machines enormously — the dispersion
-space is combinatorially large while every point in it stays a machine someone
-could own — but it has explicit limits:
+The dispersion space is large and every point in it is a machine someone could
+own, but composition has hard limits. [docs/LIMITATIONS.md](LIMITATIONS.md) is
+the user-facing version of this list.
 
-1. A `catalogue-value` option is authored from platform release history. It is
-   selectable evidence, not a measurement, and it does not become one by being
-   drawn.
-2. A composed profile is not a promise that the host owns the corresponding GPU,
-   display, fonts, audio stack, or codec hardware.
-3. **Native capability is a ceiling.** WebGL/WebGPU limits cannot exceed the
-   active backend, extensions and features cannot be added, and media claims
+1. A `catalogue-value` option is authored from platform release history. Drawing
+   it does not turn it into a measurement.
+2. A composed profile does not claim the host owns the corresponding GPU,
+   display, fonts, audio stack or codec hardware.
+3. Native capability is a ceiling. WebGL and WebGPU limits cannot exceed the
+   active backend, extensions and features cannot be added, and a media claim
    cannot create a decoder or provider that is absent.
-4. **Capacity is only ever reduced.** A profile may claim fewer cores than the
-   host has, never more, and the same holds for memory, GPU limits, codec
-   support, font families, speech voices, and display area relative to window
-   bounds. The reason is falsifiability: a page can measure parallel throughput,
-   allocate until it fails, compile a shader at the advertised limit, or ask a
-   voice to speak. A claim below host capability survives every one of those
-   probes; a claim above it fails the first. Options the host cannot serve are
-   dropped before the draw, which changes the realised distribution and is
-   reported rather than hidden.
-5. Canvas, text, audio, font metrics, speech providers, and other native
-   surfaces can remain host-inherited or differ when the required native
-   resources are unavailable. The profile must report that limitation rather
-   than add synthetic output.
-6. Geographic localization never selects device traits. A proxy-derived timezone
-   does not imply regional fonts, voices, or hardware.
-
-These rules make a composed profile useful for compatibility testing and
-repeatable launches without representing it as an independently measured
-physical computer.
+4. Capacity only ever goes down. A profile may claim fewer cores than the host
+   has, never more, and the same holds for memory, GPU limits, codec support,
+   font families, speech voices, and display area against window bounds. A page
+   can measure parallel throughput, allocate until allocation fails, compile a
+   shader at the advertised limit, or ask a voice to speak; a claim below host
+   capability survives all of those and a claim above it fails the first.
+   Options the host cannot serve are dropped before the draw, so a small host
+   draws from a smaller set than a large one.
+5. Canvas, text, audio, font metrics and speech providers can stay
+   host-inherited when the native resources are missing. The profile reports
+   that rather than adding synthetic output.
+6. Geography selects locale and timezone only. A proxy-derived timezone does not
+   imply regional fonts, voices or hardware.
 
 ## Where composition runs
 
@@ -353,27 +354,20 @@ const browser = await launch({
 
 ### Direct CLI
 
-The following is the planned direct-CLI shape of the canonical contract:
+The binary takes the same configuration as switches:
 
 ```bash
-apostate \
+./chrome \
   --fingerprint=12345 \
   --fingerprint-platform=windows \
-  --fingerprint-locale=en-US \
+  --fingerprint-locale=en-US,en \
   --fingerprint-timezone=America/New_York \
   --proxy-server=http://proxy:8080
 ```
 
-These seed and persona switches are **not implemented in the current
-baseline**. The existing native profile entry point is `--apostate-profile`, and
-the in-binary compositor that backs `--fingerprint` is in flight. The example
-documents the required end state and must not be read as evidence that the
-native binary currently accepts these switches. The packages likewise do not
-yet call the binary to materialize a profile; that hand-off lands with the
-compositor patch, not before.
+[docs/FLAGS.md](FLAGS.md) is the full switch reference.
 
-The required package surface is Patchright-compatible Playwright behavior. The
-initial entry points are:
+The package entry points are:
 
 | Shared operation | Python | Node.js |
 | --- | --- | --- |
@@ -384,8 +378,9 @@ initial entry points are:
 | Binary metadata | `binary_info` | `binaryInfo` |
 | Cache maintenance | `clear_cache` | `clearCache` |
 
-Humanized input, Puppeteer, .NET bindings, GUI management, and cloud profile
-synchronization are not part of the initial contract.
+The package surface is Patchright-compatible Playwright behaviour. There are no
+.NET bindings, no Puppeteer adapter, no GUI profile manager and no cloud profile
+sync. `humanize: true` is rejected rather than accepted as a no-op.
 
 ## Validation
 
@@ -405,5 +400,5 @@ python3 scripts/profile_resolver.py --resolve --fingerprint=12345 \
   --fingerprint-platform=windows
 ```
 
-The release gate and its current status are documented in
-[`docs/RELEASE.md`](RELEASE.md).
+Switches are documented in [docs/FLAGS.md](FLAGS.md) and the residuals a profile
+cannot close are in [docs/LIMITATIONS.md](LIMITATIONS.md).

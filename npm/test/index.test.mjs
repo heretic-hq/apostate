@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readdir, readlink, writeFile } from "node:fs/promises";
 import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import {
@@ -14,6 +14,9 @@ import {
   UnpublishedArtifactError,
   ensureBinary,
   launch,
+  launchProcess,
+  provisionWidevine,
+  WidevineError,
   loadCatalogue,
   resolveProfile,
   toCanonicalLaunchConfig,
@@ -203,31 +206,42 @@ test("rejects a catalogue that disagrees with the package or still carries the r
   }
 });
 
-test("fails closed instead of composing a profile or resolving a catalogue id", () => {
-  for (const options of [
-    {},
-    { fingerprint: 12345 },
-    { fingerprintPlatform: "windows" },
-    { fingerprint: "seed:stable-01", fingerprintPlatform: "macos" },
-    { fingerprint: "host", fingerprintPlatform: "windows" },
-  ]) {
-    assert.throws(() => resolveProfile(options), (error) => {
-      assert.ok(error instanceof ProfileResolutionError);
-      assert.equal(error.code, "APOSTATE_COMPOSITION_UNAVAILABLE");
-      return true;
-    });
+test("hands a seed or persona to the browser process instead of refusing", () => {
+  // The switches exist in the shipped binary. Measured on macos-arm64
+  // 152.0.7977.83: --fingerprint=42 yields en-GB / Europe/London and repeats
+  // across launches; a bare launch draws a fresh identity each time.
+  for (const options of [{}, { fingerprint: 12345 }, { fingerprintPlatform: "windows" },
+                         { fingerprint: "seed:stable-01", fingerprintPlatform: "macos" }]) {
+    const resolution = resolveProfile(options);
+    assert.equal(resolution.source, "native-composed");
+    assert.equal(resolution.profileId, "native-composed");
+    // The package composes nothing, so it sends no envelope: an envelope
+    // outranks the seed and would suppress the browser's own composition.
+    assert.equal(resolution.profile, null);
   }
-  assert.throws(() => resolveProfile({ fingerprint: 12345 }), /in-binary compositor is not yet wired to this package/);
+  // Only a bare launch warns, because only a bare launch rotates.
+  assert.match(resolveProfile({}).warnings.join(" "), /does not persist/);
+  assert.deepEqual(resolveProfile({ fingerprint: 12345 }).warnings, []);
+
+  // Host inheritance composes nothing, so a persona cannot be honoured.
+  assert.throws(() => resolveProfile({ fingerprint: "host", fingerprintPlatform: "windows" }), (error) => {
+    assert.ok(error instanceof ProfileResolutionError);
+    assert.equal(error.code, "APOSTATE_HOST_INHERITANCE_PERSONA");
+    return true;
+  });
+  // Every spelling the binary accepts for host inheritance is accepted here.
+  for (const token of ["host", "off", "false", "0", "disable", "DISABLED"]) {
+    const host = resolveProfile({ fingerprint: token });
+    assert.equal(host.profile, null);
+    assert.equal(host.source, "host-inherited");
+  }
+  // Retired catalogue ids stay refused: there is no such thing to resolve.
   assert.throws(() => resolveProfile({ profileId: "retired-id" }), (error) => {
     assert.ok(error instanceof ProfileResolutionError);
     assert.equal(error.code, "APOSTATE_CATALOGUE_PROFILE_IDS_RETIRED");
     assert.match(error.message, /composes a profile from anchors and dispersion/);
     return true;
   });
-  const host = resolveProfile({ fingerprint: "host" });
-  assert.equal(host.profile, null);
-  assert.equal(host.source, "host-inherited");
-  assert.equal(host.profileId, null);
 });
 
 test("rejects explicit profile and profile-file platform mismatches", async () => {
@@ -259,7 +273,7 @@ test("strips source_capture and applies timezone and WebRTC proxy policy", async
   try {
     await writeFile(executable, "#!/usr/bin/env node\nimport { writeFileSync } from \"node:fs\";\nwriteFileSync(process.env.APOSTATE_ARGV_PATH, JSON.stringify({ argv: process.argv.slice(2), timezone: process.env.TZ }));\nsetTimeout(() => {}, 10000);\n");
     await chmod(executable, 0o755);
-    const browser = await launch({
+    const browser = await launchProcess({
       executablePath: executable,
       profile,
       fingerprintPlatform: "macos",
@@ -326,7 +340,7 @@ test("geoip resolves through an authenticated HTTP proxy without leaking credent
     await chmod(executable, 0o755);
     const targetUrl = `http://127.0.0.1:${targetServer.address().port}/geoip`;
     const proxyUrl = `http://127.0.0.1:${proxyServer.address().port}`;
-    const browser = await launch({
+    const browser = await launchProcess({
       executablePath: executable,
       profile: { id: "geoip-fixture", platform: { name: "macOS" } },
       fingerprintPlatform: "macos",
@@ -447,17 +461,24 @@ test("accepts scalar release manifest and rejects tampered cache state", async (
         downloads += 1;
         return archive;
       },
+      // An extractor returns the DIRECTORY holding the distribution. Chromium
+      // needs its resources beside the executable, so there is no single file
+      // to hand back.
       extract: async (_bytes, destination) => {
         extracts += 1;
-        const path = join(destination, "apostate");
-        await writeFile(path, "binary bytes");
-        return path;
+        const tree = join(destination, "tree");
+        await mkdir(join(tree, "resources"), { recursive: true });
+        await writeFile(join(tree, "chrome"), "binary bytes");
+        await writeFile(join(tree, "resources", "en-US.pak"), "pak bytes");
+        return tree;
       },
     };
     const binary = await ensureBinary(options);
     assert.equal(downloads, 1);
     assert.equal(extracts, 1);
     assert.equal(await readFile(binary, "utf8"), "binary bytes");
+    // The whole tree is installed, not just the executable.
+    assert.equal(await readFile(join(dirname(binary), "resources", "en-US.pak"), "utf8"), "pak bytes");
 
     await ensureBinary(options);
     assert.equal(downloads, 1, "verified cache should avoid a second download");
@@ -470,17 +491,43 @@ test("accepts scalar release manifest and rejects tampered cache state", async (
     await rm(cacheDir, { recursive: true, force: true });
   }
 });
-test("default ZIP extraction rejects traversal and symlink members before writing", async () => {
+
+test("an extractor must return a directory, not the executable", async () => {
+  const cacheDir = await mkdtemp(join(tmpdir(), "apostate-node-extract-contract-"));
+  try {
+    const archive = Buffer.from("archive bytes");
+    await assert.rejects(
+      ensureBinary({
+        target,
+        cacheDir,
+        manifest: releaseManifest(archive),
+        download: async () => archive,
+        extract: async (_bytes, destination) => {
+          const path = join(destination, "chrome");
+          await writeFile(path, "binary bytes");
+          return path;
+        },
+      }),
+      (error) => error instanceof BinaryExtractionError && /must return the directory/.test(error.message),
+    );
+  } finally {
+    await rm(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test("ZIP extraction refuses traversal and escaping links before writing", async () => {
   const cacheDir = await mkdtemp(join(tmpdir(), "apostate-node-zip-safety-"));
   try {
-    for (const malicious of [
-      storedZip([{ name: "../outside", data: "escape" }, { name: "apostate", data: "binary" }]),
-      storedZip([{ name: "link", data: "apostate", mode: 0o120777 }, { name: "apostate", data: "binary" }]),
+    for (const [label, malicious] of [
+      ["traversal", storedZip([{ name: "../outside", data: "escape" }, { name: "chrome.exe", data: "binary" }])],
+      ["escaping-link", storedZip([{ name: "link", data: "../../outside", mode: 0o120777 }, { name: "chrome.exe", data: "binary" }])],
+      ["absolute-link", storedZip([{ name: "link", data: "/etc/passwd", mode: 0o120777 }, { name: "chrome.exe", data: "binary" }])],
     ]) {
       const manifest = releaseManifest(malicious, "windows-x64");
       await assert.rejects(
         ensureBinary({ target: "windows-x64", cacheDir, manifest, download: async () => malicious }),
         (error) => error instanceof BinaryExtractionError,
+        label,
       );
     }
     assert.equal(await readFile(join(cacheDir, "outside"), "utf8").catch(() => null), null);
@@ -489,19 +536,37 @@ test("default ZIP extraction rejects traversal and symlink members before writin
   }
 });
 
-test("default tar extraction rejects link members before writing", async () => {
+test("tar extraction keeps a contained link and refuses an escaping one", async () => {
   const cacheDir = await mkdtemp(join(tmpdir(), "apostate-node-tar-safety-"));
   try {
-    const malicious = tarArchive([
-      { name: "apostate", data: "binary" },
-      { name: "link", type: "2", linkname: "../outside" },
-    ]);
-    const manifest = releaseManifest(malicious, target);
-    await assert.rejects(
-      ensureBinary({ target, cacheDir, manifest, download: async () => malicious }),
-      (error) => error instanceof BinaryExtractionError,
-    );
+    for (const [label, linkname] of [["escaping", "../outside"], ["absolute", "/etc/passwd"]]) {
+      const malicious = tarArchive([
+        { name: "chrome", data: "binary" },
+        { name: "link", type: "2", linkname },
+      ]);
+      await assert.rejects(
+        ensureBinary({ target, cacheDir, manifest: releaseManifest(malicious, target), download: async () => malicious }),
+        (error) => error instanceof BinaryExtractionError,
+        label,
+      );
+    }
     assert.equal(await readFile(join(cacheDir, "outside"), "utf8").catch(() => null), null);
+
+    // The macOS bundle reaches its framework through five relative symlinks, so
+    // prohibition is not an option. Containment is what is enforced, and a
+    // contained link must survive extraction intact.
+    const benign = tarArchive([
+      { name: "chrome", data: "binary" },
+      { name: "nested/", type: "5" },
+      { name: "nested/current", type: "2", linkname: "../chrome" },
+    ]);
+    const binary = await ensureBinary({
+      target, cacheDir, manifest: releaseManifest(benign, target), download: async () => benign,
+    });
+    const link = join(dirname(binary), "nested", "current");
+    assert.equal((await lstat(link)).isSymbolicLink(), true);
+    assert.equal(await readlink(link), "../chrome");
+    assert.equal(await readFile(link, "utf8"), "binary");
   } finally {
     await rm(cacheDir, { recursive: true, force: true });
   }
@@ -533,6 +598,65 @@ test("launch reports an unpublished package before fabricating a browser", async
     await assert.rejects(
       launch({ target, cacheDir, geoip: false, fingerprint: "host" }),
       (error) => error instanceof UnpublishedArtifactError,
+    );
+  } finally {
+    await rm(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test("provisioned Widevine survives a forced reinstall", async () => {
+  // The CDM is stored outside the install tree precisely so that --force and a
+  // Chromium upgrade, which both replace that tree, do not silently remove DRM
+  // and turn a working launch into a NotSupportedError a site reads in one call.
+  const cacheDir = await mkdtemp(join(tmpdir(), "apostate-node-widevine-"));
+  try {
+    const archive = Buffer.from("archive bytes");
+    const options = {
+      target: "macos-arm64",
+      cacheDir,
+      manifest: releaseManifest(archive, "macos-arm64"),
+      download: async () => archive,
+      extract: async (_bytes, destination) => {
+        const tree = join(destination, "tree");
+        await mkdir(join(tree, "Chromium.app/Contents/MacOS"), { recursive: true });
+        await writeFile(join(tree, "Chromium.app/Contents/MacOS/Chromium"), "binary bytes");
+        return tree;
+      },
+    };
+    await ensureBinary(options);
+
+    // A CDM in the component-updater layout, i.e. with a version directory.
+    const source = join(cacheDir, "fetched", "WidevineCdm", "4.10.3050.0");
+    await mkdir(join(source, "_platform_specific", "mac_arm64"), { recursive: true });
+    await writeFile(join(source, "_platform_specific", "mac_arm64", "libwidevinecdm.dylib"), "cdm");
+    await writeFile(join(source, "manifest.json"), JSON.stringify({ version: "4.10.3050.0" }));
+
+    const result = await provisionWidevine({
+      target: "macos-arm64", cacheDir, source: join(cacheDir, "fetched", "WidevineCdm"),
+    });
+    assert.equal(result.version, "4.10.3050.0");
+    assert.ok(result.installed, "a present install must receive the CDM");
+    const library = join(result.installed, "_platform_specific", "mac_arm64", "libwidevinecdm.dylib");
+    assert.equal(await readFile(library, "utf8"), "cdm");
+    // No version directory: the browser reads it from manifest.json, and
+    // Google Chrome's own bundled copy has none.
+    assert.deepEqual((await readdir(result.installed)).sort(), ["_platform_specific", "manifest.json"]);
+
+    await ensureBinary({ ...options, force: true });
+    assert.equal(await readFile(library, "utf8"), "cdm", "reinstall must re-apply the CDM");
+  } finally {
+    await rm(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test("Widevine provisioning refuses a directory with no library", async () => {
+  const cacheDir = await mkdtemp(join(tmpdir(), "apostate-node-widevine-bad-"));
+  try {
+    const empty = join(cacheDir, "WidevineCdm");
+    await mkdir(empty, { recursive: true });
+    await assert.rejects(
+      provisionWidevine({ target: "macos-arm64", cacheDir, source: empty }),
+      (error) => error instanceof WidevineError && error.code === "WIDEVINE_NOT_FOUND",
     );
   } finally {
     await rm(cacheDir, { recursive: true, force: true });

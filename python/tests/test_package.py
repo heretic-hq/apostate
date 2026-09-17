@@ -23,6 +23,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
+import apostate.resolver as resolver_module  # noqa: E402
 from apostate import (  # noqa: E402
     CATALOGUE_VERSION,
     CHROMIUM_VERSION,
@@ -32,6 +33,7 @@ from apostate import (  # noqa: E402
     LaunchError,
     ProfileError,
     UnpublishedArtifactError,
+    UnsupportedArchiveError,
     launch_async,
     launch_persistent_context,
     load_catalogue,
@@ -118,19 +120,18 @@ class PackageContractTests(unittest.TestCase):
             staged_site = root / "site"
             shutil.copytree(package_dir, staged_site / "apostate")
             script = """
-from apostate.errors import ProfileError
 from apostate.profile_validation import validate_profile
 from apostate.resolver import load_catalogue, resolve_profile
 catalogue = load_catalogue()
 assert catalogue['model'] == 'anchors+dispersion', catalogue['model']
 assert catalogue['catalogue_version'] == 2, catalogue['catalogue_version']
 validate_profile({'id': 'staged', 'platform': {'name': 'macOS'}})
-try:
-    resolve_profile(fingerprint='staged-seed', fingerprint_platform='macos')
-except ProfileError as exc:
-    assert 'in-binary compositor' in str(exc), str(exc)
-else:
-    raise AssertionError('a seed and persona must not compose inside the package')
+# A seed and persona are handed to the browser process, which is the compositor;
+# the package still composes nothing of its own, so the profile stays empty.
+resolution = resolve_profile(fingerprint='staged-seed', fingerprint_platform='macos')
+assert resolution.profile_id == 'native-composed', resolution.profile_id
+assert resolution.profile == {}, resolution.profile
+assert resolve_profile(fingerprint='host').profile_id == 'host-inherited'
 print(catalogue['browser_build'])
 """
             environment = os.environ.copy()
@@ -162,16 +163,33 @@ print(catalogue['browser_build'])
         self.assertIn(
             "macos-metal-apple-850a91233555", {anchor["id"] for anchor in catalogue["anchors"]}
         )
-        self.assertEqual(
-            [axis["axis"] for axis in catalogue["axes"]],
-            ["os_release", "gpu_identity", "cpu", "memory", "panel", "furniture",
-             "font_packs", "media_topology", "voices"],
-        )
+        # The exact axis list is not restated here: load_catalogue() already
+        # refuses a catalogue whose axes are not the contract's, in order, so an
+        # equality assertion would only duplicate the loader. What is worth
+        # pinning is that the PACKAGED catalogue satisfies it -- the packages
+        # ship a copy of resources/profiles/catalogue.json, and a copy that went
+        # stale against the resolver is the regression that actually happens.
+        axes = [axis["axis"] for axis in catalogue["axes"]]
+        self.assertEqual(axes, list(resolver_module._DISPERSION_AXES))
+        self.assertEqual(len(axes), len(set(axes)))
         anchor_axis = next(axis for axis in catalogue["axes"] if axis["axis"] == "gpu_identity")
         self.assertEqual(anchor_axis["conditioned_on"], ["anchor"])
         self.assertEqual(anchor_axis["servability"], "anchor-member")
         self.assertEqual(sorted(catalogue["policies"]), ["locale", "theme"])
         self.assertIn("en-us", catalogue["policies"]["locale"])
+
+    def test_catalogue_axes_must_be_complete_and_ordered(self) -> None:
+        # A dropped or reordered axis means the package and the browser disagree
+        # about what was composed, which is worse than refusing to launch.
+        contract = list(resolver_module._DISPERSION_AXES)
+        reordered = [contract[1], contract[0], *contract[2:]]
+        for label, axes in (("reordered", reordered), ("truncated", contract[:-1]),
+                            ("unknown-axis", [*contract[:-1], "not_an_axis"])):
+            with self.subTest(rejected=label), self.assertRaises(ProfileError):
+                load_catalogue(self._catalogue(axes=[
+                    {"axis": axis, "selection": "single", "servability": "none", "conditioned_on": []}
+                    for axis in axes
+                ]))
 
     @staticmethod
     def _catalogue(**overrides: Any) -> dict[str, Any]:
@@ -188,8 +206,7 @@ print(catalogue['browser_build'])
             }],
             "axes": [
                 {"axis": axis, "selection": "single", "servability": "none", "conditioned_on": []}
-                for axis in ("os_release", "gpu_identity", "cpu", "memory", "panel",
-                             "furniture", "font_packs", "media_topology", "voices")
+                for axis in resolver_module._DISPERSION_AXES
             ],
             "policies": {
                 "locale": [{"id": "en-us"}],
@@ -212,17 +229,51 @@ print(catalogue['browser_build'])
             with self.subTest(rejected=label), self.assertRaises(ProfileError):
                 load_catalogue(catalogue)
 
-    def test_seed_persona_and_catalogue_ids_fail_closed_without_the_compositor(self) -> None:
-        with self.assertRaisesRegex(ProfileError, "in-binary compositor"):
-            resolve_profile(fingerprint=12345, fingerprint_platform="windows")
-        with self.assertRaisesRegex(ProfileError, "in-binary compositor"):
-            resolve_profile(fingerprint_platform="windows")
-        # The documented default with no arguments is a drawn seed, so the bare
-        # call is a composition request and must not fall back to the host.
-        with self.assertRaisesRegex(ProfileError, "in-binary compositor"):
-            resolve_profile()
+    def test_seed_and_persona_reach_the_native_composition_switches(self) -> None:
+        launch_module = importlib.import_module("apostate.launch")
+        # The browser process is the compositor and the switches exist in the
+        # shipped binary, so a seed is delivered rather than refused. Measured
+        # on macos-arm64 152.0.7977.83: --fingerprint=42 yields en-GB /
+        # Europe/London and repeats across launches.
+        resolution = resolve_profile(fingerprint=12345, fingerprint_platform="windows")
+        self.assertEqual(resolution.profile_id, "native-composed")
+        self.assertEqual(resolution.profile, {})
+        plan = launch_module._resolve_plan(
+            translate_options(fingerprint=12345, fingerprint_platform="windows", geoip=False)
+        )
+        args = launch_module._native_args(plan)
+        self.assertIn("--fingerprint=12345", args)
+        self.assertIn("--fingerprint-platform=windows", args)
+        # An envelope outranks the seed, so none may be sent alongside it.
+        self.assertFalse([item for item in args if item.startswith("--apostate-profile=")])
+
+        # A bare launch composes too, and says the identity will not persist.
+        bare = resolve_profile()
+        self.assertEqual(bare.profile_id, "native-composed")
+        self.assertIn("does not persist", " ".join(bare.warnings))
+        self.assertFalse([item for item in launch_module._native_args(
+            launch_module._resolve_plan(translate_options(geoip=False))
+        ) if item.startswith("--fingerprint=")])
+
+        # Retired catalogue ids stay refused: there is no such thing to resolve.
         with self.assertRaisesRegex(ProfileError, "retired with catalogue version 1"):
             resolve_profile(profile="apple-metal-m2", fingerprint_platform="macos")
+
+    def test_unknown_fingerprint_switch_is_refused_before_launch(self) -> None:
+        # Chromium ignores an unknown switch silently, which would leave the
+        # surface host-inherited while the caller believed it was set.
+        launch_module = importlib.import_module("apostate.launch")
+        plan = launch_module._resolve_plan(
+            translate_options(fingerprint=7, args=["--fingerprint-gpu-vendr=Apple"], geoip=False)
+        )
+        with self.assertRaisesRegex(ConfigurationError, "not a switch this browser reads"):
+            launch_module._native_args(plan)
+
+    def test_host_inheritance_accepts_every_spelling_the_binary_accepts(self) -> None:
+        for token in ("host", "off", "false", "0", "disable", "DISABLED"):
+            with self.subTest(token=token):
+                self.assertEqual(resolve_profile(fingerprint=token).profile_id, "host-inherited")
+        self.assertEqual(resolve_profile(fingerprint=0).profile_id, "host-inherited")
 
     def test_host_inheritance_is_explicit_and_sends_no_profile_envelope(self) -> None:
         launch_module = importlib.import_module("apostate.launch")
@@ -345,25 +396,106 @@ print(catalogue['browser_build'])
         with tempfile.TemporaryDirectory() as temporary:
             cache = Path(temporary) / "cache"
             manager = BinaryManager(cache_dir=cache)
-            root, archive, binary = manager._paths(
+            root, install, marker = manager._paths(
                 "linux-x64",
                 {"chromium_version": CHROMIUM_VERSION},
-                {"artifact": "https://downloads.example/apostate-linux-x64.tar.zst"},
+                {"artifact": "apostate-linux-x64.tar.zst"},
             )
             self.assertEqual(root, cache / CHROMIUM_VERSION / "linux-x64")
-            self.assertEqual(archive.name, "apostate-linux-x64.tar.zst")
-            self.assertEqual(binary, root / "binary")
+            self.assertEqual(install, root / "install")
+            self.assertEqual(marker, root / "install.json")
             (cache / "stale").mkdir(parents=True)
             manager.clear()
             self.assertFalse(cache.exists())
         self.assertEqual(target_platform("darwin-arm64"), "macos-arm64")
 
-    def test_tampered_cached_binary_is_rebuilt_from_verified_archive(self) -> None:
-        archive_buffer = io.BytesIO()
-        with zipfile.ZipFile(archive_buffer, "w") as archive:
-            archive.writestr("Chromium.app/Contents/MacOS/Chromium", b"native binary")
-        archive_bytes = archive_buffer.getvalue()
-        manifest = {
+    def test_install_keeps_the_whole_distribution_not_just_the_executable(self) -> None:
+        # Chromium cannot start from a lone copied executable: it needs its
+        # framework, ICU data and .pak resources. A cache that holds only the
+        # executable is a cache that cannot launch.
+        archive_bytes = self._zip_archive({
+            "apostate-test/Chromium.app/Contents/MacOS/Chromium": b"native binary",
+            "apostate-test/Chromium.app/Contents/Resources/icudtl.dat": b"icu",
+            "apostate-test/resources/en-US.pak": b"pak",
+        })
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = BinaryManager(cache_dir=temporary,
+                                    manifest=self._zip_manifest(archive_bytes),
+                                    downloader=lambda source: archive_bytes)
+            executable = manager.ensure(target="macos-arm64")
+            install = Path(temporary) / CHROMIUM_VERSION / "macos-arm64" / "install"
+            # The wrapper directory is stripped; everything inside it survives.
+            self.assertEqual(executable, install / "Chromium.app/Contents/MacOS/Chromium")
+            self.assertEqual((install / "Chromium.app/Contents/Resources/icudtl.dat").read_bytes(), b"icu")
+            self.assertEqual((install / "resources/en-US.pak").read_bytes(), b"pak")
+            self.assertTrue(os.access(executable, os.X_OK))
+
+    def test_tampered_cached_binary_is_rebuilt(self) -> None:
+        archive_bytes = self._zip_archive({
+            "apostate-test/Chromium.app/Contents/MacOS/Chromium": b"native binary",
+        })
+        with tempfile.TemporaryDirectory() as temporary:
+            calls: list[str] = []
+            manager = BinaryManager(
+                cache_dir=temporary,
+                manifest=self._zip_manifest(archive_bytes),
+                downloader=lambda source: calls.append(source) or archive_bytes,
+            )
+            executable = manager.ensure(target="macos-arm64")
+            executable.write_bytes(b"tampered")
+            rebuilt = manager.ensure(target="macos-arm64")
+            self.assertEqual(rebuilt.read_bytes(), b"native binary")
+            self.assertEqual(len(calls), 2)
+
+    def test_extraction_refuses_an_escaping_symlink_but_keeps_a_contained_one(self) -> None:
+        # The macOS bundle reaches its framework through five relative symlinks,
+        # so prohibition is not an option; containment is what is enforced.
+        contained = self._zip_archive(
+            {"apostate-test/Chromium.app/Contents/MacOS/Chromium": b"native binary"},
+            links={"apostate-test/Chromium.app/Contents/Frameworks/Current": "../MacOS"},
+        )
+        escaping = self._zip_archive(
+            {"apostate-test/Chromium.app/Contents/MacOS/Chromium": b"native binary"},
+            links={"apostate-test/escape": "../../../../etc"},
+        )
+        absolute = self._zip_archive(
+            {"apostate-test/Chromium.app/Contents/MacOS/Chromium": b"native binary"},
+            links={"apostate-test/absolute": "/etc/passwd"},
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = BinaryManager(cache_dir=Path(temporary) / "ok",
+                                    manifest=self._zip_manifest(contained),
+                                    downloader=lambda source: contained)
+            executable = manager.ensure(target="macos-arm64")
+            link = executable.parent.parent / "Frameworks" / "Current"
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(os.readlink(link), "../MacOS")
+            for label, payload in (("escaping", escaping), ("absolute", absolute)):
+                with self.subTest(rejected=label):
+                    rejecting = BinaryManager(cache_dir=Path(temporary) / label,
+                                              manifest=self._zip_manifest(payload),
+                                              downloader=lambda source, data=payload: data)
+                    with self.assertRaises(UnsupportedArchiveError):
+                        rejecting.ensure(target="macos-arm64")
+
+    def _zip_archive(self, files: dict[str, bytes],
+                     links: dict[str, str] | None = None) -> bytes:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for name, payload in files.items():
+                info = zipfile.ZipInfo(name)
+                info.create_system = 3
+                info.external_attr = (0o100755 << 16)
+                archive.writestr(info, payload)
+            for name, target in (links or {}).items():
+                info = zipfile.ZipInfo(name)
+                info.create_system = 3
+                info.external_attr = (0o120777 << 16)
+                archive.writestr(info, target)
+        return buffer.getvalue()
+
+    def _zip_manifest(self, archive_bytes: bytes) -> dict[str, Any]:
+        return {
             "package_version": "0.1.0",
             "chromium_version": CHROMIUM_VERSION,
             "catalogue_version": CATALOGUE_VERSION,
@@ -371,22 +503,51 @@ print(catalogue['browser_build'])
             "artifact": "apostate-test.zip",
             "sha256": hashlib.sha256(archive_bytes).hexdigest(),
         }
+
+    def test_provisioned_widevine_survives_a_forced_reinstall(self) -> None:
+        # The CDM is stored outside the install tree precisely so that
+        # `install --force` and a Chromium upgrade, which both replace that
+        # tree, do not silently remove DRM and turn a working launch into a
+        # NotSupportedError a site can read in one call.
+        from apostate import widevine
+        archive_bytes = self._zip_archive({
+            "apostate-test/Chromium.app/Contents/MacOS/Chromium": b"native binary",
+        })
         with tempfile.TemporaryDirectory() as temporary:
-            calls: list[str] = []
-            manager = BinaryManager(
-                cache_dir=temporary,
-                manifest=manifest,
-                downloader=lambda source: calls.append(source) or archive_bytes,
+            manager = BinaryManager(cache_dir=temporary,
+                                    manifest=self._zip_manifest(archive_bytes),
+                                    downloader=lambda source: archive_bytes)
+            manager.ensure(target="macos-arm64")
+            store = widevine.store_path(temporary)
+            platform_dir = store / "_platform_specific" / "mac_arm64"
+            platform_dir.mkdir(parents=True)
+            (platform_dir / "libwidevinecdm.dylib").write_bytes(b"cdm")
+            (store / "manifest.json").write_text('{"version": "4.10.3050.0"}', encoding="utf-8")
+
+            install = Path(temporary) / CHROMIUM_VERSION / "macos-arm64" / "install"
+            installed = widevine.apply_to_install(
+                install, "macos-arm64", cache_dir=temporary,
+                chromium_version=CHROMIUM_VERSION,
             )
-            executable = manager.ensure(target="macos-arm64")
-            executable.write_bytes(b"tampered")
-            marker = executable.parent / "verified.json"
-            marker_data = json.loads(marker.read_text(encoding="utf-8"))
-            marker_data["binary_sha256"] = hashlib.sha256(b"tampered").hexdigest()
-            marker.write_text(json.dumps(marker_data), encoding="utf-8")
-            rebuilt = manager.ensure(target="macos-arm64")
-            self.assertEqual(rebuilt.read_bytes(), b"native binary")
-            self.assertEqual(calls, ["apostate-test.zip"])
+            self.assertIsNotNone(installed)
+            library = installed / "_platform_specific" / "mac_arm64" / "libwidevinecdm.dylib"
+            self.assertEqual(library.read_bytes(), b"cdm")
+            # No version directory: the browser reads the version from
+            # manifest.json, and Google Chrome's own bundled copy has none.
+            self.assertEqual(sorted(p.name for p in installed.iterdir()),
+                             ["_platform_specific", "manifest.json"])
+
+            manager.ensure(target="macos-arm64", force=True)
+            self.assertEqual(library.read_bytes(), b"cdm")
+
+    def test_widevine_provisioning_refuses_a_directory_without_a_library(self) -> None:
+        from apostate.widevine import WidevineError, provision
+        with tempfile.TemporaryDirectory() as temporary:
+            empty = Path(temporary) / "WidevineCdm"
+            empty.mkdir()
+            with self.assertRaises(WidevineError):
+                provision(target="macos-arm64", source=empty, cache_dir=temporary,
+                          chromium_version=CHROMIUM_VERSION, install=Path(temporary) / "install")
 
     def test_async_launch_delegates_to_async_backend(self) -> None:
         launch_module = importlib.import_module("apostate.launch")

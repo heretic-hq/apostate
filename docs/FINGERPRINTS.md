@@ -22,8 +22,8 @@ Windows, with the cost of that choice stated rather than the choice refused.
 **It was not backed by measurement.** All fourteen families carry
 `compatibility-capture` provenance derived from one external runtime's output.
 The measurement that closes the question: across the fourteen, the WebGL1
-capability digest, the WebGL2 capability digest *and* the canvas pixel digest
-are each a single value — one digest shared by supposedly distinct Intel HD
+capability digest, the WebGL2 capability digest and the canvas pixel digest are
+each a single value. One digest, shared by supposedly distinct Intel HD
 Graphics, GeForce GTX 960, Radeon RX 9060 XT and Apple M4 machines. They are
 identity-string swaps taken on one Mac. The host's real capability tables were
 never touched.
@@ -46,7 +46,7 @@ value and what may vary it.
 **Invariants** are what the binary is: Chromium version, brand list, API
 surface, `Function.prototype.toString` output, which codecs are compiled in,
 whether a CDM is registered. A profile never varies these. When one is wrong it
-is a build or patch defect, not a profile defect — see §8.
+is a build or patch defect, not a profile defect. See section 8.
 
 **Anchors** are the clusters that cannot be recombined without contradiction.
 The GPU cluster is the canonical one: WebGL1 and WebGL2 extension lists,
@@ -72,7 +72,7 @@ it remains a machine someone could own.
 were observed on real systems. It never produces a novel value. Five randomly
 chosen font families is synthesis and is a tell, because installed fonts arrive
 in bundles: a machine with Myriad Pro has the rest of Creative Cloud, a machine
-with Cascadia Code has a developer's toolchain. Dispersion selects *bundles*.
+with Cascadia Code has a developer's toolchain. Dispersion selects bundles.
 
 **Servability: capacity is only ever reduced.** A profile may claim fewer cores
 than the host has, never more. Same for memory, GPU limits, codec support, font
@@ -85,8 +85,8 @@ gate.
 
 This is the specific respect in which clamping beats spoofing. Reporting the
 host's true 14 cores and 32GB identifies one model of laptop. Reporting a
-fabricated 20 cores contradicts any timing probe. Reporting 8 cores — a real
-bucket, servable by a 14-core host — is both common and unfalsifiable.
+fabricated 20 cores contradicts any timing probe. Reporting 8 cores, a real
+bucket that a 14-core host can serve, is both common and unfalsifiable.
 
 ## 4. Anchors, identity strings, and the limit of string swapping
 
@@ -95,11 +95,17 @@ Within an anchor, the identity strings (`unmaskedVendor`,
 anchor's members measurably agree on everything else. Across anchors they are
 not.
 
-Measured, from the project's own T0 captures:
+Two counts matter here and they are not the same number. The corpus holds 5
+anchors and 9 measured members. The catalogue offers more presentable identity
+strings than that, each one registered on a specific anchor and carrying that
+anchor's measured capability cluster, each labelled `catalogue-value` with its
+own source. The table generator hard-fails if an offered identity is not
+registered on an anchor, so an identity can never arrive without a capability
+cluster behind it. What a page reads is the identity string; what it can probe
+is the cluster, and the cluster is measured.
 
-The four anchors in `corpus/anchors/`, all T0, digests as emitted by
-`scripts/build-anchors.py` (first 8 hex of the full SHA-256 in the anchor
-file):
+The five anchors in `corpus/anchors/`, measured here, with digests as emitted by
+`scripts/build-anchors.py` (first 8 hex of the full SHA-256 in the anchor file):
 
 | Anchor | Backend | Members | WebGL1 caps | WebGL2 caps | WebGL pixels |
 | --- | --- | --- | --- | --- | --- |
@@ -107,11 +113,26 @@ file):
 | `windows-d3d11-nvidia-0947761dfbe9` | ANGLE/D3D11 | RTX 3070 Ti, RTX A4500 | `ff875414` | `a34893d0` | `a895ab2a` |
 | `macos-metal-apple-850a91233555` | ANGLE/Metal | M4 Max | `53ec118e` | `102f6613` | `918f09f6` |
 | `windows-d3d11-intel-79dfeb5b4f99` | ANGLE/D3D11 | UHD 630 | `be8acf33` | `e695c2da` | `918f09f6` |
+| `linux-swiftshader-google-6922d61bab83` | ANGLE/SwiftShader | SwiftShader Device (Subzero) | `6087e24b` | `9b8362e1` | `918f09f6` |
+
+The last one is the odd one and it is deliberate. It is a software rasteriser,
+captured from a stock Chromium rather than from hardware, so its evidence class
+is `compatibility-capture` and it claims no hardware at all. Its purpose is to
+give a GPU-less host something coherent to serve: patches `0027` and `0038`
+raise this fork's own SwiftShader limits above stock's so a profile's claim can
+pass the clamp, and no stock build reports those raised values. Serving this
+anchor claims the stock figures, and because the clamp only ever reduces, the
+stock figures are what reach the page. So a GPU-less host presenting this
+cluster looks like stock software rendering instead of looking like this fork.
+It is the newest of the five and it has not been compiled into a binary yet: its
+id is absent from the shipped 152.0.7977.83 macOS build while the two hardware
+anchors that build serves are present. It also offers one identity, because it
+has one member, so it rotates nothing.
 
 Four results follow, and they do not all point the same way.
 
 **Within a backend, silicon generation does not matter.** Ada, Ampere and
-Blackwell produce byte-identical WebGL1 and WebGL2 capability tables *and* an
+Blackwell produce byte-identical WebGL1 and WebGL2 capability tables and an
 identical WebGL render digest on Linux/Vulkan. The two Ampere-class cards agree
 with each other on Windows/D3D11. So one anchor legitimately covers a range of
 cards and the renderer string is cosmetic relative to it. This is measured.
@@ -119,8 +140,8 @@ cards and the renderer string is cosmetic relative to it. This is measured.
 **Across backends, the capability tables transfer nothing.** The same NVIDIA
 silicon produces a different capability digest through D3D11 than through
 Vulkan, and Apple Metal differs from both. Presenting a Windows/D3D11 renderer
-string on top of an Apple Metal capability cluster is precisely the Gologin
-failure from §1.
+string on top of an Apple Metal capability cluster is the same failure section 1
+describes.
 
 **The WebGL render digest is not a backend discriminator.** Apple/Metal and
 Intel/D3D11 produce the same `918f09f6` pixels. A matching render digest is
@@ -130,9 +151,9 @@ capability tables are what discriminate, and the anchor is keyed on them.
 **Two surfaces are inside an anchor's members but outside the anchor.** The
 WebGPU cluster differs between members of the Linux/Vulkan anchor, because it
 belongs to each host's driver stack rather than to the silicon class, so WebGPU
-identity is *not* rotatable within an anchor. Canvas 2D differs too, and that
-one is not a GPU measurement at all — it is fonts and raster, which is why it
-is excluded from the anchor key and recorded separately so the exclusion stays
+identity is not rotatable within an anchor. Canvas 2D differs too, and canvas is
+not a GPU measurement at all. It is fonts and raster, which is why it is
+excluded from the anchor key and recorded separately so the exclusion stays
 checkable.
 
 Therefore: **`--fingerprint-platform` does not move the GPU cluster.** It
@@ -141,27 +162,26 @@ hardware buckets. The GPU cluster is selected from anchors the host can
 actually serve. On a macOS host a Windows persona keeps an Apple GPU cluster,
 and that mismatch is reported as a limitation rather than hidden.
 
-The consequence for deployment is worth stating plainly: a coherent Windows
-fingerprint wants a Windows or Linux host with the corresponding silicon. That
-is a property of graphics drivers, not of this codebase, and no competitor
-avoids it — they only decline to report it.
+The consequence for deployment: a coherent Windows fingerprint wants a Windows
+host. That is a property of graphics drivers rather than of this codebase, and
+every product in this space has it. This one reports it.
 
-### Build binding limits what these anchors can gate
+### Three anchors were measured on another build
 
-A capture is bound to the build it was taken on, so an anchor is only a valid
-V3 conformance target for a binary of the same version. Two of the four are
-not, and the anchor files record it:
+Capability tables move between Chromium releases, so an anchor measured on one
+build is not an exact target for a binary of another. Three of the five were not
+measured on 152.0.7977.83, and the anchor files record it:
 
-- `windows-d3d11-nvidia-0947761dfbe9` was measured on Chromium 153.0.8010.37,
-  an off-major build. Capability tables are build-bound, so this anchor is
-  evidence about Ampere-class D3D11 silicon but cannot gate a 152 binary.
-- `linux-vulkan-nvidia-adf287b8f0ee` was measured on 152.0.7977.82 against a
-  152.0.7977.83 pin: same major, different patch, so version-bearing fields
-  differ and the conformance runner reports them separately.
+- `windows-d3d11-nvidia-0947761dfbe9` was measured on Chromium 153.0.8010.37.
+  It is evidence about Ampere-class D3D11 silicon, and its version-bearing
+  fields belong to a different major.
+- `linux-vulkan-nvidia-adf287b8f0ee` and `linux-swiftshader-google-6922d61bab83`
+  were measured on 152.0.7977.82, the patch release before the pin, so their
+  version-bearing fields differ in that field only.
 
-Only `macos-metal-apple-850a91233555` and `windows-d3d11-intel-79dfeb5b4f99`
-are on the pinned build. Closing the other two means one re-capture round on
-the pinned binary, not new analysis.
+`macos-metal-apple-850a91233555` and `windows-d3d11-intel-79dfeb5b4f99` are on
+the pinned build. Closing the other three means re-capturing them on the pinned
+binary.
 
 ## 5. Seed, and what a seed is worth
 
@@ -170,20 +190,17 @@ randomizer and it never reaches a value at read time.
 
 | Launch | Seed source | Result |
 | --- | --- | --- |
-| no arguments | OS entropy, once, then persisted | unique per browser profile |
-| `--fingerprint=<seed>` | the argument | reproducible anywhere |
-| `--fingerprint=host` | none | host inheritance, today's default |
+| no arguments | fresh OS entropy, per launch | a new device every launch |
+| `--fingerprint=<seed>` | the argument | the same device anywhere, every launch |
+| `--fingerprint=host` | none | no composition; the host's own values |
 
-**Seed lifetime is the user-data-dir, not the launch.** A new fingerprint on
-every launch of the same browser profile is itself a signal: returning-visitor
-checks, long-lived cookies and storage all expect the machine to stay the same
-machine. So the seed is written to `<user-data-dir>/apostate/seed` on first use
-and reused afterwards. An ephemeral user-data-dir therefore yields a new
-identity, and a persistent one yields a stable identity, which is what the
-directory already means for cookies.
+A seed is never written to disk. Earlier builds persisted one per user-data
+directory so that relaunching the directory reproduced the identity; that file
+and the precedence step that read it are both gone. A stable identity comes from
+`--fingerprint=<seed>` only, which reproduces on a second machine as well.
 
-This satisfies A3 without qualification: the profile is fully materialized
-before the first renderer starts, and nothing inside the session varies.
+Either way the profile is fully materialized before the first renderer starts,
+and nothing inside the session varies.
 
 ### Derivation
 
@@ -210,7 +227,7 @@ modulo, no rejection loop, no floating point.
 ### Resolution order
 
 Axes resolve in dependency order, and a dependent axis draws from an option set
-that is *a function of its parents' resolved values*. There is no rejection
+that is a function of its parents' resolved values. There is no rejection
 sampling and no re-draw, so every profile is coherent by construction rather
 than by validation.
 
@@ -231,29 +248,30 @@ prevalence; they are not uniform.
 
 | Axis | Option unit | Conditioned on | Servability limit |
 | --- | --- | --- | --- |
-| `os_release` | OS build + client-hint `platformVersion` | platform | — |
+| `os_release` | OS build + client-hint `platformVersion` | platform | none |
 | `anchor` | GPU capability cluster | platform, host backend | host must serve the cluster |
-| `gpu_identity` | vendor + renderer string pair | anchor | must be a member of the anchor |
+| `gpu_identity` | vendor + renderer string pair | anchor | must be registered on the anchor |
 | `cpu` | core-count bucket | platform, device class | `<=` host logical cores |
 | `memory` | `deviceMemory` bucket | device class | `<=` host physical memory |
 | `panel` | width x height x DPR | platform, device class | `>=` window bounds |
-| `furniture` | taskbar/dock edge, size, autohide | platform, os release | — |
-| `font_packs` | an installed-software bundle | platform, os release | files must be present or provisioned |
-| `media_topology` | input/output/camera counts + labels + group pairing | platform | — |
+| `furniture` | taskbar/dock edge, size, autohide | platform, os release | none |
+| `font_packs` | an installed-software bundle | platform, os release | none |
+| `media_topology` | input/output/camera counts + labels + group pairing | platform | none |
 | `voices` | voice table for an OS release and language set | platform, os release, languages | provider must be able to speak |
-| `locale` | language list + timezone | launch precedence, GeoIP | — |
+| `locale` | language list + timezone | launch precedence, GeoIP | none |
 
 Notes that matter per axis:
 
-**Font packs.** The mandatory core set for an OS release is not optional — a
+**Font packs.** The mandatory core set for an OS release is not optional. A
 machine claiming macOS without Menlo, Monaco, Zapfino, PingFang SC and
 Helvetica Neue is not a Mac, and that absence is the defensible detection. On
 top of the core set, packs model what software installs: Office, Creative
 Cloud, the CJK language packs, LibreOffice's Liberation/DejaVu, a developer's
-Cascadia. Enumeration is subtractive and always servable; *addition* requires
-the font files, so a pack is only offered when its files are present on the
-host or provisioned into the profile. Anything else is reported as a
-limitation, per `docs/METHODOLOGY.md` on font provisioning.
+Cascadia. Enumeration is subtractive: it removes families the claimed device
+would not have and never adds one, so a face the machine lacks cannot be
+presented. Installing the claimed platform's fonts is the operator's job and the
+compositor assumes it has been done, rather than checking the filesystem and
+warning. [docs/FONTS.md](FONTS.md) is the instructions.
 
 **Media topology.** `deviceId` and `groupId` are already per-origin HMACs in
 Chromium, so the fingerprint content is the count, the kind mix, the group
@@ -263,7 +281,7 @@ never appear on macOS.
 
 **Voices.** The table is a function of OS release and installed language packs.
 Network voices (`localService: false`) are a build-level capability, not a
-profile value — see §8.
+profile value. See section 8.
 
 **Panel and furniture.** `availLeft`/`availTop`/`availWidth`/`availHeight`
 follow from the panel plus the furniture model; `outerWidth`/`outerHeight`
@@ -281,7 +299,7 @@ compositor inside the binary by necessity. Reimplementing it in the Python and
 Node packages would create three sources of truth for one deterministic
 function, and the drift between them would be silent. So the packages stop
 composing: they call the binary to materialize a profile, and keep doing what
-only they can do — CLI ergonomics, schema validation, launch orchestration,
+only they can do: CLI ergonomics, schema validation, launch orchestration and
 GeoIP.
 
 Determinism across languages is then a property of the binary, and is pinned by
@@ -303,21 +321,22 @@ fix them:
 - **Network speech voices.** The `localService: false` voices are served by
   Chromium's network speech synthesis component against a Google endpoint, which
   requires API keys at build time. Without keys the voices cannot be listed,
-  because a listed voice that cannot speak violates A2 and patch `0043`.
+  because a listed voice that cannot speak is worse than an absent one. Patch
+  `0043` enforces that.
 
 ## 9. Verification
 
 A composition change is done when all five pass:
 
-1. **Determinism** — the same tuple yields byte-identical profiles, across
-   processes and hosts. Golden seed vectors.
-2. **Coherence** — every edge in `ledger/coherence.jsonl` holds for N seeds.
-3. **Servability** — every claim is `<=` host capability, checked by
+1. Determinism. The same tuple yields byte-identical profiles, across processes
+   and hosts, checked against golden seed vectors.
+2. Coherence. Every pair that has to agree still agrees, for N seeds.
+3. Servability. Every claim is at or below host capability, checked by
    `scripts/check-servable.py` for N seeds.
-4. **Dispersion** — for N seeds, no value falls outside its option table, and
-   the realized distribution matches the table weights.
-5. **Conformance** — V3-C per anchor: launch with the profile, collect, diff
-   against the anchor's captures.
+4. Dispersion. For N seeds, no value falls outside its option table and the
+   realized distribution matches the table weights.
+5. Measurement. Launch with the profile, read the surfaces the way a page reads
+   them, and diff against the anchor's own captures.
 
 ## 10. The launch contract
 
@@ -325,22 +344,26 @@ One switch family, all resolved before the first renderer starts.
 
 | Switch | Meaning |
 | --- | --- |
-| `--fingerprint=<seed>` | Deterministic seed. An integer or an arbitrary string. |
-| `--fingerprint=host` | Inherit the host. No composition. |
+| `--fingerprint=<seed>` | Deterministic seed. An integer or any printable ASCII up to 512 bytes. |
+| `--fingerprint=host` | Compose nothing. `off`, `false`, `0`, `disable` and `disabled` are synonyms. |
 | `--fingerprint-platform=<windows\|macos\|linux>` | Platform persona. Defaults to the host's. |
 | `--fingerprint-anchor=<id>` | Pin the GPU anchor instead of drawing one. |
 | `--fingerprint-explain` | Write the composition report to stdout and exit. |
-| `--apostate-profile=<base64>` | An already-composed profile. Existing switch, unchanged. |
+| `--fingerprint-gpu-vendor`, `--fingerprint-gpu-renderer`, `--fingerprint-hardware-concurrency`, `--fingerprint-device-memory`, `--fingerprint-screen-width`, `--fingerprint-screen-height`, `--fingerprint-timezone`, `--fingerprint-locale` | Override one field each; the seed fills the rest. |
+| `--apostate-profile=<base64>` | An already-composed profile. |
 
-Precedence, strongest first: `--apostate-profile` > `--fingerprint` > the seed
-persisted in the user-data-dir > a seed drawn from OS entropy. `host` disables
-every layer below it.
+Precedence, strongest first: `--apostate-profile`, then host mode, then the
+per-field overrides, then `--fingerprint`, then the fresh seed a bare launch
+draws. Host mode disables every layer below it, so a persona or an anchor pin is
+inert under it and a per-field override alongside it stops the launch.
+
+[docs/FLAGS.md](FLAGS.md) is the user-facing reference for all of these.
 
 `--fingerprint-explain` prints, per surface, the resolved value, the layer that
 owns it (invariant, anchor, dispersion, host-inherited), the evidence class, and
-any limitation. It is the honest answer to "what does this profile actually
-claim, and what can this host actually serve" — and on a cross-platform launch
-it is where the GPU-cluster mismatch from §4 is reported rather than hidden.
+any limitation. It answers what the profile claims and what this host can
+actually serve, and on a cross-platform launch it is where the GPU-cluster
+mismatch from section 4 is reported rather than hidden.
 It writes to stdout, never to a page-visible API.
 
 ### Table transport

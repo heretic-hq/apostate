@@ -108,6 +108,7 @@ export class BinaryExtractionError extends ApostateError {}
 export class GeoIPError extends ApostateError {}
 export class BrowserLaunchError extends ApostateError {}
 export class UnsupportedFeatureError extends ApostateError {}
+export class WidevineError extends ApostateError {}
 
 export declare function stableStringify(value: unknown): string;
 export declare function validateProfile(profile: Record<string, unknown>): Record<string, unknown>;
@@ -123,34 +124,44 @@ export declare function verifyArtifact(archive: unknown, artifact: Record<string
 export declare function ensureBinary(options?: LaunchOptions | string): Promise<string>;
 export declare function binaryInfo(options?: LaunchOptions): Promise<Record<string, unknown>>;
 export declare function clearCache(options?: LaunchOptions | string): Promise<void>;
-export declare function launch(options?: LaunchOptions): Promise<ApostateBrowser>;
-export declare function launchContext(options?: LaunchOptions): Promise<ApostateBrowserContext>;
-export declare function launchPersistentContext(userDataDir: string, options?: LaunchOptions): Promise<ApostateBrowserContext>;
+// launch() returns whatever driver is installed -- a Playwright Browser or a
+// Puppeteer Browser. The package cannot name either type without depending on
+// both, and both are optional peers, so the return is deliberately unknown.
+// Annotate the call site with your driver's type:
+//   const browser = (await launch()) as import("playwright-core").Browser;
+export declare function launch(options?: LaunchOptions): Promise<any>;
+export declare function launchContext(options?: LaunchOptions): Promise<any>;
+export declare function launchPersistentContext(userDataDir: string, options?: LaunchOptions): Promise<any>;
+export declare function launchProcess(options?: LaunchOptions): Promise<ApostateProcess>;
+export declare function provisionWidevine(options?: {
+  target?: string;
+  cacheDir?: string;
+  source: string;
+}): Promise<{
+  platform: string;
+  platform_verified: boolean;
+  source: string;
+  version: string | null;
+  store: string;
+  installed: string | null;
+}>;
+export declare const provision_widevine: typeof provisionWidevine;
 export declare const launch_context: typeof launchContext;
 export declare const launch_persistent_context: typeof launchPersistentContext;
+export declare const launch_process: typeof launchProcess;
 export declare const ensure_binary: typeof ensureBinary;
 export declare const binary_info: typeof binaryInfo;
 export declare const clear_cache: typeof clearCache;
 export declare const translateOptions: typeof toCanonicalLaunchConfig;
 export declare const load_catalogue: typeof loadCatalogue;
 
-export class ApostateBrowser {
+// The raw child process, for when no driver is installed.
+export class ApostateProcess {
   readonly process: unknown;
   readonly executablePath: string;
   readonly launchConfig: CanonicalLaunchConfig;
   readonly diagnostics: Record<string, unknown>;
   isConnected(): boolean;
-  contexts(): ApostateBrowserContext[];
-  newContext(options?: Record<string, unknown>): Promise<ApostateBrowserContext>;
-  newPage(): Promise<never>;
-  close(): Promise<void>;
-}
-export class ApostateBrowserContext {
-  readonly browser: ApostateBrowser;
-  readonly launchConfig: CanonicalLaunchConfig;
-  readonly persistent: boolean;
-  isClosed(): boolean;
-  newPage(): Promise<never>;
   close(): Promise<void>;
 }
 `, "utf8");

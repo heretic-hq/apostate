@@ -12,6 +12,19 @@ license = "GPL-3.0-only"
 authors = [{name = "Apostate contributors"}]
 dependencies = []
 
+[project.optional-dependencies]
+# The browser ships itself; these are only the drivers that can steer it, and
+# neither needs `playwright install`.
+patchright = ["patchright>=1.40"]
+playwright = ["playwright>=1.40"]
+
+[project.scripts]
+apostate = "apostate.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/heretic-hq/apostate"
+Source = "https://github.com/heretic-hq/apostate"
+
 [tool.setuptools]
 package-dir = {"" = "."}
 include-package-data = true

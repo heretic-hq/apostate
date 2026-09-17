@@ -277,7 +277,7 @@ never reach the package.
 That image excludes the full Visual Studio IDE and provides VS Build Tools
 2022 instead. `build/vs_toolchain.py` searches `BuildTools` alongside
 `Enterprise`, `Professional`, `Community`, `Preview` and `Insiders`, so
-autodetection finds it — which is the reason no path is pinned. Two files the
+autodetection finds it, which is the reason no path is pinned. Two files the
 Windows build hard-requires come from outside Build Tools, and the workflow's
 host-tooling step checks both before fetching Chromium rather than failing
 hours later:
@@ -291,21 +291,22 @@ hours later:
 Measured on the image: `dbghelp.dll` is absent, so the Debugging Tools feature
 is not installed. `scripts/verify-host-tooling.sh` reports it in about a
 minute, and `.github/workflows/probe-runners.yml` runs that check on the
-smallest instance of each family, because *presence* of a tool is a property of
-the image and the cheapest runner answers it identically.
+smallest instance of each family. Whether a tool is present is a property of
+the image, and the cheapest runner answers it identically.
 
-*Free space* is not. Measured: a 2 vCPU Windows runner reported 70.8 GB free
-while a 32 vCPU Windows runner reported 55 GB, a 14 GB difference on the class
-that actually builds — and in the dangerous direction, because the cheap runner
-looks roomier. Anything sized in bytes has to be measured on the instance class
-it will run on, which is what the `census-windows-build-class` job exists for.
-Checkout size is safe to take from the cheap runner: the sync is identical.
+Free space is not. Measured: a 2 vCPU Windows runner reported 70.8 GB free while
+a 32 vCPU Windows runner reported 55 GB, a 14 GB difference on the class that
+actually builds, and in the dangerous direction, because the cheap runner looks
+roomier. Anything sized in bytes has to be measured on the instance class it
+will run on, which is what the `census-windows-build-class` job exists for.
+Checkout size is safe to take from the cheap runner, because the sync is
+identical.
 
-Measured on the image, `msdia140.dll` and the DIA SDK ARE present, and Build
-Tools sits at `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`
-— under `Program Files (x86)`, not `Program Files`. Only the Debuggers feature
-is missing, which is why the toolchain paths are autodetected rather than
-written down.
+Measured on the image, `msdia140.dll` and the DIA SDK are present, and Build
+Tools sits at `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`,
+under `Program Files (x86)` rather than `Program Files`. Only the Debuggers
+feature is missing, which is why the toolchain paths are autodetected rather
+than written down.
 
 `scripts/provision-windows-debuggers.sh` installs that one feature, and both
 the build and the probe run it. It is idempotent, so it costs nothing once the
@@ -321,60 +322,74 @@ drift. `build/vs_toolchain.py` hardcodes `SDK_VERSION = '10.0.26100.0'` and
 prints it verbatim as GN's `sdk_version`, with
 `build/toolchain/win/setup_toolchain.py` holding a second copy as a
 cross-check. There is no version autodetection to mislead, so an SDK
-directory appearing alongside can never be selected over the intended one —
-that pin travels with `build/CHROMIUM_VERSION`, which is why
+directory appearing alongside can never be selected over the intended one. That
+pin travels with `build/CHROMIUM_VERSION`, which is why
 `build/args/windows-x64.gn` names no version either. The script still logs the
 `bin`, `Include` and `Lib` version directories before and after, because a
 component of the pinned version *disappearing* is a real failure and the
 listing is how it would be recognised.
 
+Measured build sizes:
+
+| Target | Total | Checkout | Output | depot_tools |
+| --- | --- | --- | --- | --- |
+| `macos-arm64` | 66.6 GB | 50 GB | 16 GB | 0.7 GB |
+| `windows-x64` | 44.8 GB | 28.1 GB | 16 GB | 0.7 GB |
+| `linux-x64`, `linux-arm64` | unmeasured | unmeasured | 16 GB | 0.7 GB |
+
+Linux is unmeasured because both Linux targets have only ever run on runners
+with over 1 TB free, so no run has produced a figure. Do not extrapolate one
+from another target. The Windows checkout was extrapolated from the macOS
+measurement once, and the guess was 18 GB too high.
+
+macOS is the largest of the three because it fetches
+`third_party/swift-toolchain`, 3.9 GB that no other target sees, and carries a
+larger `third_party` overall.
+
 Windows has the least storage of the four targets, and the advertised 130 GB is
-the volume size, not free space: measured on the image, 76 GB is the image
-itself and **55 GB is free**. A complete `macos-arm64` build measures 66 GB —
-50 GB checkout, 16 GB output, 0.7 GB depot_tools — so the build does not fit as
-shipped. `scripts/reclaim-windows-disk.sh` removes measured, build-irrelevant
-software before the build; the candidates came from a disk census on the image,
-not from a list of things that sound unnecessary.
+the volume size rather than free space: measured on the image, 76 GB is the
+image itself and 55 GB is free. `scripts/reclaim-windows-disk.sh` removes
+measured, build-irrelevant software before the build, which brings free space to
+63.5 GB against 44.1 GB of checkout and output. That leaves 19 GB of headroom,
+so the Windows build fits. The reclaim candidates came from a disk census on the
+image, not from a list of things that sound unnecessary.
 
-What is deliberately NOT reclaimed matters as much. The checkout holds 17.5 GB
-of dependency `.git` directories, which look like free disk. They are not
-reclaimed, but the reason is narrower than it first appears and the difference
-is worth writing down.
+The checkout holds 17.5 GB of dependency `.git` directories that look like
+reclaimable disk. They are not reclaimed, and the measurements say they do not
+need to be.
 
+One trap before anyone reclaims them anyway.
 `third_party/angle/src/commit_id.py` reads git to bake `ANGLE_COMMIT_HASH`,
 `ANGLE_COMMIT_DATE` and `ANGLE_COMMIT_POSITION` into the binary, and its
 `git rev-parse` sits inside a bare `except: pass`, so a missing `.git` silently
 yields `"unknown hash"` rather than failing. That string reaches ANGLE's own
-`GL_VERSION` via `ANGLE_VERSION_STRING`
-(`third_party/angle/src/libANGLE/Context.cpp`), which is what makes it look
-like a fingerprint surface. It is not one: the GPU service never forwards
-ANGLE's string. `GetServiceVersionString`
-(`gpu/command_buffer/service/gl_utils.cc:391`) returns the constant
+`GL_VERSION` through `ANGLE_VERSION_STRING`
+(`third_party/angle/src/libANGLE/Context.cpp`), which is what makes it look like
+a fingerprint surface. It is not one: the GPU service never forwards ANGLE's
+string. `GetServiceVersionString` in
+`gpu/command_buffer/service/gl_utils.cc` returns the constant
 `"OpenGL ES 2.0 Chromium"` or `"OpenGL ES 3.0 Chromium"`, and Blink wraps that
-constant, so `getParameter(VERSION)` reads `WebGL 1.0 (OpenGL ES 2.0
-Chromium)` on every machine and the commit hash is not web-exposed.
+constant, so `getParameter(VERSION)` reads
+`WebGL 1.0 (OpenGL ES 2.0 Chromium)` on every machine. Pruning those
+directories would still silently change compiled-in strings in the Windows
+binary and not in the others, for disk the build does not need.
 
-So pruning is not an axiom violation; it is an unmeasured change to
-compiled-in strings that would silently make the Windows binary differ from the
-other targets' for a saving nothing has yet shown we need. If the measured
-checkout says the space is required, the route is `ANGLE_UPSTREAM_HASH` — which
-`commit_id.py` reads before touching git — set from the DEPS-pinned revision,
-plus the same audit for `dawn`, `skia` and `swiftshader`. Not a blind `rm`.
+The active Python in `hostedtoolcache` is load-bearing, because `python3`
+resolves into it, and `C:\Windows\Installer` is needed by the SDK installer this
+build runs.
 
-The active Python in `hostedtoolcache` is load-bearing — `python3` resolves
-into it — and `C:\Windows\Installer` is needed by the SDK installer this build
-runs.
+depot_tools on Windows needs a one-time `bootstrap/win_tools.bat` run. A fresh
+clone has no `git.bat`, and `gclient_scm` hardcodes `git_exe = "git.bat"` on
+win32, so a sync fails without it. `scripts/bootstrap.sh` does this.
 
-`scripts/bootstrap.sh` reports free space on every run, and the workflow
-reports disk again after the build even when it fails, so each target's real
-consumption ends up in its log. The Windows checkout's own size is measured by
-the `measure-windows-checkout` job in
-`.github/workflows/probe-runners.yml`, which syncs Chromium on a 2 vCPU runner
-rather than inferring it from the macOS figure — macOS fetches
-`third_party/swift-toolchain`, 3.9 GB that Windows never sees. That job and
-`census-windows-build-class` share one `measure_windows_disk` dispatch input,
-because neither number decides anything alone and the 32 vCPU class is the
-most expensive runner here — the weekly probe must not spin it for a `df`.
+`scripts/bootstrap.sh` reports free space on every run, and the workflow reports
+disk again after the build even when it fails, so each target's real consumption
+ends up in its log. The Windows checkout is measured directly by the
+`measure-windows-checkout` job in `.github/workflows/probe-runners.yml`, which
+syncs Chromium on a 2 vCPU runner. That job and `census-windows-build-class`
+share one `measure_windows_disk` dispatch input, because neither number decides
+anything alone and the 32 vCPU class is the most expensive runner here. The
+weekly probe must not spin it for a `df`.
 
 Each job sets `APOSTATE_WORKSPACE` to the generated directory
 `$RUNNER_TEMP/apostate-workspace`. Chromium, depot_tools, caches, output and

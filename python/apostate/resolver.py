@@ -1,12 +1,21 @@
-"""Catalogue loading and fail-closed profile resolution for Python launches.
+"""Catalogue loading and profile resolution for Python launches.
 
 Catalogue version 2 composes a profile from an anchor and the dispersion axes,
 and that compositor lives in the browser process in C++ as the only
-implementation (``docs/FINGERPRINTS.md`` section 7).  This module therefore
-does the three things the package still owns: it loads and checks the catalogue
-index, it resolves the one selection path that works end to end here -- an
-explicit profile file or an inline profile object -- and it fails closed with a
-specific error everywhere composition would be required.
+implementation (``docs/FINGERPRINTS.md`` section 7). This module therefore does
+not compose. What it does is decide which of the two native selection paths a
+launch uses and hand the browser the switches for it:
+
+* an explicit profile file or inline object is validated here and delivered as
+  ``--apostate-profile=<base64>``;
+* a seed, a persona, or no selector at all is delivered as ``--fingerprint`` /
+  ``--fingerprint-platform`` and composed by the browser process.
+
+The second path used to raise. It does not any more: the switches are
+implemented in the shipped binary, measured on the macos-arm64 artifact at
+152.0.7977.83 (``--fingerprint=42`` yields ``en-GB``/``Europe/London``; a bare
+launch composes a fresh identity; ``--fingerprint=host`` inherits the host).
+Refusing them here made the package unable to launch the browser at all.
 """
 
 from __future__ import annotations
@@ -22,36 +31,33 @@ from typing import Any, Mapping
 from .config import (
     CATALOGUE_VERSION,
     CHROMIUM_VERSION,
+    HOST_INHERITANCE_SEEDS,
     PROFILE_SCHEMA_VERSION,
     LaunchConfig,
     host_persona,
+    is_host_seed,
     normalize_platform,
     translate_options,
 )
 from .errors import ConfigurationError, ProfileError
 from .profile_validation import validate_profile
 
-#: The literal seed that requests host inheritance instead of a composition.
+#: The canonical seed that requests host inheritance instead of a composition.
+#: ``off``, ``false``, ``0``, ``disable`` and ``disabled`` are equivalent; see
+#: ``HOST_INHERITANCE_SEEDS``.
 HOST_INHERITANCE_SEED = "host"
 
 _CATALOGUE_MODEL = "anchors+dispersion"
 _CATALOGUE_ID = "apostate"
-#: Keys that only the retired fourteen-family catalogue carried.  A catalogue
+#: Keys that only the retired fourteen-family catalogue carried. A catalogue
 #: still carrying one is a version-1 file wearing a version-2 number.
 _RETIRED_CATALOGUE_KEYS = ("families", "family_count", "distributions", "compatibility_acceptance")
 _DISPERSION_AXES = (
-    "os_release", "gpu_identity", "cpu", "memory", "panel", "furniture",
-    "font_packs", "media_topology", "voices",
+    "os_release", "gpu_identity", "machine_class", "cpu", "memory", "panel",
+    "furniture", "font_packs", "media_topology", "network", "battery", "voices",
 )
 _POLICY_KINDS = ("locale", "theme")
 _ROTATION_STATUSES = frozenset({"measured-safe", "single-member"})
-
-_COMPOSITION_UNAVAILABLE = (
-    "composition happens in the browser process; the in-binary compositor is not yet wired "
-    "to this package, so a fingerprint seed or platform persona cannot be materialised here; "
-    "pass an explicit profile file or inline profile object, or request host inheritance "
-    'with fingerprint "host"'
-)
 
 
 def _load_json(path: Path, description: str) -> Mapping[str, Any]:
@@ -328,20 +334,36 @@ class DeterministicResolver:
         warnings: list[str] = []
 
         if profile_value is None:
-            if config.fingerprint != HOST_INHERITANCE_SEED:
-                raise ProfileError(_COMPOSITION_UNAVAILABLE)
-            if config.fingerprint_platform is not None:
-                raise ProfileError(
-                    "host inheritance disables every layer below it, so a platform persona "
-                    "cannot be applied without the in-binary compositor"
-                )
             selected: dict[str, Any] = {}
-            profile_id = "host-inherited"
-            selected_platform = host_persona()
-            warnings.append(
-                "host inheritance requested: no profile layer is composed and every "
-                "observable stays host-inherited"
-            )
+            if is_host_seed(config.fingerprint):
+                if config.fingerprint_platform is not None:
+                    # DefaultsCore's 0085 makes the browser refuse this combination
+                    # too. Under host inheritance nothing is composed, so a persona
+                    # cannot be honoured, and quietly presenting the operator's real
+                    # machine when they asked for another platform is the worst
+                    # outcome available.
+                    raise ProfileError(
+                        "host inheritance disables every layer below it, so a platform "
+                        "persona cannot be applied at the same time"
+                    )
+                profile_id = "host-inherited"
+                selected_platform = host_persona()
+                warnings.append(
+                    "host inheritance requested: no profile layer is composed and every "
+                    "observable stays host-inherited"
+                )
+            else:
+                # The browser process composes from the seed. The package sends the
+                # selectors and no profile envelope: an envelope outranks the seed,
+                # so emitting one here would silently suppress composition.
+                profile_id = "native-composed"
+                selected_platform = config.fingerprint_platform
+                if config.fingerprint is None:
+                    warnings.append(
+                        "no fingerprint seed given: the browser draws a fresh seed on every "
+                        "launch, so this identity does not persist. Pass fingerprint=<seed> "
+                        "for a stable identity"
+                    )
         else:
             explicit = _profile_file(profile_value)
             if explicit is None and isinstance(profile_value, Mapping):

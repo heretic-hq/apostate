@@ -1,378 +1,277 @@
 # Methodology
 
-How correctness is defined, evidenced, and verified in this project. Every
-other document defers to this one.
-
-## 1. The falsifiable claim
-
-"Stealth" is not a property that can be measured, so it is not a unit of work
-here. It is replaced by a claim that can be falsified:
-
-> A browser is correct for a declared target when every observable it emits
-> matches that target's measured contract.
-
-The declared target is either a named physical reference device or a named
-compatibility target. Physical and compatibility targets use separate evidence
-classes and acceptance tracks; neither is silently promoted into the other.
-Correctness is still a diff against the declared target, not a judgement about
-whether something "looks like a bot". This is the whole reason the project is
-tractable: a 500-row surface map with opinions attached does not converge, and
-a 500-row surface map with a target contract attached converges mechanically.
-
-## 2. Axioms
-
-**A1 — Provenance.** Every value must be produced by the code path that would
-have produced the real value. Patch the emitter, never the accessor.
-
-No JavaScript injection. No CDP override. No wrapper objects, `Proxy`, or
-redefined property descriptors. A value that is correct only when read the
-obvious way is not correct. Getting this right makes `Function.prototype.toString`
-probing, descriptor comparison, prototype-chain walking, worker-scope re-reads
-and cross-realm checks irrelevant *by construction* rather than by
-counter-measure — there is nothing for them to find, because nothing was
-wrapped.
-
-**A2 — Coherence, not concealment.** Correct means "equal to the declared
-target", never "less detectable". The target may be a named physical reference
-device or a named compatibility target, but that class must remain explicit. A
-patch that makes a value harder to read, noisier, or absent has not made it
-correct. Every patch cites the physical corpus row or compatibility acceptance
-record it reproduces.
-
-**A3 — Determinism.** Real hardware is deterministic. Two identical canvas
-renders on real silicon are bit-identical; two reads of `deviceMemory` agree;
-an audio graph rendered twice yields the same samples.
-
-Therefore Apostate injects **no per-call randomness**. Variation lives at the
-profile boundary — a different profile is a different device — never inside a
-session. Randomised noise is itself a tell: it is unstable within a session,
-it breaks returning-visitor consistency across sessions, and it is a behaviour
-no physical device exhibits. Where a value cannot be derived, it is **replayed**
-from an eligible reviewed capture, not synthesised. A compatibility-backed value
-may be replayed for an offered compatibility profile under §4; that does not
-make it physical-device evidence. Compatibility-backed and composed catalogue
-values are never invented without an identified source and target contract.
-
-## 3. Evidence tiers
-
-Every assertion recorded in the ledger carries a tier. Tiers exist because the
-inputs to this project have wildly different reliability and mixing them
-silently is how a stealth project accumulates confident errors.
-
-| Tier | Meaning | Examples |
-|------|---------|----------|
-| **T0** | Measured | A per-file verified capture; a value observed on real hardware here |
-| **T1** | Primary | Chromium source; W3C/WHATWG/IETF spec text; peer-reviewed paper |
-| **T2** | Secondary | Unreviewed external source or another tool's patch set |
-| **T3** | Inference | Reasoning from T0/T1 without direct observation |
-
-**The closing rule: a ledger row may be marked `resolved` only on T0 or T1
-evidence.** T2 may open a row; it may never close one. T3 may never close one.
-
-This rule quarantines uncertain inputs automatically. Anything imported from a
-source whose method or provenance cannot be audited enters at T2 and stays open
-until re-derived from Chromium source or measured against a real device.
-
-## 4. Ground truth and catalogue policy
-
-Ground truth means evidence whose provenance can be checked at the file level.
-A checked-in raw capture is not automatically T0: its collector version,
-browser build, capture conditions, automation signals, failed probes and
-consent record must be reviewed for that specific file. Only a per-file
-verified capture may close T0. Inputs with uncertain or ambiguous provenance
-are excluded from reference use or quarantined until reviewed; they are not
-silently upgraded by a README, a filename or a matching value.
-
-The checked-in inventory therefore has mixed status. Some files are reviewed
-captures, while others are retained for analysis or history with an explicit
-non-T0 status. The inventory and the public catalogue are different things:
-raw captures need not ship in order for a profile to be selectable.
-
-Public profiles may be:
-
-1. **Physical-ground-truth** — a per-file verified, consented capture from a
-   physical device.
-2. **Compatibility-backed** — values measured from an external compatibility
-   runtime, then normalized, schema-checked and exercised against real targets.
-   This is compatibility evidence, not proof of a direct physical-device
-   capture.
-3. **Composed catalogue profiles** — coherent combinations of reviewed blocks
-   and catalogue values accepted under Chromium and platform constraints.
-
-Compatibility-backed and composed entries are labelled by their evidence class.
-They do not close a T0 ledger row, do not imply that the host owns the claimed
-GPU, display, fonts, audio stack or codecs, and do not permit values beyond
-native capability. Unsupported capabilities remain inherited, unavailable or
-blocked rather than invented.
-
-The three files in `resources/fingerprints/` that are schema templates are not
-captures and must never be cited as T0. A raw file with an uncertain source is
-treated the same way: excluded or quarantined until its own evidence closes.
-
-Unreviewed external fingerprint datasets are not redistributed or admitted as
-ground truth. A digest or normalized value may be an open lead, but it cannot
-reconstruct a render or close a ledger row without auditable source evidence.
-
-### Compatibility acceptance
-
-The initial product offers the compatibility-backed families derived from the
-project's authorized compatibility captures. They are not withheld merely
-because equivalent physical captures are not yet available. A later verified
-physical capture may replace or refine a family, but that replacement creates a
-new catalogue identity and does not rewrite the earlier compatibility evidence.
-
-An offered compatibility profile is selectable product input. It becomes a
-validated compatibility target only when the applicable Apostate build has
-been exercised against the normalized target contract and the result is
-repeatable. The external runtime's detector result is useful admission evidence
-for the offered profile, but it does not substitute for the native run and
-neither result closes a physical T0 row.
-
-For WebGL, compatibility acceptance is a cluster, not a renderer string. The
-native run must cover vendor and renderer identity, extensions, numeric limits,
-shader precision, and falsification probes that use the reported limits, such
-as allocation and compilation boundaries. WebGPU features and limits receive
-the same native-capability and behavior check. If the native path caps,
-intersects or inherits a value, that surface is reported as limited rather than
-called an exact compatibility match. Publication must not describe a
-provisional surface as validated.
-
-## 5. The registries
-
-Four artifacts. All work attaches to one of them.
-
-1. **Surface Ledger** (`ledger/surfaces.jsonl`) — the detector-side map. One
-   row per observable, carrying the decision fields that force a verdict.
-2. **Emitter Index** (`ledger/emitters.jsonl`) — the Chromium-side map. One row
-   per `(file, symbol, process)` that produces a value. Many-to-many with the
-   ledger; the join between the two is the real output of the mapping phase.
-3. **Profile Schema** (`config/profile.schema.json`) — the contract between
-   them. **Derived, never invented**: every `spoof` verdict in the ledger
-   demands exactly one profile field, and the schema is generated from that
-   set. Catalogue and composed profiles may use only fields admitted by this
-   contract.
-4. **Coherence Graph** (`ledger/coherence.jsonl`) — edges between ledger rows
-   that must agree with each other. User-agent ↔ client hints ↔ platform ↔ GPU
-   renderer ↔ font set ↔ screen geometry ↔ timezone. Nearly every real failure
-   is a broken edge rather than a wrong value, so edges are first-class rows
-   with their own owner, not comments on other rows.
-
-### A profile is only replayable by the build it was captured from
-
-Apostate does not spoof its own browser version: the binary really is the
-Chromium it reports, and claiming another would require behaving like that
-version — every feature-detection difference would contradict the claim.
-
-### Historical build-binding evidence
-
-It follows that a capture is bound to a build. A historical V3 run compared a
-reference taken on Chrome 152.0.7977.76 against a binary built from
-152.0.7977.82, and the version-bearing fields differed in ways no patch should
-ever fix. The conformance runner reports that separately rather than counting
-it as failure.
-
-The current release-candidate build is Chromium 152.0.7977.83. A capture must
-record the exact browser build, and a reference is only a valid V3 target for a
-binary of the same version. Rebasing onto a new Chromium means re-capturing
-the references, not just re-applying the patches.
-
-### Historical loader control: 30/30 on a self-consistency test
-
-Before reading anything into a cross-platform score, the loader itself has to be
-shown correct. The control for that holds every platform variable constant:
-capture the browser with no profile, derive a profile from that capture, run the
-same binary again with it, and diff the two.
-
-The historical control conformed on all 30 probes. Same host, same build, no
-platform difference in play — so that run showed the profile round-tripped
-through capture, derivation and replay without loss. It is scoped evidence for
-the loader path, not a current cross-platform conformance or release result.
-
-That makes the cross-platform number interpretable. A gap there is a property
-of the host, not a defect in the loader, and the two can be reported separately
-instead of being confounded.
-
-
-The test found one defect, and it was in the harness: the worker header echo was
-not being normalised for environment-dependent values, so two captures of one
-machine differed because they had used different ports. The main-thread echo had
-been normalised months of iterations earlier and the worker variant was added
-later without it.
-
-### Same-host control and its limits
-
-A same-host control isolates the profile loader from differences in installed
-resources and rendering implementations.
-
-A Linux host was made to present a *different Linux device* — eight cores rather
-than thirty-two, 16GB rather than 32, 2560x1440 rather than 800x600, an NVIDIA
-RTX 3060 rather than SwiftShader, Europe/Warsaw with Polish language
-preferences, dark mode, a fine pointer with hover — and the result diffed
-against the same host's own unprofiled capture.
-
-**Every field that differed was one the profile set.** Fonts, canvas, client
-rects, codecs, audio render, WebGPU, keyboard layout, media devices, speech
-voices and WebRTC capabilities all conform exactly. This establishes a control
-for the measured inputs.
-
-This test does not establish equivalence to the named NVIDIA device or to every
-device running the same OS. The reference still came from the same host. A
-different GPU, font collection, driver, or audio implementation requires its own
-functional measurements even when the OS agrees.
-
-### Historical cross-platform baseline and remaining work
-
-A Linux host was made to present a macOS M4 Max, and the result diffed against
-that machine. Against 319 differing fields with no profile, the profile closed
-77. These are historical baseline counts, not the current conformance score or
-a proof that the remaining behavior cannot be implemented.
-
-| kind | fields | why |
-|---|---|---|
-| closed by the profile | 77 | values the browser chooses |
-| **fonts** | 85 | the host does not have the font files |
-| **WebGL parameter tables** | 78 | see below — the measurement is confounded by the test host having no GPU |
-| canvas renders | 8 | follows font resources, shaping, metrics, and raster implementation |
-| codecs, WebGPU adapter, voices, keyboard, media devices | 17 | OS-provided resources the host lacks |
-| audio render | 4 | CPUID-selected FFT kernel and host libm |
-| still patchable | ~50 | headers, layout, remaining media queries |
-
-Cross-OS execution is a product requirement. A native reference machine is an
-oracle and a control; requiring that OS for execution does not close a
-cross-platform failure.
-
-Missing resources and differing implementations require different fixes. A
-font file may be provisioned. Font selection, outline extraction, rasterization,
-FFT arithmetic, and graphics operations may require portable implementations
-with the reference's behavior. An OS gate in stock Chromium establishes how
-that build behaves; it does not establish that another implementation is
-impossible.
-
-These implementations must satisfy the same axioms and verification gates as
-every other patch. Advertising a graphics limit requires executing operations
-at that limit. Advertising a codec or speech voice requires a working provider.
-Matching one captured digest does not establish parity for other inputs: retain
-held-out inputs, exceptional values, repeated calls, and native-path controls.
-Unimplemented or unmeasured behavior remains a reported failure. Neither a
-same-OS run nor a change to the scoring rules can close it.
-
-That the font half is provisionable is now measured, not assumed. Chromium on
-Linux asks fontconfig, and fontconfig answers from whatever it is pointed at:
-running the browser with `FONTCONFIG_FILE` set to a config naming one directory
-made it enumerate exactly the families in that directory. Pointed at a directory
-holding two families it reported those and nothing else; pointed at a config
-whose font path excluded the system directories it reported none at all.
-
-So font enumeration is a deployment decision with a known mechanism, and
-`scripts/make-fontconfig.py` generates the configuration and reports which of a
-reference device's families a directory still lacks.
-
-**Removal is worth much less than adding, and an earlier draft of this section
-overstated it.** It claimed that a Linux host enumerating DejaVu Sans, Liberation
-Sans and Noto Sans on a macOS profile was itself the tell. That does not hold:
-those three are freely downloadable, LibreOffice installs Liberation and DejaVu
-on any platform, and Noto arrives with all sorts of software. Real machines carry
-long tails of fonts their owners installed. A rule keyed on the *presence* of a
-foreign family would fire on ordinary users.
-
-The defensible signal is the inverse — the **absence of families the claimed
-platform cannot be without**. Menlo, Monaco, Zapfino, PingFang SC and Helvetica
-Neue ship with macOS and cannot be uninstalled. A machine claiming macOS that
-lacks them is not a Mac, and no amount of user behaviour explains it away.
-
-The measurement bears that out. Of 76 families compared between the reference
-Mac and an unprovisioned Linux host, 47 already agree on metrics. Of the 29 that
-differ, 26 are families absent from the host — recovered by installing them —
-and exactly 3 are the Linux families present here and not there. So removal buys
-three fields and is tidiness; installation buys twenty-six and is the work.
-
-**Metric-compatible substitution already works, and only for metrics.** The
-unprovisioned host reports Arial, Courier, Courier New, Helvetica, Times and
-Times New Roman as present with metrics identical to the Mac's, because
-fontconfig aliases them to Liberation and DejaVu, which were designed as
-metric-compatible substitutes. Generic `serif`, `sans-serif` and `monospace`
-resolve to identical widths — 692, 720 and 636 — on both machines.
-
-That is why the split between probe families matters. A probe that measures text
-*width* is satisfied by a metric-compatible substitute. A probe that reads
-rendered *pixels* is not: the glyph outlines differ, which is the 32% of text-band
-pixels that differ between the two machines. Installing the real files is what
-closes the second, and nothing closes it short of that.
-
-**The WebGL figure is not yet trustworthy, and the reason matters.** Every
-measurement behind it was taken on a build host with no GPU, through
-ANGLE-on-SwiftShader, against a Windows reference that was itself a GPU-less VM
-running Microsoft Basic Render Driver. Software rasteriser against software
-rasteriser.
-
-The differences that result are mixed in direction. Four limits are higher on
-our side and could be clamped down safely — clamping down is always safe,
-because a page can only falsify a limit by exceeding it. But three are *lower*:
-MAX_TEXTURE_SIZE, MAX_RENDERBUFFER_SIZE and MAX_VIEWPORT_DIMS all read 8192,
-which is SwiftShader's cap, against 16384 and 32767 on the reference. Raising
-those is exactly the move that gets falsified by a second code path — allocate
-the texture and the claim collapses.
-
-But a Linux host with a real GPU reports 16384 or more natively, because it is
-the same class of silicon a Windows machine would be reporting through D3D11.
-So an unknown share of this row is the test environment rather than the
-platform, and the honest position is that the cross-OS WebGL gap has not been
-measured yet. Measuring it needs a Linux host with a discrete GPU and a
-same-GPU Windows capture to compare against; until then this row should be read
-as an upper bound, not a ceiling.
-
-None of this was assumed. The comparison that produced it — an unprofiled build
-against the same reference — is the control, and it is worth re-running whenever
-the claim about what is reachable changes.
-
-## 6. Verification tiers
-
-A change is not done until it passes the tier its ledger row names.
-
-| Tier | Gate | Cost |
-|------|------|------|
-| **V0** | Schema and lint: ledger rows well-formed, patch applies, series ordered | free |
-| **V1** | Single translation unit compiles against the pinned build dir | seconds |
-| **V2** | Full build succeeds, binary launches, smoke suite passes | hours |
-| **V3** | **Physical corpus conformance**: launch with profile P, collect, diff against P's eligible physical reference | minutes |
-| **V3-C** | **Compatibility conformance**: launch with offered profile P, collect, and diff against its normalized compatibility target plus coherence probes | minutes |
-| **V4** | Live detector suite against a physical-reference track | minutes |
-| **V4-C** | Live detector suite against an offered compatibility profile | minutes |
-
-**V3 and V3-C are separate scoreboards.** Both are expressed in the same
-schema a collector produces, so per-surface pass/fail is a mechanical field
-diff rather than an opinion. V3 answers whether a profile matches a verified
-physical reference. V3-C answers whether an offered profile matches its
-normalized compatibility target and remains coherent when exercised through
-the native emitters. V4 and V4-C apply the corresponding live detector tracks.
-V3-C/V4-C are valid product acceptance evidence when physical references are
-unavailable; they never turn compatibility evidence into T0.
-
-The current release-candidate handoff does not claim V2, V3, V3-C, V4 or V4-C
-success. Full-build/native launch and package gates remain blocked where their
-platform or toolchain prerequisites are absent; V3 is blocked where there is
-no eligible same-build physical reference; V3-C is blocked until the native
-compatibility run is recorded; and V4/V4-C are blocked until their respective
-live-detector evidence exists. These are release gates, not claims that the
-source mapping or offered catalogue is incomplete.
-
-Builds are checkpoints, never a debugging loop: work is gated at V0/V1 and
-batched, so that entering V2 is an expectation of success rather than an
-experiment.
-
-## 7. Working rules for parallel work
-
-The map is large enough to need fan-out, and fan-out is how a project like this
-becomes incoherent. Four rules hold it together.
-
-1. **Fixed schema, never prose.** Every unit of delegated work returns JSON
-   validating against a schema in `ledger/schema/`.
-2. **No direct writes.** Workers emit proposals to `ledger/inbox/`. A single
-   arbiter merges into the ledger. This prevents write races and keeps one mind
-   responsible for consistency between rows.
-3. **Shard by category**, using the categories already present in the data, so
-   that a shard is semantically coherent and most coherence edges stay inside
-   one shard.
-4. **Escalate beats drop.** Marking a surface `out-of-scope` requires a cited
-   reason. Uncertainty is recorded as `escalate`. Dropping a real surface costs
-   a detection; a false keep costs one review.
+The engineering rules this fork is built under, and the measurements behind
+them.
+
+This page is for people reading or writing the patches. If you want to use the
+browser, read [README](../README.md), [flag reference](FLAGS.md) and
+[known limitations](LIMITATIONS.md) instead.
+
+## 1. What correct means
+
+A value is correct when it equals the value the declared target device would
+have emitted. "Harder to detect" cannot be measured, so it is not used as a
+goal. Every change is a diff against a device contract.
+
+That framing is what makes the work finite. Several hundred observables with
+opinions attached never converge. The same list with a target value per row
+converges by subtraction.
+
+## 2. Patch the emitter, never the accessor
+
+Every value comes out of the code path that would have produced the real value.
+No JavaScript injection. No CDP override. No wrapper objects, no `Proxy`, no
+redefined property descriptors.
+
+The reason is practical. A wrapped property is detectable by reading it an
+unusual way: `Function.prototype.toString`, a descriptor comparison, a
+prototype-chain walk, a re-read from worker scope, a cross-realm check. Patching
+the emitter makes all of those agree with the ordinary read, because no wrapper
+sits in between.
+
+`navigator.hardwareConcurrency` is the example. Its Blink accessor forwards to
+`base::SysInfo`, which also sizes Chromium's thread pools. Patching the accessor
+returns the right number while the process keeps scheduling work like the host.
+
+## 3. No new observables
+
+A change must not add anything a page can find that a stock Chromium does not
+have. That rules out a new command-line switch whose effect a page can infer, a
+new process name, a new JavaScript-visible property, and a new wrapper object.
+An anti-detect feature that is itself a fingerprint has cost more than it paid
+for.
+
+## 4. Coherence over concealment
+
+Correct means equal to the target. It does not mean noisier, absent, or harder
+to read. Blocking a surface is itself a value, and usually a rare one.
+
+Broken relationships between values cause more detections than wrong individual
+values. Applying the Client Hints patch on its own produced a browser reporting
+macOS through `userAgentData` and Linux through `navigator.platform`. A
+half-changed identity is worse than none. User agent, client hints, platform,
+GPU renderer, font set, screen geometry and timezone have to agree, so they are
+checked in pairs rather than one row at a time.
+
+## 5. No per-call randomness
+
+Real hardware is deterministic. Two identical canvas renders on real silicon are
+bit-identical. Two reads of `deviceMemory` agree. An audio graph rendered twice
+gives the same samples.
+
+So this fork adds no noise to canvas, WebGL, audio, or client rects. Two reads
+of one surface within one launch always agree. Variation happens when the seed
+changes, and a different seed is a different device rather than a different
+reading of the same device.
+
+Noise is the cheapest thing in this field to detect. It is unstable inside a
+session, it breaks returning-visitor consistency between sessions, and no
+physical device produces it.
+
+## 6. Capacity only ever goes down
+
+A profile may claim fewer cores than the host has, never more. Same for memory,
+GPU limits, codec support, font families, speech voices, and display area
+against window bounds.
+
+This is falsifiability, not modesty. A page can measure parallel throughput,
+allocate until allocation fails, compile a shader at the advertised limit, or
+ask a voice to speak. A claim below host capability survives every one of those
+probes. A claim above it fails the first one tried.
+
+Reporting a host's real 14 cores and 36 GB identifies one model of laptop.
+Reporting a fabricated 20 cores contradicts any timing probe. Reporting 8 cores,
+a real bucket a 14-core host can serve, is both common and unfalsifiable.
+
+### Why memory is clamped and fonts are not
+
+Two opposite rules sit next to each other here, and they follow from one
+question rather than from two moods.
+
+> Memory is clamped to the host because the user cannot install RAM to make a
+> claim true, so an unbacked claim is falsifiable by allocation. Fonts are
+> assumed because the user *can* install them, so the honest move is to tell
+> them to. The distinguishing factor is whether the user can change the host,
+> not how loud the tell is.
+
+So the browser clamps what the operator cannot fix and documents what they can.
+[docs/FONTS.md](FONTS.md) is the documenting half.
+
+Assuming provisioning means we stop checking, not that we start claiming absent
+faces. The enumeration filter is still subtractive, so a font the host genuinely
+lacks still cannot be made to measure.
+
+## 7. Selection, never synthesis
+
+A value is chosen from options observed on real systems. It is not invented to
+look plausible.
+
+Five randomly chosen font families is synthesis, and it is a tell, because
+installed fonts arrive in bundles. A machine with Myriad Pro has the rest of
+Creative Cloud. A machine with Cascadia Code has a developer's toolchain. So the
+font axis selects bundles, and every other axis selects whole options from a
+table rather than assembling a value field by field.
+
+## 8. The browser does not lie about being this Chromium
+
+The binary really is the Chromium version it reports. Claiming another version
+would mean behaving like that version, and every feature-detection difference
+would contradict the claim.
+
+It follows that a reference measurement is bound to the build it was taken on.
+Capability tables move between Chromium releases, so a capture from another
+build is evidence about hardware, not a target for this binary. Rebasing onto a
+new Chromium means re-measuring the references, not only re-applying the
+patches.
+
+## 9. What the measurements established
+
+These four results shaped the design, and two of them are limits rather than
+features.
+
+**Fonts have to be installed, not declared.** Chromium on Linux asks fontconfig,
+and fontconfig answers from whatever it is pointed at. Running the browser with
+`FONTCONFIG_FILE` set to a config naming one directory made it enumerate exactly
+the families in that directory, and a config whose font path excluded the system
+directories made it enumerate none. So removal works. Addition needs the files.
+Of 76 families compared between a reference Mac and an unprovisioned Linux host,
+47 already agreed on metrics; of the 29 that differed, 26 were families the host
+lacked and 3 were Linux families the Mac lacked. Installing the real files buys
+26 fields. Hiding the 3 foreign ones buys 3.
+
+The defensible detection here is absence, not presence. Menlo, Monaco, Zapfino,
+PingFang SC and Helvetica Neue ship with macOS and cannot be uninstalled, so a
+machine claiming macOS without them is not a Mac. A rule keyed on the presence
+of a foreign family would fire on ordinary users, because LibreOffice installs
+Liberation and DejaVu everywhere and real machines carry long tails of fonts
+their owners installed.
+
+**Audio renders identify the host CPU.** An `OfflineAudioContext` graph touches
+no audio hardware. Its output is fixed by the FFT kernel that CPUID selects at
+process start and by the host libm, so the same graph renders differently on
+arm64 and x86-64, by about the same margin as deliberately injected noise.
+Profiles are partitioned by CPU instruction set for that reason.
+
+**WebGL limit tables identify the backend, not the GPU.** On Metal, ANGLE
+hard-codes the whole limit and precision table instead of querying the device,
+so an M1 and an M4 Max return identical numbers. The same NVIDIA silicon returns
+a different table through D3D11 than through Vulkan. A claimed GPU model
+therefore cannot carry a limit table from a backend the host is not running, and
+the GPU capability cluster is selected from what the host's graphics stack can
+actually serve. [docs/LIMITATIONS.md](LIMITATIONS.md) states the user-visible
+consequence.
+
+**Software rendering is a throughput fact, not a string fact.** Stock
+Chromium's SwiftShader caps `MAX_TEXTURE_SIZE` and `MAX_RENDERBUFFER_SIZE` at
+8192, and patches `0027` and `0038` raise the software rasteriser's own limits
+to real-hardware values so the numbers are not the tell. Timing still is.
+Measured on one M4 Max between the two paths of the same binary, a fixed
+fragment-shader workload runs about 230 times slower in software and small draw
+calls about 35 times slower, on an identical CPU baseline. Closing that would
+mean either making software rendering fast or slowing real hardware down, and a
+deliberate timing adjustment is a new observable, which rule 3 forbids. So the
+browser declines to claim a discrete GPU on a host that renders in software.
+
+## 10. Verification
+
+A change is verified by measuring the surface it changes. Launch the binary,
+read the observable the way a page would read it, and compare against the target
+value. That is the whole gate.
+
+Three things do not count as verification. A successful compile shows the code
+builds. A schema check shows a file is well-formed. A renderer string shows one
+string. None of them show the surface emits the right value, and for anything
+with a capability behind it the measurement has to exercise the capability:
+allocate at the advertised limit, decode with the advertised codec, speak with
+the advertised voice.
+
+Repeat reads are part of the measurement, because rule 5 is only observable
+across two reads.
+
+One trap is worth naming because it costs a wave's worth of confidence. "This
+change applies cleanly" and "this change is applied" are different claims, and
+only the second one is about the tree you are going to build. A patch checked
+against a scratch copy of the pristine files can pass indefinitely while the
+working tree is missing two of its hunks. So the two checks are a pair and
+neither substitutes for the other: a forward check against the pristine files
+answers "will this apply", a reverse check against the working tree answers "is
+this applied", and each is meaningless in the other's situation. A reverse check
+against an unpatched tree fails because the content is not there yet, which
+looks identical to failing because it was never put there. Prefer whichever of
+the two has the noisy failure mode for the question you are actually asking.
+
+### How far something has been checked
+
+The ledger records a short label per surface so that "verified" means something
+specific rather than something reassuring. The labels are a description, not a
+release gate. Nothing is withheld from a build for lacking one, and a surface
+whose label is blank is simply a surface nobody has measured yet.
+
+| Label | What was done |
+|---|---|
+| V0 | The file is well-formed and the patch applies in series order |
+| V1 | The translation unit compiles against the pinned build |
+| V2 | The full build succeeds, the binary launches, the smoke run passes |
+| V3 | A launch was collected and diffed against a measured physical reference |
+| V4 | A launch was run against live detectors |
+
+`V3-C` and `V4-C` are the same two steps against a compatibility target rather
+than a physical device, and they stay on their own scoreboard because the
+evidence behind them is a different kind of thing.
+
+Most labelled rows sit at V2, and nothing has reached V3 or V4, so no claim on
+this page rests on physical-reference conformance or on a detector suite. The
+labels are per-patch as well as per-surface: a patch that has been built and
+launched can carry V2, and a patch that applies in series but has not been built
+yet cannot carry more than V0. The current numbers live in `ledger/`, which is
+where they stay accurate.
+
+### A claim outlives the thing it described
+
+This is the failure mode that cost this project the most, and it is invisible to
+anyone reading the claim. Three instances, all found in one pass:
+
+- A ledger row marked resolved, resting on a probe that could not see the
+  surface it was resolving.
+- Four patches asserting that Windows evidence was unavailable, while the
+  capture had been checked into the tree for a week.
+- A servability column in this documentation that promised a font-provisioning
+  path no C++ read, next to a page that correctly said the field was inert. Both
+  are gone: the field was deleted from the schema and the browser now assumes
+  the operator installed the fonts.
+
+None was written dishonestly. Each was true when written, and then the thing it
+described changed and the sentence did not. The reader cannot tell the
+difference, which is what makes it expensive: a stale claim reads exactly like a
+current one.
+
+Two habits follow. Name the symbol a claim depends on rather than the line
+number, so that a reader can check it and so that moving code does not silently
+invalidate the citation. And when a claim says something is absent,
+unimplemented or unavailable, check the tree before repeating it, because that is
+the class of claim that goes stale in the direction nobody notices.
+
+## 11. Where the parts live
+
+```
+patches/     The fork, one patch per concern, ordered by patches/series
+config/      profile.schema.json, the accepted profile fields
+resources/   The dispersion tables that a seed draws from
+corpus/      Measured GPU capability clusters
+build/       Every pinned build input. See docs/BUILD.md
+scripts/     Operational steps, including the reference resolver
+capture/     Measures a device and diffs a launch against it
+```
+
+The profile itself lives in `base/apostate/profile.h`, in `base/` because
+`base::SysInfo` is its first consumer and `base` cannot depend on `content` or
+`chrome`. It arrives on the command line because field trials initialise before
+mojo, so a value delivered over a mojo interface cannot serve a read that
+happens earlier. Command-line switches are not readable by web content.
+
+Every getter returns `nullopt` when the profile does not carry the field, and
+callers fall through to the host value. An absent field stays inherited. A
+default invented in the loader would be wrong in a way no consumer can detect.
+
+[docs/ARCHITECTURE.md](ARCHITECTURE.md) has the process topology and the
+surfaces that are computed in more than one process.

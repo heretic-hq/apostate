@@ -38,6 +38,7 @@ from .launch import (
 )
 from .profile_validation import load_schema, validate_profile
 from .resolver import DeterministicResolver, ProfileResolution, load_catalogue, resolve, resolve_profile
+from .widevine import WidevineError, discover_widevine, provision_widevine
 
 __all__ = [
     "ApostateError",
@@ -83,4 +84,7 @@ __all__ = [
     "target_platform",
     "translate_options",
     "validate_profile",
+    "WidevineError",
+    "discover_widevine",
+    "provision_widevine",
 ]

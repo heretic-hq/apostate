@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""V0 gate: validate ledger files against their schemas.
+"""V0 gate: validate ledger files against their schemas, and reconcile the
+ledger against the detector-surface catalogue.
 
 Deliberately dependency-free. This runs before anything else in the pipeline, so
 it must work on a bare checkout with no install step — a gate that needs setting
@@ -8,15 +9,18 @@ up is a gate that gets skipped.
 Implements the subset of JSON Schema the ledger schemas actually use, and fails
 loudly on any construct it does not implement rather than passing it silently.
 
-    python3 scripts/validate-ledger.py
+    python3 scripts/validate-ledger.py            # gate + reconciliation summary
+    python3 scripts/validate-ledger.py --full     # plus every unmapped catalogue key
 """
 
 import json
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCHEMA_DIR = ROOT / "ledger" / "schema"
+CATALOGUE = ROOT / "resources" / "surfaces.json"
 
 FILES = [
     ("ledger/surfaces.jsonl", "surface.schema.json"),
@@ -28,13 +32,31 @@ SUPPORTED = {
     "type", "properties", "required", "additionalProperties", "enum", "const",
     "items", "minItems", "maxItems", "pattern", "description", "title", "$id",
     "$schema", "allOf", "if", "then", "contains", "propertyNames", "minLength",
-    "format", "$defs", "$ref",
+    "format", "$defs", "$ref", "$comment",
 }
 
 TYPES = {
     "object": dict, "array": list, "string": str, "boolean": bool,
     "integer": int, "number": (int, float), "null": type(None),
 }
+
+# The verification vocabulary, in order. docs/METHODOLOGY.md, "## 10.
+# Verification", subsection "How far something has been checked". Comparing a
+# row's achieved tier against its required one is the whole point of having
+# both fields, so it lives here rather than in a human's head.
+TIERS = ["V0", "V1", "V2", "V3", "V4"]
+
+SERIES = ROOT / "patches" / "series"
+
+# The last series entry that has actually been built. Everything from 0001
+# through this entry is inside the CI build that went green on linux-x64,
+# linux-arm64 and macos-arm64, and whose macos-arm64 artifact launches and
+# passes the smoke suite — which is exactly what V2 means, so a row implemented
+# by one of them may record V2. Entries AFTER it are in the series and apply
+# cleanly but have never been compiled, so a row implemented by one of them can
+# record V0 and no more. Move this line when a build lands, not when a patch
+# lands: series membership is not a build.
+BUILT_THROUGH = "0083-loader-composes-when-no-profile-given.patch"
 
 
 def resolve(schema, root):
@@ -74,7 +96,6 @@ def validate(value, schema, root, path, errors):
 
     if isinstance(value, str):
         if "pattern" in schema:
-            import re
             if not re.search(schema["pattern"], value):
                 errors.append(f"{path}: {value!r} does not match /{schema['pattern']}/")
         if "minLength" in schema and len(value) < schema["minLength"]:
@@ -121,6 +142,13 @@ def validate(value, schema, root, path, errors):
     return errors
 
 
+def load_rows(root: pathlib.Path, rel: str):
+    f = root / rel
+    if not f.exists():
+        return []
+    return [json.loads(l) for l in f.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
 def cross_references(root: pathlib.Path):
     """Check that ids referenced between ledger files actually exist.
 
@@ -129,15 +157,9 @@ def cross_references(root: pathlib.Path):
     generates them, which is why this runs as part of the gate rather than as a
     later cleanup.
     """
-    def load(rel):
-        f = root / rel
-        if not f.exists():
-            return []
-        return [json.loads(l) for l in f.read_text().splitlines() if l.strip()]
-
-    surfaces = load("ledger/surfaces.jsonl")
-    emitters = load("ledger/emitters.jsonl")
-    coherence = load("ledger/coherence.jsonl")
+    surfaces = load_rows(root, "ledger/surfaces.jsonl")
+    emitters = load_rows(root, "ledger/emitters.jsonl")
+    coherence = load_rows(root, "ledger/coherence.jsonl")
 
     sids = {r["id"] for r in surfaces}
     eids = {r["id"] for r in emitters}
@@ -185,7 +207,177 @@ def cross_references(root: pathlib.Path):
     return errors, sorted(pending)
 
 
+def catalogue_coverage(surfaces, catalogue):
+    """Map every catalogue key to the ledger rows that cover it.
+
+    Two ways a row covers a key, both mechanical so the answer does not drift:
+    the key appears verbatim in the row's 'observable', or the row declares it in
+    'catalogue_keys'. A '*.member' key is credited to a row whose observable
+    names '.member' or ' member', which is how the catalogue writes a property
+    whose receiver varies.
+    """
+    mapped = {}
+    observables = [(r["id"], r["observable"]) for r in surfaces]
+    explicit = {}
+    for r in surfaces:
+        for k in r.get("catalogue_keys", []):
+            explicit.setdefault(k, []).append(r["id"])
+
+    for entry in catalogue:
+        key = entry["key"]
+        if key in mapped:
+            continue
+        hits = list(explicit.get(key, []))
+        if key.startswith("*."):
+            pattern = r"[.\s]" + re.escape(key[2:]) + r"\b"
+            hits += [i for i, obs in observables if re.search(pattern, obs) and i not in hits]
+        else:
+            hits += [i for i, obs in observables if key in obs and i not in hits]
+        mapped[key] = sorted(set(hits))
+    return mapped
+
+
+def tier_index(tier):
+    return TIERS.index(tier) if tier in TIERS else None
+
+
+def series_entries():
+    if not SERIES.exists():
+        return []
+    return [l.strip() for l in SERIES.read_text(encoding="utf-8").splitlines()
+            if l.strip() and not l.strip().startswith("#")]
+
+
+def contradictions(surfaces, built):
+    """Rows whose status disagrees with what the row itself records.
+
+    Reported rather than failed: the ledger carries a real backlog, and a gate
+    that cannot run is a gate nobody runs. The counts are the point.
+    """
+    out = []
+    for r in surfaces:
+        rid = r["id"]
+        status = r.get("status")
+        req, ach = r.get("verification_tier"), r.get("achieved_tier")
+        ri, ai = tier_index(req), tier_index(ach)
+        patch = r.get("patch_id")
+
+        if ai is not None and ri is not None:
+            if ai >= ri and status in ("open", "proposed"):
+                out.append(f"{rid}: achieved {ach} meets required {req} but status is '{status}'")
+            if ai < ri and status == "resolved":
+                out.append(f"{rid}: status 'resolved' but achieved {ach} is below required {req}")
+        if status == "resolved" and ach is None and r.get("verdict") == "spoof":
+            out.append(f"{rid}: status 'resolved' as a spoof with no achieved tier recorded")
+        if status == "resolved" and r.get("verdict") == "spoof" and not patch:
+            out.append(f"{rid}: status 'resolved' as a spoof with no patch_id")
+        if ach == "V0" and not patch:
+            out.append(f"{rid}: achieved V0 recorded with no patch_id to have applied")
+        if (status == "resolved" and r.get("verdict") == "spoof"
+                and r.get("corpus_coverage") == "absent" and req in ("V3", "V4")):
+            out.append(f"{rid}: status 'resolved' at required {req} with corpus_coverage 'absent'")
+        if ai is not None and ai > 0 and built and patch and patch not in built:
+            out.append(f"{rid}: achieved {ach} recorded but patch '{patch}' is not in the built "
+                       f"prefix of patches/series (built through {BUILT_THROUGH})")
+    return sorted(out)
+
+
+def reconcile(root: pathlib.Path, full: bool):
+    """Report the catalogue/ledger reconciliation. Returns hard errors only."""
+    surfaces = load_rows(root, "ledger/surfaces.jsonl")
+    if not CATALOGUE.exists():
+        print(f"\n  --  {CATALOGUE.relative_to(root)} (not present; reconciliation skipped)")
+        return []
+    catalogue = json.loads(CATALOGUE.read_text(encoding="utf-8"))
+    keys = {e["key"] for e in catalogue}
+    severity = {}
+    for e in catalogue:
+        severity.setdefault(e["key"], e.get("severity", "unrated"))
+
+    errors = []
+    for r in surfaces:
+        for k in r.get("catalogue_keys", []):
+            if k not in keys:
+                errors.append(f"surface {r['id']}: catalogue_keys names '{k}', "
+                              f"which is not a key in resources/surfaces.json")
+
+    series = series_entries()
+    built = set(series[:series.index(BUILT_THROUGH) + 1]) if BUILT_THROUGH in series else set()
+    # A patch that is authored and applies but has not been sequenced yet is a
+    # real intermediate state while a wave is in flight, so this is reported
+    # rather than failed. It is still worth seeing: a row pointing at a patch
+    # nobody will build is indistinguishable from progress.
+    unsequenced = sorted(f"{r['id']} -> {r['patch_id']}" for r in surfaces
+                         if r.get("patch_id") and series and r["patch_id"] not in series)
+
+    mapped = catalogue_coverage(surfaces, catalogue)
+    unmapped = sorted(k for k, hits in mapped.items() if not hits)
+    covered_rows = {i for hits in mapped.values() for i in hits}
+    uncatalogued = sorted(r["id"] for r in surfaces if r["id"] not in covered_rows)
+    bad_status = contradictions(surfaces, built)
+    claimed = {r["patch_id"] for r in surfaces if r.get("patch_id")}
+    unclaimed = [p for p in series if p not in claimed]
+    unclaimed_unbuilt = [p for p in unclaimed if p not in built]
+
+    order = ["critical", "high", "medium", "low", "info", "unrated"]
+    by_sev = {s: [k for k in unmapped if severity.get(k) == s] for s in order}
+
+    print(f"\ncatalogue reconciliation  ({len(catalogue)} entries, {len(keys)} unique keys "
+          f"in resources/surfaces.json; {len(surfaces)} ledger rows)")
+    print(f"  {len(keys) - len(unmapped)} catalogued surface(s) map to a ledger row")
+    print(f"  {len(unmapped)} catalogued surface(s) with NO ledger row: "
+          + ", ".join(f"{s} {len(v)}" for s, v in by_sev.items() if v))
+    shown = order if full else ["critical", "high"]
+    for s in shown:
+        for k in by_sev[s]:
+            print(f"    - [{s}] {k}")
+    if not full:
+        rest = sum(len(by_sev[s]) for s in order if s not in shown)
+        if rest:
+            print(f"    ... {rest} more at medium/low/info/unrated; pass --full to list them")
+
+    print(f"  {len(uncatalogued)} ledger row(s) with NO catalogue entry "
+          f"(wire-level and cross-process surfaces the catalogue does not list):")
+    for i in uncatalogued:
+        print(f"    - {i}")
+
+    print(f"  {len(bad_status)} row(s) whose status contradicts their own evidence:")
+    for c in bad_status:
+        print(f"    - {c}")
+
+    print(f"  {len(unclaimed)} of {len(series)} patch(es) in patches/series implement no ledger row"
+          + (f", {len(unclaimed_unbuilt)} of them after the built prefix:" if unclaimed_unbuilt else ":"))
+    for p in (unclaimed if full else unclaimed_unbuilt):
+        print(f"    - {p}")
+    if not full and len(unclaimed) > len(unclaimed_unbuilt):
+        print(f"    ... {len(unclaimed) - len(unclaimed_unbuilt)} earlier entries; pass --full to list them")
+
+    print(f"  {len(unsequenced)} row(s) pointing at a patch that is not in patches/series "
+          f"(authored, not yet sequenced):")
+    for u in unsequenced:
+        print(f"    - {u}")
+
+    recorded = [r for r in surfaces if r.get("achieved_tier")]
+    per_tier = {t: sum(1 for r in recorded if r["achieved_tier"] == t) for t in TIERS}
+    open_rows = [r for r in surfaces if r.get("status") == "open"]
+    open_ach = [r for r in open_rows if r.get("achieved_tier")]
+    untouched = [r for r in open_rows if not r.get("achieved_tier") and not r.get("patch_id")]
+    print(f"\nachieved-tier coverage")
+    print(f"  {len(recorded)} of {len(surfaces)} row(s) record an achieved tier ("
+          + ", ".join(f"{t} {n}" for t, n in per_tier.items() if n) + f"); {len(surfaces) - len(recorded)} blank")
+    print(f"  open rows: {len(open_rows)} total, {len(open_ach)} with an achieved tier, "
+          f"{len(untouched)} untouched (no patch and no achieved tier)")
+    resolved_rows = [r for r in surfaces if r.get("status") == "resolved"]
+    resolved_ach = [r for r in resolved_rows if r.get("achieved_tier")]
+    print(f"  resolved rows: {len(resolved_rows)} total, {len(resolved_ach)} with an achieved tier, "
+          f"{len(resolved_rows) - len(resolved_ach)} blank (inherit, suppress and out-of-scope rows "
+          f"have no patch to build, so there is nothing to record)")
+
+    return errors
+
+
 def main() -> int:
+    full = "--full" in sys.argv[1:]
     failures = 0
     checked = 0
     for rel, schema_name in FILES:
@@ -220,6 +412,11 @@ def main() -> int:
         print(f"\n  {len(pending)} coherence member(s) not yet mapped (backlog, not a failure):")
         for m in pending:
             print(f"    - {m}")
+
+    recon_errors = reconcile(ROOT, full)
+    for err in recon_errors:
+        print(f"  FAIL {err}")
+    failures += len(recon_errors)
 
     print(f"\n{checked} row(s) checked, {failures} failure(s)")
     return 1 if failures else 0

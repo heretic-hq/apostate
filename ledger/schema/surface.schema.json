@@ -56,6 +56,11 @@
       "description": "Coherence graph edge ids this row participates in.",
       "items": { "type": "string" }
     },
+    "catalogue_keys": {
+      "type": "array",
+      "description": "Keys from resources/surfaces.json that this row covers, for catalogue entries the observable string does not name verbatim — prose titles such as 'Math Transcendental Function FPU Precision', and members of a family the observable names collectively. Purely additive: scripts/validate-ledger.py also credits any catalogue key that appears verbatim in 'observable', so this array is only for the pairings text matching cannot see. A key here that is not in the catalogue is an error, because it means the catalogue entry was renamed or never existed.",
+      "items": { "type": "string" }
+    },
     "evidence": {
       "type": "array",
       "minItems": 1,
@@ -77,7 +82,13 @@
     "verification_tier": {
       "type": "string",
       "enum": ["V0", "V1", "V2", "V3", "V4"],
-      "description": "The gate this row must pass to be considered done."
+      "description": "REQUIRED tier: the gate this row is measured against, and the depth of check its verdict asks for. Compare against achieved_tier. Not a release condition — nothing is withheld from a build for lacking a label."
+    },
+    "achieved_tier": {
+      "type": "string",
+      "enum": ["V0", "V1", "V2", "V3", "V4"],
+      "description": "ACHIEVED tier: the highest gate this row has actually passed, in the same vocabulary as verification_tier (docs/METHODOLOGY.md, '## 10. Verification', subsection 'How far something has been checked'). achieved_tier at or above verification_tier means the row has been checked as far as it claims to need; scripts/validate-ledger.py computes that comparison and reports every row whose status disagrees with it. V0: the row validates and its patch applies to the pinned tree. V1: a translation unit carrying the change compiles. V2: the change is inside a full build that succeeded, launched and passed the smoke suite. V3: a profiled launch was collected and diffed against an eligible physical reference for this surface. V4: a live detector suite ran against it. ABSENT means nobody has measured it yet, which is the honest record for a row nobody has implemented — never fill it in speculatively, because an invented achieved tier is worse than a blank one. Any tier above V0 requires a patch: there is nothing to build otherwise.",
+      "$comment": "V3-C and V4-C from docs/METHODOLOGY.md are a separate compatibility scoreboard with its own schema, ledger/schema/compatibility-acceptance.schema.json, and are deliberately not members of this ordered vocabulary."
     },
     "status": {
       "type": "string",
@@ -103,6 +114,14 @@
           "evidence": { "contains": { "properties": { "tier": { "enum": ["T0", "T1"] } }, "required": ["tier"] } }
         }
       }
+    },
+    {
+      "if": { "required": ["achieved_tier"] },
+      "then": { "required": ["verification_tier"] }
+    },
+    {
+      "if": { "properties": { "achieved_tier": { "enum": ["V1", "V2", "V3", "V4"] } }, "required": ["achieved_tier"] },
+      "then": { "required": ["patch_id"], "properties": { "patch_id": { "type": "string", "minLength": 1 } } }
     }
   ]
 }

@@ -738,6 +738,75 @@
           "description": "outerHeight - innerHeight. Evidence class: physical-ground-truth when captured, catalogue-value otherwise."
         }
       }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The network the claimed device is on, as the Network Information API reports it. Served into Blink's NetworkStateNotifier stored state rather than at navigator.connection, because that one struct feeds navigator.connection.{effectiveType,rtt,downlink,saveData}, the deprecated rtt/downlink/ect client hints FrameFetchContext sends when a site opts in with Accept-CH, the Save-Data request header, and the prefers-reduced-data media feature. Overriding the JS accessor alone would leave the request headers describing the host's real link. Absent means the host's own estimate, which contradicts both the composed device and the proxy exit.",
+      "properties": {
+        "effective_type": {
+          "type": "string",
+          "enum": [
+            "slow-2g",
+            "2g",
+            "3g",
+            "4g"
+          ],
+          "description": "Spelled as the JS EffectiveConnectionType enum spells it. Pinned against http_rtt_ms by the emitter using net::kHttpRttEffectiveConnectionTypeThresholds, the same table SetNetworkConnectionInfoOverride uses: 4g is under 272 ms, 3g is 272-1419, 2g is 1420-2009, slow-2g is 2010 and above. A named type holds the round trip inside its band; a round trip supplied alone selects the type Chromium would have derived. Near every real desktop reports 4g."
+        },
+        "http_rtt_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3000,
+          "description": "The raw HTTP round-trip estimate, not the number a page reads. No granularity constraint on purpose: real NQE estimates are arbitrary integer milliseconds, and NetworkStateNotifier::RoundRtt produces the observable value from this one by multiplying by a per-origin salted 0.90-1.10, rounding to the nearest 50 ms and capping at 3 s. Feeding the estimate into that path rather than bypassing it is what keeps the emitted granularity Chromium's own. Note 50 ms, not the 25 ms the spec text describes."
+        },
+        "downlink_mbps": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10,
+          "description": "The raw downlink throughput estimate in Mbps, again pre-rounding. NetworkStateNotifier::RoundMbps applies the same per-origin multiplier, rounds to the nearest 50 kbps bucket and caps at 10 Mbps, so a larger figure is not observable and the ceiling here is that cap rather than a claim about real links. Floored by the emitter at the claimed type's own typical throughput from kTypicalDownlinkMbpsEffectiveConnectionType (4g 1.600, 3g 0.400, 2g 0.075, slow-2g 0.040), so 4g cannot ship a 2G figure."
+        },
+        "save_data": {
+          "type": "boolean",
+          "description": "Whether data saver is on. One value with four emitters: navigator.connection.saveData, the Save-Data request header, the prefers-reduced-data media feature, and Blink's loading heuristics. Desktop Chrome ships no UI that turns this on, so true is a claim desktop Chrome cannot produce and a desktop profile should leave it absent or false."
+        }
+      }
+    },
+    "battery": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The battery the claimed device has, as the Battery Status API reports it. navigator.getBattery is exposed in this build and resolves with the host's real battery unless this section is present, so a profile that omits it inherits the host: a laptop-shaped profile on a battery-less host reports charging true with level 1.0 and dischargingTime Infinity, which is exactly what a server reports, and a desktop-shaped profile on a laptop reports a discharging battery no desktop has. Served by BatteryDispatcher, which does not bind the BatteryMonitor pipe at all when this section is present, so the host is never read and one status stands for the whole launch.",
+      "properties": {
+        "present": {
+          "type": "boolean",
+          "description": "Whether the claimed chassis has a battery. false does not hide the API and must not be read as doing so: desktop Chrome still resolves getBattery(), answering charging true, level 1.0, chargingTime 0 and dischargingTime Infinity, which is BatteryStatus's own default. So false means emit that tuple, and it is coherent only for a chassis with no battery. Presence must agree with the claimed chassis. Nothing in the profile names a chassis directly \u2014 every os_release option reports form_factors [\"Desktop\"] because Chromium's form-factors hint has no Laptop value \u2014 so the dispersion catalogue conditions this on the panel axis, which is what actually encodes a laptop display versus an external monitor."
+        },
+        "charging": {
+          "type": "boolean",
+          "description": "Whether the battery is charging. Ignored when present is false. Determines which of the two times is Infinity: the emitter derives that rather than trusting the profile, because a pair the API forbids is a harder tell than any single value."
+        },
+        "level": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "multipleOf": 0.01,
+          "description": "Charge as a fraction. Ignored when present is false, which reports 1.0. The 0.01 step is Blink's constraint rather than the platform's: BatteryStatus::EnsureTwoSignificantDigits does round(level * 100) / 100 on every construction on every platform, so finer detail is discarded even where the platform is finer \u2014 macOS computes current_capacity / max_capacity, which is an arbitrary fraction before Blink rounds it. A level of 1.0 with charging true also forces chargingTime to zero."
+        },
+        "charging_time_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800,
+          "multipleOf": 60,
+          "description": "Seconds until full. Omit for Infinity, which is what the API requires whenever the battery is not charging. Whole minutes are mandatory rather than stylistic: battery_status_manager_mac.cc reports base::Minutes(n).InSeconds() from the IOPM minute count, so macOS cannot produce anything else, while Windows BatteryLifeTime and UPower TimeToFull report seconds where a whole minute is one of the values they can produce. The emitter rounds to the nearest minute regardless, so a figure no platform could have produced cannot reach a page."
+        },
+        "discharging_time_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800,
+          "multipleOf": 60,
+          "description": "Seconds until empty. Omit for Infinity, which is what the API requires whenever the battery is charging. Whole minutes for the same reason as charging_time_seconds. Should be consistent with level: a 0.98 charge reporting forty minutes of runtime describes a battery nothing would ship."
+        }
+      }
     }
   }
 }

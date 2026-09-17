@@ -18,8 +18,9 @@ CI build alone does not establish it.
 | `build/args/windows-x64.gn` | Windows x64 GN settings |
 | `build/MAC_SDK_VERSION` | Exact macOS SDK version, `26.5` |
 | `build/MAC_SDK_BUILD` | SDK `ProductBuildVersion`, `25F70` |
-| `build/WINDOWS_SDK_INSTALLER_URL` | Pinned 10.0.26100 SDK installer, for the Debuggers feature |
+| `build/WINDOWS_SDK_INSTALLER_URL` | Version-specific 10.0.26100 SDK installer, for the Debuggers feature |
 | `build/WINDOWS_SDK_INSTALLER_VERSION` | Which SDK release that URL serves, `10.0.26100.4654` |
+| `build/WINDOWS_SDK_INSTALLER_SHA256` | Digest of those installer bytes |
 | `build/linux/Dockerfile` | Linux base image digest and build environment |
 | `patches/series` | Patch names and application order |
 | `build/MANIFEST.lock` | Generated record of resolved build inputs and outputs |
@@ -300,19 +301,24 @@ written down.
 
 `scripts/provision-windows-debuggers.sh` installs that one feature, and both
 the build and the probe run it. It is idempotent, so it costs nothing once the
-image ships the feature. Two rules keep it from becoming the drift it is
-preventing:
+image ships the feature. It pins the installer by URL and by digest:
+`build/WINDOWS_SDK_INSTALLER_URL` is the version-specific 10.0.26100 link
+rather than a "latest SDK" link, `build/WINDOWS_SDK_INSTALLER_VERSION` records
+which release that serves, and `build/WINDOWS_SDK_INSTALLER_SHA256` is checked
+before the installer runs, because a pinned URL only promises a name. Only
+`OptionId.WindowsDesktopDebuggers` is requested.
 
-- The installer is pinned in `build/WINDOWS_SDK_INSTALLER_URL` to the
-  10.0.26100 release (`build/WINDOWS_SDK_INSTALLER_VERSION` records which),
-  and only `OptionId.WindowsDesktopDebuggers` is requested. A "latest SDK"
-  link would install a second SDK version under `Windows Kits\10`, and
-  `vs_toolchain.py` autodetection may then prefer it over `win_sdk_version` —
-  the same silent-input drift the macOS SDK pin exists to prevent, arriving by
-  a different door.
-- Afterwards it asserts both that `Debuggers/x64/dbghelp.dll` exists and that
-  no SDK version directory appeared under `Windows Kits\10\bin` that was not
-  there before.
+Which SDK version the build uses is not decided by any pin of ours, and cannot
+drift. `build/vs_toolchain.py` hardcodes `SDK_VERSION = '10.0.26100.0'` and
+prints it verbatim as GN's `sdk_version`, with
+`build/toolchain/win/setup_toolchain.py` holding a second copy as a
+cross-check. There is no version autodetection to mislead, so an SDK
+directory appearing alongside can never be selected over the intended one —
+that pin travels with `build/CHROMIUM_VERSION`, which is why
+`build/args/windows-x64.gn` names no version either. The script still logs the
+`bin`, `Include` and `Lib` version directories before and after, because a
+component of the pinned version *disappearing* is a real failure and the
+listing is how it would be recognised.
 
 Windows has 130 GB of storage at every instance size, the least of the four
 targets. A complete `macos-arm64` build measures 66 GB — 49 GB checkout, 16 GB

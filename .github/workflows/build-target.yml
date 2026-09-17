@@ -72,89 +72,20 @@ jobs:
       - name: Report available disk
         shell: bash
         run: df -h "$APOSTATE_WORKSPACE"
-      - name: Verify host tooling
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Early, because every tool below is reached by a script that runs
-          # hours into the job. The archive probe is the reason this step
-          # exists: package-artifact.sh is the very last step, so a runner that
-          # cannot write the archive format burns a whole successful build
-          # before anyone finds out.
-          need() {
-            command -v "$1" >/dev/null || {
-              echo "$1 is required by $2 on this runner" >&2
-              exit 1
-            }
-          }
-          need python3 scripts/build.sh
-          need git scripts/fetch-sources.sh
-          probe="$(mktemp -d)"
-          trap 'rm -rf "$probe"' EXIT
-          : > "$probe/member"
-          # windows-x64 packages a .zip; every other target packages .tar.zst.
-          # Probing the wrong one would fail a runner that is actually fine.
-          if [[ "$TARGET" == windows-* ]]; then
-            need 7z scripts/package-artifact.sh
-          else
-            need tar scripts/package-artifact.sh
-            if ! tar --zstd -cf "$probe/probe.tar.zst" -C "$probe" member 2>/dev/null; then
-              echo "tar on this runner cannot write a .tar.zst archive, which" >&2
-              echo "scripts/package-artifact.sh requires. Install zstd, or a tar" >&2
-              echo "built with zstd support (macOS bsdtar needs the zstd library)." >&2
-              command -v zstd >/dev/null && echo "note: a standalone zstd binary IS present" >&2
-              exit 1
-            fi
-          fi
-          if [[ "$TARGET" == windows-* ]]; then
-            # Two files Chromium's Windows build hard-requires that VS Build
-            # Tools alone does not provide. The Blacksmith image excludes the
-            # full Visual Studio IDE and ships Build Tools 2022 instead, so
-            # check both rather than assume the GitHub image's inventory.
-            #
-            # dbghelp.dll: build/vs_toolchain.py marks it NOT optional and
-            # raises unless the SDK's "Debugging Tools for Windows" feature is
-            # installed.
-            sdk_root="${WINDOWSSDKDIR:-/c/Program Files (x86)/Windows Kits/10}"
-            dbghelp="$sdk_root/Debuggers/x64/dbghelp.dll"
-            [ -f "$dbghelp" ] || {
-              echo "missing $dbghelp" >&2
-              echo "build/vs_toolchain.py requires it and treats it as" >&2
-              echo "mandatory. Install the Windows SDK feature 'Debugging" >&2
-              echo "Tools for Windows'." >&2
-              exit 1
-            }
-            # msdia140.dll: comes from the VS install's DIA SDK, located via
-            # vswhere so a Build Tools install is found as readily as an IDE one.
-            vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-            [ -f "$vswhere" ] || { echo "vswhere.exe not found at $vswhere; vs_toolchain.py cannot locate Visual Studio" >&2; exit 1; }
-            vs_path="$("$vswhere" -latest -products '*' -property installationPath | tr -d '\r')"
-            [ -n "$vs_path" ] || { echo "vswhere reported no Visual Studio installation" >&2; exit 1; }
-            echo "visual studio: $vs_path"
-            msdia="$(cygpath -u "$vs_path" 2>/dev/null || printf '%s' "$vs_path")/DIA SDK/bin/amd64/msdia140.dll"
-            [ -f "$msdia" ] || {
-              echo "missing $msdia" >&2
-              echo "build/vs_toolchain.py copies it unconditionally. The DIA" >&2
-              echo "SDK ships with Visual Studio; this install lacks it." >&2
-              exit 1
-            }
-          fi
-          if [[ "$TARGET" == linux-* ]]; then
-            need docker scripts/in-linux-build-container.sh
-            docker info >/dev/null || { echo "the docker daemon is unavailable to this runner" >&2; exit 1; }
-          fi
-          if [[ "$TARGET" == macos-* ]]; then
-            for tool in xcodebuild xcrun plutil; do
-              need "$tool" scripts/prepare-mac-sdk.sh
-            done
-          fi
-          echo "host tooling present"
       - name: Check out exact revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
           persist-credentials: false
+      # Still the first thing after checkout, which costs seconds. The tools it
+      # checks are reached by scripts that run hours in, so a gap found here is
+      # the difference between a 30-second failure and a wasted build. Shared
+      # with .github/workflows/probe-runners.yml so a runner image can be
+      # checked on its cheapest instance size without building anything.
+      - name: Verify host tooling
+        shell: bash
+        run: bash scripts/verify-host-tooling.sh "$TARGET"
       - name: Verify build inputs
         shell: bash
         run: |

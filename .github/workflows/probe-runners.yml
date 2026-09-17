@@ -1,0 +1,68 @@
+name: probe runners
+
+# Ask each runner image whether it carries what a build needs, without
+# building anything.
+#
+# This runs on the SMALLEST instance of every family on purpose. Instance size
+# changes compute and memory; it does not change the image contents or the
+# storage figure, and every check here is a question about the image. A Windows
+# 2 vCPU minute bills at an eighth of a 16 vCPU one and a sixteenth of a
+# 32 vCPU one, so the answer costs a fraction of what learning it during a
+# build costs.
+#
+# It is also the cheap way to confirm a fix: the Windows image lacks the
+# Windows SDK's "Debugging Tools for Windows" feature, which
+# build/vs_toolchain.py treats as mandatory, and this reports whether that is
+# still true in about a minute.
+
+on:
+  workflow_dispatch:
+  # Weekly, because runner images are rebuilt continuously and a component
+  # disappearing is exactly the failure this catches. Wednesday keeps it clear
+  # of the nightly build window.
+  schedule:
+    - cron: "41 6 * * 3"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apostate-probe
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: probe-${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: blacksmith-2vcpu-ubuntu-2404
+          - target: linux-arm64
+            runner: blacksmith-2vcpu-ubuntu-2404
+          - target: macos-arm64
+            runner: blacksmith-6vcpu-macos-latest
+          - target: windows-x64
+            runner: blacksmith-2vcpu-windows-2025
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Report available disk
+        shell: bash
+        run: df -h .
+      - name: Verify host tooling
+        env:
+          PROBE_TARGET: ${{ matrix.target }}
+        shell: bash
+        run: bash scripts/verify-host-tooling.sh "$PROBE_TARGET"
+      - name: Verify runner pairing
+        env:
+          PROBE_TARGET: ${{ matrix.target }}
+        shell: bash
+        run: bash scripts/verify-runner.sh "$PROBE_TARGET"

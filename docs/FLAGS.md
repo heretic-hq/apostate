@@ -210,12 +210,15 @@ Each line has an action:
 - **An identity-rotation line** means this anchor has one measured member, so
   every launch on this host presents the same GPU strings regardless of seed.
 
-If the report looks right and the block persists, check the three things the
-report does not cover. Whether the claimed platform's fonts are installed, which
-the browser assumes rather than verifies, so it will never appear in this list:
-[docs/FONTS.md](FONTS.md). Whether the site needs WebRTC. And whether the host
-renders in software. The last two are in
-[docs/LIMITATIONS.md](LIMITATIONS.md).
+Fonts are not in that list and are not meant to be. The report cannot tell you
+whether the claimed platform's faces are on the machine, and it does not pretend
+to. That one is yours to confirm:
+[docs/FONTS.md](FONTS.md) says what to install and how to read which packs this
+launch drew.
+
+If the report looks right and the block persists, check the two things it does
+not cover. Whether the site needs WebRTC, and whether the host renders in
+software. Both are in [docs/LIMITATIONS.md](LIMITATIONS.md).
 
 ## Pinning the GPU cluster
 
@@ -307,6 +310,16 @@ These are upstream switches, unchanged, that interact with the identity.
 | `--headless` | Supported, and it does not imply software rendering. On a Mac this binary selects ANGLE/Metal in every default configuration including `--headless=new`. |
 | `--lang=TAG` | Sets the UI language independently of the profile's locale, which is usually not what you want. |
 | `--remote-debugging-pipe` | Opens no socket. Use this rather than a port: a page in the local or private address space can detect an open debugging port. Playwright uses the pipe by default; Puppeteer defaults to a port. |
+| `--window-size=W,H` | Sets the window, not the viewport. The viewport is smaller by the browser chrome and it settles shortly after load rather than immediately. |
+
+That last row matters if you assert on it. Reading `window.innerHeight`,
+`visualViewport.height` or `documentElement.clientHeight` in the first script of
+a page gives a provisional number that is corrected within about a second: with
+`--window-size=1280,800`, twelve launches out of twelve reported 684, 685 or 692
+first and 657 once settled, and the early value varied run to run while the
+settled one did not. So read viewport height after load, and treat an early
+reading as noise if you are recording a fingerprint. This is ordinary browser
+behaviour and a real Chrome restoring a window does the same thing.
 
 Two to avoid:
 

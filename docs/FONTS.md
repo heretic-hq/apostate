@@ -15,7 +15,7 @@ Apostate cannot ship them. Apple's and Microsoft's fonts are licensed, and
 redistributing them is not this project's to do. Copy them from a machine you
 own that has them.
 
-The browser assumes you have done this. It does not check and it does not warn.
+The browser assumes you have done this. Nothing warns you if you have not.
 
 ## What to install
 
@@ -58,10 +58,20 @@ presents a Windows machine without Microsoft Office, which is an ordinary
 Windows machine. A persona missing `platform-core` faces presents a Windows
 machine without Arial, which is not a machine that exists.
 
-One thing the browser cannot do for you: it cannot check. The host's installed
-families are not enumerable before the graphics stack starts, so composition
-offers packs without knowing what is on disk, and `--fingerprint-explain` says
-so in its limitations block rather than implying it verified anything.
+One thing the browser will not do for you: confirm it. Composition offers the
+packs a persona would plausibly carry and leaves provisioning to you, so nothing
+warns when a family is missing and nothing in `--fingerprint-explain` confirms
+one is present. The report tells you which packs were drawn. Whether those
+families are on the machine is yours to know.
+
+Skipping this does not break pages. A family the machine does not have simply
+fails to match, and the page falls through its own `font-family` list to the
+browser's standard font. Measured on the reference Mac, an absent family
+rendered byte-identically to `serif`, Chinese, Hebrew and emoji included,
+because character fallback is untouched by the filter. So the cost of not
+installing a persona's fonts is fingerprint fidelity rather than working text:
+pages render, and you look like a machine missing fonts it should have. That
+makes this a step you should do, not one you cannot launch without.
 
 ### Windows persona
 

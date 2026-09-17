@@ -73,10 +73,10 @@ the claimed device would not have. It never adds.
 
 That makes installing the claimed platform's fonts a setup step you own, and
 [docs/FONTS.md](FONTS.md) is the instructions. The browser assumes you have done
-it: there is no check and no warning. A persona running without its fonts is a
-common reason a session gets blocked, and the strongest signal is absence, since
-Menlo, Monaco, Zapfino, PingFang SC and Helvetica Neue ship with macOS and
-cannot be removed.
+it, and nothing warns you if you have not. A persona running without its fonts
+is a common reason a session gets blocked, and the strongest signal is absence,
+since Menlo, Monaco, Zapfino, PingFang SC and Helvetica Neue ship with macOS
+and cannot be removed.
 
 What remains a limitation, rather than a setup step, is that no amount of
 configuration substitutes for the files. A family the machine genuinely lacks

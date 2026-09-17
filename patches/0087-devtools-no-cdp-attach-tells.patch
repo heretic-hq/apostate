@@ -140,14 +140,15 @@ off still connects, and that is precisely why Playwright and Puppeteer still
 work. It is protection against a web page, not isolation of the port.
 
 What remains is that the kernel completes the TCP handshake before we hang up.
-Over forty interleaved probes each: a port that answers resolves 40 out of 40; a
-port that accepts and closes, which is what a page now sees, rejects with
-TypeError 40 out of 40 with a median of 0.3 ms; a port that never listened
-rejects with TypeError 40 out of 40 with a median of 0.2 ms. The outcome channel
-is gone. A 0.1 ms median gap is left, which is exactly one tick of the 0.1 ms
-performance.now resolution this page measured, and the two distributions overlap
-across their whole range. It is not zero and it is reported rather than claimed
-away.
+This part could not be measured against the patched code, so it was measured
+against a stand-in: a socket that accepts and closes immediately, which is what
+this change makes a page see. Forty interleaved probes each. A port that answers
+resolves 40 out of 40. The stand-in rejects with TypeError 40 out of 40, median
+0.3 ms. A port that never listened rejects with TypeError 40 out of 40, median
+0.2 ms. So the outcome channel closes, and what is left is a 0.1 ms median gap -
+exactly one tick of the 0.1 ms performance.now resolution measured in that same
+page, with the two distributions overlapping across their whole range. Not zero,
+and reported rather than claimed away.
 
 Last, performance.memory and console.memory had no emitter. Both read V8's heap
 statistics through the same MemoryInfo, and V8 sizes its heap from installed
@@ -186,6 +187,12 @@ used-heap delta by about five per cent, which is inside the spread of the
 measurement and needs --enable-precise-memory-info to see at all, a switch a
 page cannot set. Removing the setting would cost a driver the ability to
 evaluate in those frames, which is a real feature, for no measured gain.
+
+Every before-state figure above is measured on the shipped binary. No
+after-state is: the four translation units this touches have compiled, and a
+compile is not a run, so nothing here has been observed behaving as intended.
+The depth ratios in particular need re-measuring on a built binary, under CPU
+load for the port probe, before anything downstream repeats them as settled.
 
 Ledger: automation.remote-debugging-port-open, cdp.session-attach-presence,
 cdp.console-argument-serialization, cdp.runtime-enable-force-main-world,

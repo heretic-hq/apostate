@@ -1,0 +1,387 @@
+Subject: [PATCH] fonts: use the Windows script fallback table under a Windows profile
+
+Patch 0044 lifted Windows' Simplified Han candidate list onto Linux for a
+Windows profile and left every other script asking Fontconfig with the
+unmodified locale. So a persona claiming Windows picked the host's family for
+Japanese kana, Traditional Han, Hangul, Cyrillic, Greek, Thai and Latin
+whenever the requested face did not cover a character. That is readable
+without a permission prompt: measureText over a string containing one
+uncovered codepoint returns the fallback face's advances, and those advances
+are the host's, not the claimed machine's.
+
+This replaces the single-script predicate with the whole upstream Windows
+table, copied from win/font_fallback_win.cc InitializeScriptFontMap without
+edits: 70 candidate lists over 74 script entries. Nothing here is authored.
+The candidate order is Windows' order, including the Noto entries Windows
+lists first and rarely has, because inventing a different order would be a
+new policy rather than the platform's.
+
+Three pieces of the surrounding policy are kept as 0044 had them. The unified
+Han script is resolved through LayoutLocale, so the same codepoint reaches the
+Simplified, Traditional or Japanese list according to the content, accept and
+system locale, which is what Windows does before it consults the table.
+Unassigned, common and inherited codepoints carry no script to look up and are
+recovered through Character::GetScriptBasedOnUnicodeBlock, the same recovery
+font_fallback_win.cc's GetScript() performs. And the selection guard is
+unchanged: the first candidate whose real localized family name matches is
+taken, a Fontconfig substitution for an absent candidate is rejected by that
+name check, and if the chosen family turns out not to cover the character the
+existing Fontconfig path runs instead. That ordering -- choose an available
+family, then test coverage -- is Windows' ordering.
+
+The Windows reference capture measures Latin strings only
+(resources/fingerprints/raw/windows-chrome-20260910T140813Z.json,
+fonts.metrics, 76 Latin family names), so there is no captured non-Latin
+advance to compare a chosen family against. That is precisely why the table is
+copied rather than derived: the source is the control.
+
+What remains true afterwards: 28 of the 74 entries name at least one family
+the Windows font packs in resources/profiles/dispersion/font_packs.json can
+provision, which is the CJK group, the Times New Roman scripts (Latin, Greek,
+Cyrillic), Thai, Arabic and the Segoe UI and Segoe UI Symbol scripts. The
+other 46 name families no pack carries -- Nirmala UI, Segoe UI Historic,
+Leelawadee UI, David, Sylfaen, Gadugi, Mongolian Baiti and the rest -- so on a
+host without those files those scripts keep the host's Fontconfig fallback, as
+they did before this patch. Provisioning the files through
+fonts.provisioned_directory is what closes them; no source change can.
+
+No font file, fontconfig configuration, profile field, schema, switch or
+JavaScript accessor is touched. Without a Windows profile
+WindowsFallbackFamilies returns an empty span on its first check and the
+function runs exactly as upstream does.
+
+Primary source at Chromium 79460ebecaa5625e57a5fb679a735659e73dc687:
+- platform/fonts/win/font_fallback_win.cc: InitializeScriptFontMap (the
+  table), GetScript (the unassigned/common/inherited recovery).
+- platform/text/layout_locale.cc: LocaleForHan, GetScriptForHan.
+Paths above are under third_party/blink/renderer/.
+
+Ledger: fonts.fallback-fonts.
+diff --git a/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc b/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
+--- a/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
++++ b/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
+@@ -27,6 +27,7 @@
+ #include <unicode/uscript.h>
+ 
+ #include "base/apostate/profile.h"
++#include "base/containers/span.h"
+ #include "base/strings/string_util.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/platform/linux/web_sandbox_support.h"
+@@ -34,6 +35,7 @@
+ #include "third_party/blink/renderer/platform/fonts/font_fallback_priority.h"
+ #include "third_party/blink/renderer/platform/fonts/font_platform_data.h"
+ #include "third_party/blink/renderer/platform/fonts/simple_font_data.h"
++#include "third_party/blink/renderer/platform/text/character.h"
+ #include "third_party/blink/renderer/platform/text/layout_locale.h"
+ #include "third_party/skia/include/core/SkTypeface.h"
+ #include "ui/gfx/font_fallback_linux.h"
+@@ -42,24 +44,256 @@
+ 
+ namespace {
+ 
+-bool UseWindowsSimplifiedHanFallback(const FontDescription& description,
+-                                     UChar32 character) {
+-  const auto* profile = base::apostate::Profile::Get();
+-  if (!profile || !profile->ua_platform() ||
+-      *profile->ua_platform() != "Windows") {
+-    return false;
+-  }
+-  UErrorCode error = U_ZERO_ERROR;
+-  if (uscript_getScript(character, &error) != USCRIPT_HAN || U_FAILURE(error)) {
+-    return false;
+-  }
++// Windows resolves a glyph no requested face covers by script, then walks an
++// ordered list of real families for that script. The lists below are the
++// upstream Windows table verbatim -- win/font_fallback_win.cc,
++// InitializeScriptFontMap -- so this reuses Windows' own policy instead of
++// inventing one.
++struct ScriptFallbackFamilies {
++  UScriptCode script;
++  base::span<const char* const> families;
++};
++
++constexpr const char* const kArabicFonts[] = {"Tahoma", "Segoe UI"};
++constexpr const char* const kArmenianFonts[] = {"Segoe UI", "Sylfaen"};
++constexpr const char* const kBengaliFonts[] = {"Nirmala UI", "Vrinda"};
++constexpr const char* const kBrahmiFonts[] = {"Segoe UI Historic"};
++constexpr const char* const kBrailleFonts[] = {"Segoe UI Symbol"};
++constexpr const char* const kBugineseFonts[] = {"Leelawadee UI"};
++constexpr const char* const kCanadianAaboriginalFonts[] = {
++    "Gadugi", "Euphemia",
++};
++constexpr const char* const kCarianFonts[] = {"Segoe UI Historic"};
++constexpr const char* const kCherokeeFonts[] = {"Gadugi", "Plantagenet"};
++constexpr const char* const kCopticFonts[] = {"Segoe UI Symbol"};
++constexpr const char* const kCuneiformFonts[] = {"Segoe UI Historic"};
++constexpr const char* const kCypriotFonts[] = {"Segoe UI Historic"};
++constexpr const char* const kCyrillicFonts[] = {"Times New Roman"};
++constexpr const char* const kDeseretFonts[] = {"Segoe UI Symbol"};
++constexpr const char* const kDevanagariFonts[] = {"Nirmala UI", "Mangal"};
++constexpr const char* const kEgyptianHieroglyphsFonts[] = {"Segoe UI Historic"};
++constexpr const char* const kEthiopicFonts[] = {
++    "Nyala", "Abyssinica SIL", "Ethiopia Jiret", "Visual Geez Unicode",
++    "GF Zemen Unicode", "Ebrima",
++};
++constexpr const char* const kGeorgianFonts[] = {"Sylfaen", "Segoe UI"};
++constexpr const char* const kGlagoliticFonts[] = {
++    "Segoe UI Historic", "Segoe UI Symbol",
++};
++constexpr const char* const kGothicFonts[] = {
++    "Segoe UI Historic", "Segoe UI Symbol",
++};
++constexpr const char* const kGreekFonts[] = {"Times New Roman"};
++constexpr const char* const kGujaratiFonts[] = {"Nirmala UI", "Shruti"};
++constexpr const char* const kGurmukhiFonts[] = {"Nirmala UI", "Raavi"};
++constexpr const char* const kHangulFonts[] = {
++    "Noto Sans KR", "Noto Sans CJK KR", "Malgun Gothic", "Gulim",
++};
++constexpr const char* const kHebrewFonts[] = {"David", "Segoe UI"};
++constexpr const char* const kImperialAramaicFonts[] = {"Segoe UI Historic"};
++constexpr const char* const kInscriptionalPahlaviFonts[] = {
++    "Segoe UI Historic",
++};
++constexpr const char* const kInscriptionalParthianFonts[] = {
++    "Segoe UI Historic",
++};
++constexpr const char* const kJavaneseFonts[] = {"Javanese Text"};
++constexpr const char* const kKannadaFonts[] = {"Tunga", "Nirmala UI"};
++constexpr const char* const kKatakanaOrHiraganaFonts[] = {
++    "Noto Sans JP", "Noto Sans CJK JP", "Meiryo", "Yu Gothic", "MS PGothic",
++    "Microsoft YaHei",
++};
++constexpr const char* const kKharoshthiFonts[] = {"Segoe UI Historic"};
++constexpr const char* const kKhmerFonts[] = {
++    "Leelawadee UI", "Khmer UI", "Khmer OS", "MoolBoran", "DaunPenh",
++};
++constexpr const char* const kLaoFonts[] = {
++    "Leelawadee UI", "Lao UI", "DokChampa", "Saysettha OT", "Phetsarath OT",
++    "Code2000",
++};
++constexpr const char* const kLatinFonts[] = {"Times New Roman"};
++constexpr const char* const kLisuFonts[] = {"Segoe UI"};
++constexpr const char* const kLycianFonts[] = {"Segoe UI Historic"};
++constexpr const char* const kLydianFonts[] = {"Segoe UI Historic"};
++constexpr const char* const kMalayalamFonts[] = {"Nirmala UI", "Kartika"};
++constexpr const char* const kMeroiticCursiveFonts[] = {
++    "Segoe UI Historic", "Segoe UI Symbol",
++};
++constexpr const char* const kMongolianFonts[] = {"Mongolian Baiti"};
++constexpr const char* const kMyanmarFonts[] = {
++    "Myanmar Text", "Padauk", "Parabaik", "Myanmar3", "Code2000",
++};
++constexpr const char* const kNewTaiLueFonts[] = {"Microsoft New Tai Lue"};
++constexpr const char* const kNkoFonts[] = {"Ebrima"};
++constexpr const char* const kOghamFonts[] = {
++    "Segoe UI Historic", "Segoe UI Symbol",
++};
++constexpr const char* const kOlChikiFonts[] = {"Nirmala UI"};
++constexpr const char* const kOldItalicFonts[] = {
++    "Segoe UI Historic", "Segoe UI Symbol",
++};
++constexpr const char* const kOldPersianFonts[] = {"Segoe UI Historic"};
++constexpr const char* const kOldSouthArabianFonts[] = {"Segoe UI Historic"};
++constexpr const char* const kOriyaFonts[] = {
++    "Kalinga", "ori1Uni", "Lohit Oriya", "Nirmala UI",
++};
++constexpr const char* const kOrkhonFonts[] = {
++    "Segoe UI Historic", "Segoe UI Symbol",
++};
++constexpr const char* const kOsmanyaFonts[] = {"Ebrima"};
++constexpr const char* const kPhagsPaFonts[] = {"Microsoft PhagsPa"};
++constexpr const char* const kRunicFonts[] = {
++    "Segoe UI Historic", "Segoe UI Symbol",
++};
++constexpr const char* const kShavianFonts[] = {"Segoe UI Historic"};
++constexpr const char* const kSimplifiedHanFonts[] = {
++    "Noto Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", "simsun",
++};
++constexpr const char* const kSinhalaFonts[] = {
++    "Iskoola Pota", "AksharUnicode", "Nirmala UI",
++};
++constexpr const char* const kSoraSompengFonts[] = {"Nirmala UI"};
++constexpr const char* const kSymbolsFonts[] = {"Segoe UI Symbol"};
++constexpr const char* const kSyriacFonts[] = {
++    "Estrangelo Edessa", "Estrangelo Nisibin", "Code2000",
++};
++constexpr const char* const kTaiLeFonts[] = {"Microsoft Tai Le"};
++constexpr const char* const kTamilFonts[] = {"Nirmala UI", "Latha"};
++constexpr const char* const kTeluguFonts[] = {"Nirmala UI", "Gautami"};
++constexpr const char* const kThaanaFonts[] = {"MV Boli"};
++constexpr const char* const kThaiFonts[] = {
++    "Tahoma", "Leelawadee UI", "Leelawadee",
++};
++constexpr const char* const kTibetanFonts[] = {
++    "Microsoft Himalaya", "Jomolhari", "Tibetan Machine Uni",
++};
++constexpr const char* const kTifinaghFonts[] = {"Ebrima"};
++constexpr const char* const kTraditionalHanFonts[] = {
++    "Noto Sans TC", "Noto Sans CJK TC", "Microsoft JhengHei", "pmingli",
++};
++constexpr const char* const kVaiFonts[] = {"Ebrima"};
++constexpr const char* const kYiFonts[] = {
++    "Microsoft Yi Baiti", "Nuosu SIL", "Code2000",
++};
++
++constexpr ScriptFallbackFamilies kWindowsScriptFallback[] = {
++    {USCRIPT_ARABIC, kArabicFonts},
++    {USCRIPT_ARMENIAN, kArmenianFonts},
++    {USCRIPT_BENGALI, kBengaliFonts},
++    {USCRIPT_BRAHMI, kBrahmiFonts},
++    {USCRIPT_BRAILLE, kBrailleFonts},
++    {USCRIPT_BUGINESE, kBugineseFonts},
++    {USCRIPT_CANADIAN_ABORIGINAL, kCanadianAaboriginalFonts},
++    {USCRIPT_CARIAN, kCarianFonts},
++    {USCRIPT_CHEROKEE, kCherokeeFonts},
++    {USCRIPT_COPTIC, kCopticFonts},
++    {USCRIPT_CUNEIFORM, kCuneiformFonts},
++    {USCRIPT_CYPRIOT, kCypriotFonts},
++    {USCRIPT_CYRILLIC, kCyrillicFonts},
++    {USCRIPT_DESERET, kDeseretFonts},
++    {USCRIPT_DEVANAGARI, kDevanagariFonts},
++    {USCRIPT_EGYPTIAN_HIEROGLYPHS, kEgyptianHieroglyphsFonts},
++    {USCRIPT_ETHIOPIC, kEthiopicFonts},
++    {USCRIPT_GEORGIAN, kGeorgianFonts},
++    {USCRIPT_GLAGOLITIC, kGlagoliticFonts},
++    {USCRIPT_GOTHIC, kGothicFonts},
++    {USCRIPT_GREEK, kGreekFonts},
++    {USCRIPT_GUJARATI, kGujaratiFonts},
++    {USCRIPT_GURMUKHI, kGurmukhiFonts},
++    {USCRIPT_HANGUL, kHangulFonts},
++    {USCRIPT_HEBREW, kHebrewFonts},
++    {USCRIPT_HIRAGANA, kKatakanaOrHiraganaFonts},
++    {USCRIPT_IMPERIAL_ARAMAIC, kImperialAramaicFonts},
++    {USCRIPT_INSCRIPTIONAL_PAHLAVI, kInscriptionalPahlaviFonts},
++    {USCRIPT_INSCRIPTIONAL_PARTHIAN, kInscriptionalParthianFonts},
++    {USCRIPT_JAVANESE, kJavaneseFonts},
++    {USCRIPT_KANNADA, kKannadaFonts},
++    {USCRIPT_KATAKANA, kKatakanaOrHiraganaFonts},
++    {USCRIPT_KATAKANA_OR_HIRAGANA, kKatakanaOrHiraganaFonts},
++    {USCRIPT_KHAROSHTHI, kKharoshthiFonts},
++    {USCRIPT_KHMER, kKhmerFonts},
++    {USCRIPT_LAO, kLaoFonts},
++    {USCRIPT_LATIN, kLatinFonts},
++    {USCRIPT_LISU, kLisuFonts},
++    {USCRIPT_LYCIAN, kLycianFonts},
++    {USCRIPT_LYDIAN, kLydianFonts},
++    {USCRIPT_MALAYALAM, kMalayalamFonts},
++    {USCRIPT_MEITEI_MAYEK, kSoraSompengFonts},
++    {USCRIPT_MEROITIC_CURSIVE, kMeroiticCursiveFonts},
++    {USCRIPT_MONGOLIAN, kMongolianFonts},
++    {USCRIPT_MYANMAR, kMyanmarFonts},
++    {USCRIPT_NEW_TAI_LUE, kNewTaiLueFonts},
++    {USCRIPT_NKO, kNkoFonts},
++    {USCRIPT_OGHAM, kOghamFonts},
++    {USCRIPT_OL_CHIKI, kOlChikiFonts},
++    {USCRIPT_OLD_ITALIC, kOldItalicFonts},
++    {USCRIPT_OLD_PERSIAN, kOldPersianFonts},
++    {USCRIPT_OLD_SOUTH_ARABIAN, kOldSouthArabianFonts},
++    {USCRIPT_ORIYA, kOriyaFonts},
++    {USCRIPT_ORKHON, kOrkhonFonts},
++    {USCRIPT_OSMANYA, kOsmanyaFonts},
++    {USCRIPT_PHAGS_PA, kPhagsPaFonts},
++    {USCRIPT_RUNIC, kRunicFonts},
++    {USCRIPT_SHAVIAN, kShavianFonts},
++    {USCRIPT_SIMPLIFIED_HAN, kSimplifiedHanFonts},
++    {USCRIPT_SINHALA, kSinhalaFonts},
++    {USCRIPT_SORA_SOMPENG, kSoraSompengFonts},
++    {USCRIPT_SYMBOLS, kSymbolsFonts},
++    {USCRIPT_SYRIAC, kSyriacFonts},
++    {USCRIPT_TAI_LE, kTaiLeFonts},
++    {USCRIPT_TAMIL, kTamilFonts},
++    {USCRIPT_TELUGU, kTeluguFonts},
++    {USCRIPT_THAANA, kThaanaFonts},
++    {USCRIPT_THAI, kThaiFonts},
++    {USCRIPT_TIBETAN, kTibetanFonts},
++    {USCRIPT_TIFINAGH, kTifinaghFonts},
++    {USCRIPT_TRADITIONAL_HAN, kTraditionalHanFonts},
++    {USCRIPT_BOPOMOFO, kTraditionalHanFonts},
++    {USCRIPT_VAI, kVaiFonts},
++    {USCRIPT_YI, kYiFonts},
++};
++
++// Windows maps the unified Han script through the content, accept and system
++// locale before the table above is consulted, because the same codepoint gets
++// a different family in a Simplified, Traditional or Japanese context. Blink
++// already carries that policy in LayoutLocale.
++UScriptCode HanScriptForDescription(const FontDescription& description) {
+   const LayoutLocale* locale = LayoutLocale::LocaleForHan(description.Locale());
+   if (!locale) {
+     locale = &LayoutLocale::GetSystem();
+   }
+-  return locale->GetScriptForHan() == USCRIPT_SIMPLIFIED_HAN;
++  return locale->GetScriptForHan();
+ }
+ 
++base::span<const char* const> WindowsFallbackFamilies(
++    const FontDescription& description,
++    UChar32 character) {
++  const auto* profile = base::apostate::Profile::Get();
++  if (!profile || !profile->ua_platform() ||
++      *profile->ua_platform() != "Windows") {
++    return {};
++  }
++  UErrorCode error = U_ZERO_ERROR;
++  UScriptCode script = uscript_getScript(character, &error);
++  if (U_FAILURE(error)) {
++    return {};
++  }
++  // Unassigned, common and inherited characters carry no script to look up.
++  // Recover the same way font_fallback_win.cc's GetScript() does.
++  if (script <= USCRIPT_INHERITED) {
++    script = Character::GetScriptBasedOnUnicodeBlock(character);
++  }
++  if (script == USCRIPT_HAN) {
++    script = HanScriptForDescription(description);
++  }
++  for (const auto& entry : kWindowsScriptFallback) {
++    if (entry.script == script) {
++      return entry.families;
++    }
++  }
++  return {};
++}
++
+ bool TypefaceHasFamily(SkTypeface* face, const char* family) {
+   // Fontconfig can substitute a different family for an absent candidate.
+   // Check actual localized names before treating it as an available face.
+@@ -135,25 +369,21 @@
+       return font_data;
+   }
+ 
+-  if (UseWindowsSimplifiedHanFallback(font_description, c)) {
+-    // Reuse the Windows Simplified Han candidate order from
+-    // win/font_fallback_win.cc. This runs only after the requested face and
+-    // standard-style fallback have failed to cover the character.
+-    static constexpr const char* kFamilies[] = {
+-        "Noto Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", "simsun"};
+-    for (const char* family : kFamilies) {
+-      const FontPlatformData* data = GetFontPlatformData(
+-          font_description, FontFaceCreationParams(AtomicString(family)));
+-      if (!data || !TypefaceHasFamily(data->Typeface(), family)) {
+-        continue;
+-      }
+-      if (data->FontContainsCharacter(c)) {
+-        return FontDataFromFontPlatformData(data);
+-      }
+-      // Windows first chooses an available family, then checks its glyph
+-      // coverage. Preserve the existing fallback when that check fails.
+-      break;
++  // Runs only after the requested face and the standard-style fallback have
++  // both failed to cover the character, which is the same point at which
++  // Windows consults its script table.
++  for (const char* family : WindowsFallbackFamilies(font_description, c)) {
++    const FontPlatformData* data = GetFontPlatformData(
++        font_description, FontFaceCreationParams(AtomicString(family)));
++    if (!data || !TypefaceHasFamily(data->Typeface(), family)) {
++      continue;
+     }
++    if (data->FontContainsCharacter(c)) {
++      return FontDataFromFontPlatformData(data);
++    }
++    // Windows first chooses an available family, then checks its glyph
++    // coverage. Preserve the existing fallback when that check fails.
++    break;
+   }
+ 
+   gfx::FallbackFontData fallback_font;

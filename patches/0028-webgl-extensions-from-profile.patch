@@ -33,11 +33,33 @@ a list captured from a browser.
 An empty list in the profile disables the filter entirely, so a profile that
 does not describe its extensions does not silently lose all of them.
 
-Note this closes the removable half of the gap. Our host still lacks two
-extensions the reference has on WebGL1 and five on WebGL2 —
-KHR_parallel_shader_compile, WEBGL_blend_func_extended and friends — and those
-cannot be added for the reason above. They are a host capability question, the
-same class as the render limits raised in patch 0027.
+Note this closes the removable half of the gap. Adding a name the host lacks
+cannot be done, for the reason above, and that is a host capability question in
+the same class as the render limits raised in patch 0027.
+
+This paragraph originally sized that residual as "two extensions the reference
+has on WebGL1 and five on WebGL2 — KHR_parallel_shader_compile,
+WEBGL_blend_func_extended and friends". That figure came from a Linux
+SwiftShader build host and does not describe a launch where the anchor's backend
+is the host's, which is the only kind the anchor draw produces. Re-measured
+through the shipped 152.0.7977.83 macOS binary on an Apple M4 Max running real
+ANGLE/Metal, comparing getSupportedExtensions against each anchor's captured
+lists, and confirmed live by pinning each anchor and counting what the page
+received:
+
+  macos-metal-apple-850a91233555     claims 39/36, delivers 39/36. Nothing
+                                     missing, nothing extra. This is the
+                                     backend-matched case.
+  windows-d3d11-intel-79dfeb5b4f99   claims 35/32, delivers 35/31.
+  windows-d3d11-nvidia-0947761dfbe9  claims 35/32, delivers 35/31.
+  linux-vulkan-nvidia-adf287b8f0ee   claims 34/29, delivers 34/28.
+
+The one missing name in all three cross-backend cases is OVR_multiview2, on
+WebGL2. KHR_parallel_shader_compile is present on this host. So the residual is
+one name wide, it is zero on a backend-matched anchor, and the anchor axis's
+existing backend filter is therefore already the extension-servability gate —
+which is why no separate selection-time gate was added. Patch 0093 records a
+limitation for the one way past that filter, --fingerprint-anchor.
 
 Ledger: webgl.extensions.
 diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc

@@ -7,9 +7,20 @@ uses the existing immutable ua_platform profile field in Blink; Skia does not
 receive a second Chromium singleton or a new cross-process interface.
 
 Skip the FreeType-only VDMX and descent-borrowing adjustments under this Apple
-policy. CSS font descriptors still override ascent/descent. Unprofiled behavior
-retains the build platform's policy, and Windows-profile metric selection stays
-unchanged pending exact DirectWrite table/line-gap evidence.
+policy. CSS font descriptors still override ascent/descent, and unprofiled
+behavior retains the build platform's policy.
+
+Windows-profile metric selection is not changed here, and it is not left open
+either. The two halves of it are patch 0066, which reads the OS/2 win
+ascent/descent that a DirectWrite-backed SkFont reports instead of the
+hhea-based numbers the shared Linux path uses, and patch 0067, which drops the
+FreeType line gap that DirectWrite reports as zero. Both are measured against
+the pinned Windows capture at 40px -- Consolas win 1884 against hhea 1521,
+Calibri 1950 against 1536, Palatino Linotype 2150 against 1499, with Arial,
+Tahoma, Verdana and Times New Roman agreeing on both sides. So the DirectWrite
+table and line-gap evidence this patch lacked exists; it lands one cluster
+later rather than here because the Apple policy and the Windows policy are
+different selections at the same call site.
 
 Reference: resources/fingerprints/raw/m4-max-chrome-20260908T163229Z.json,
 fonts.metrics, contains fractional actual glyph bounds at40px. This patch uses

@@ -77,15 +77,16 @@ no longer numbers that no shipping configuration reports, so a profile claiming
 16384 can be served instead of clamped back to 8192. It closes nothing about
 how fast or how exactly the software rasteriser draws.
 
-It also has a cost on the path where no profile is served at all. Patch 0081
-refuses to compose a hardware capability cluster for a software backend, so a
-host that renders in software inherits itself, and then these raised limits
-reach the page verbatim. Stock Chromium's SwiftShader reports 8192/8192/8192 —
-resources/fingerprints/raw/stock-linux-20260907T150627Z.json — so an
-unprovisioned software launch is enumerably a modified build. Serving any
-profile removes that, because patch 0026 takes the smaller of claim and driver
-and min(8192, 16384) is 8192. The remedy is therefore a swiftshader-backend
-anchor in the catalogue, which is a data item and not a change to this patch.
+It also has a cost on the path where no profile serves the GPU. No compiled
+anchor was captured through a software rasteriser, so patch 0093 leaves the GPU
+cluster host-inherited — composing every other axis, which is its point — and
+then these raised limits reach the page verbatim. Stock Chromium's SwiftShader
+reports 8192/8192/8192 —
+resources/fingerprints/raw/stock-linux-20260907T150627Z.json — so a software
+launch with no GPU claim is enumerably a modified build. Serving a claim removes
+that, because patch 0026 takes the smaller of claim and driver and
+min(8192, 16384) is 8192. The remedy is therefore a swiftshader-backend anchor
+in the catalogue, which is a data item and not a change to this patch.
 
 The other cost is memory, and this is the number to count before packing a
 server. Span is two unsigned shorts, so 4 bytes per entry; OUTLINE_RESOLUTION

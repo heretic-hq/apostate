@@ -1,27 +1,54 @@
-Subject: base: compose a profile when the launch did not supply one
+Subject: base: compose a profile when the launch did not supply one, and refuse one that cannot be loaded
 
 The loader's only source of a profile is --apostate-profile, so a binary run
 with no arguments presents the host. That is the right default for a debug run
 and the wrong one for the product: a user who double-clicks the browser expects
-a device, not their own machine, and the seed model in docs/FINGERPRINTS.md §5
-exists precisely so that launch can be both unique and stable.
+a device, not their own machine.
 
 This is the one hunk that joins the two halves. The switch still wins, because
-it is the strongest layer in §10 and because patch 0005 propagates it to every
-child, so a renderer keeps parsing the switch its browser was given and never
-composes anything itself. Only when the switch is absent does the browser ask
-the compositor, and the compositor returns the same base64 JSON the switch
-would have carried — so there is one parser, one format, and one profile
-object no matter which path produced it.
+it is the strongest layer in the launch precedence and because patch 0005
+propagates it to every child, so a renderer keeps parsing the switch its
+browser was given and never composes anything itself. Only when the switch is
+absent does the browser ask the compositor, and the compositor returns the same
+base64 JSON the switch would have carried, so there is one parser, one format
+and one profile object no matter which path produced it.
 
-ComposeProfileForCurrentProcess() returns nullopt for a child process, for
---fingerprint=host, and when the compiled catalogue cannot serve the launch.
-nullopt reaches exactly the code path that already existed, which is host
-inheritance.
+Composition goes through InstallComposedProfile rather than being done here:
+composing and then writing the result back onto this process's command line is
+one operation, patch 0084 needs the same operation from Chrome's startup
+sequence, and two copies of it would be two places for the identity to be
+decided. It is idempotent, so once 0084 has run this call finds the switch
+already present and does nothing.
+
+That is also the correction to this function's own comment. It used to claim
+that initialising on first use "removes the ordering hazard entirely -- there
+is no call site to place correctly, and no process type that can be forgotten".
+The second half was true and the first was not: the identity was decided by
+whichever subsystem first asked the loader for a field, which on Linux can be
+after the zygote fork, and a zygote that caches a null profile hands every
+renderer it forks the host's values. Patch 0084 places the call; this call is
+what happens when nothing did.
+
+The other half of this change is that a supplied profile that cannot be loaded
+now stops the launch. --apostate-profile takes base64-encoded profile JSON, and
+passing a path to a profile file is the obvious mistake to make, because the
+file is right there and the switch names it. Before this, a path, malformed
+base64 and a JSON array all produced byte-identical behaviour: one line on
+stderr and then a composed profile, so the browser came up wearing a different
+device and reported it as if nothing had gone wrong. A caller that built the
+switch wrongly got a plausible wrong answer instead of a failure. An explicitly
+supplied profile is the strongest layer in the precedence chain, so failing to
+honour it is fatal and the message names the encoding the switch actually
+wants. This cannot fire in a child process, where the value is a byte copy of
+one the browser already parsed.
+
+nullopt from the compositor still means host inheritance, and still reaches
+exactly the code path that already existed. A child process, --fingerprint=off
+and a catalogue that cannot serve the launch are all that path.
 
 --- a/base/apostate/profile.cc
 +++ b/base/apostate/profile.cc
-@@ -7,8 +7,10 @@
+@@ -7,8 +7,11 @@
  #include <algorithm>
  #include <cmath>
  #include <memory>
@@ -29,41 +56,82 @@ inheritance.
  #include <utility>
  
 +#include "base/apostate/compose.h"
++#include "base/apostate/explain.h"
  #include "base/base64.h"
  #include "base/base_switches.h"
  #include "base/command_line.h"
-@@ -99,11 +101,31 @@
+@@ -87,23 +90,66 @@
+     return g_profile_for_testing;
+   }
+ 
+-  // Initialised on first use rather than from an explicit startup hook.
++  // Cached on first use, but no longer *decided* on first use.
+   //
+-  // The command line is fully populated before anything in base runs, so there
+-  // is no window in which this could parse too early. Doing it here instead of
+-  // from content's startup sequence removes the ordering hazard entirely —
+-  // there is no call site to place correctly, and no process type that can be
+-  // forgotten. Function-local static initialisation is thread-safe.
++  // The profile for a launch is composed and installed onto the command line
++  // from a startup hook in chrome/app/chrome_main_delegate.cc, which runs in
++  // the browser process before content forks a zygote or builds any child's
++  // command line. By the time anything reaches this function the switch is
++  // already present and this only parses it, so which call site happens to be
++  // first cannot change the identity. Function-local static initialisation is
++  // thread-safe.
++  //
++  // The composition call below is the fallback for a process that never
++  // reaches that hook: a base unit test, an embedder that is not Chrome, or a
++  // browser whose very first profile read somehow precedes PreSandboxStartup.
++  // It composes at most once per launch, because it installs the switch it
++  // composed and every later caller finds it. In a child process it composes
++  // nothing, which leaves the host inherited -- the same thing an absent
++  // switch has always meant. It passes no user data directory because base/
++  // cannot compute Chrome's default one; the consequence is that font
++  // provisioning cannot be checked on that path, and the composition reports
++  // it.
+   static const Profile* const profile = [] {
+     if (!CommandLine::InitializedForCurrentProcess()) {
        return static_cast<const Profile*>(nullptr);
      }
      const CommandLine* command_line = CommandLine::ForCurrentProcess();
 -    if (!command_line->HasSwitch(switches::kApostateProfile)) {
++
 +    if (command_line->HasSwitch(::switches::kApostateProfile)) {
-+      return static_cast<const Profile*>(ParseOrNull(
-+          command_line->GetSwitchValueASCII(::switches::kApostateProfile)));
++      const Profile* supplied = ParseOrNull(
++          command_line->GetSwitchValueASCII(::switches::kApostateProfile));
++      if (!supplied) {
++        // An explicitly supplied profile is the strongest layer in the launch
++        // precedence, so a value that cannot be honoured stops the launch. It
++        // used to fall through to composition, which meant a switch pointed at
++        // a profile *file* -- the obvious mistake, since the file is right
++        // there and the switch names it -- produced a working browser wearing
++        // a different device, and said so only on stderr. A caller that built
++        // the switch wrongly got a plausible wrong answer instead of a
++        // failure.
++        //
++        // In a child process this cannot fire: patch 0005 copies the value the
++        // browser already parsed, byte for byte. It fires in the process whose
++        // command line the operator wrote, which is the only one that can fix
++        // it.
++        RefuseLaunch(
++            "--apostate-profile is not base64-encoded profile JSON, so the "
++            "profile it names cannot be loaded and this launch stops rather "
++            "than composing a different device and presenting it as the one "
++            "you asked for. It takes the encoded bytes, not a path and not "
++            "raw JSON: --apostate-profile=\"$(base64 < profile.json | tr -d "
++            "'\\n')\".");
++      }
++      return supplied;
 +    }
 +
-+    // No switch: compose one. Returns nullopt in a child process, under
-+    // --fingerprint=host, and when the catalogue cannot serve this launch;
-+    // each of those means inherit the host, which is what the caller below
-+    // already does with a null profile.
-+    std::optional<std::string> composed = ComposeProfileForCurrentProcess();
-+    if (!composed) {
++    InstallComposedProfile(FilePath());
++    if (!command_line->HasSwitch(::switches::kApostateProfile)) {
        return static_cast<const Profile*>(nullptr);
      }
--    return static_cast<const Profile*>(ParseOrNull(
+     return static_cast<const Profile*>(ParseOrNull(
 -        command_line->GetSwitchValueASCII(switches::kApostateProfile)));
-+
-+    // Write it back onto this process's command line so the children inherit
-+    // it. Patch 0005 propagates --apostate-profile to every child, and a
-+    // composed profile that never reaches the renderer is worse than none: the
-+    // browser would size its thread pools from the claim while the renderer
-+    // reported the host's cores, and navigator.hardwareConcurrency would
-+    // contradict the profile. Composition cannot repeat in the child — it is
-+    // sandboxed and cannot read the seed file — so the switch is the only
-+    // path, and it is the one that already exists.
-+    CommandLine::ForCurrentProcess()->AppendSwitchASCII(
-+        ::switches::kApostateProfile, *composed);
-+    return static_cast<const Profile*>(ParseOrNull(*composed));
++        command_line->GetSwitchValueASCII(::switches::kApostateProfile)));
    }();
    return profile;
  }

@@ -34,8 +34,14 @@ the host has is achievable; claiming more is contradicted by measurement
 whatever the function returns, and refusing to launch would trade a weak,
 rarely probed signal for a hard usability failure.
 
-Memory is parsed but not yet consumed: navigator.deviceMemory needs the value
-rounded the way Blink rounds it, which is the next increment.
+Memory is parsed here but consumed by the next patch. Patch 0006 feeds it to
+ApproximatedDeviceMemory::Initialize, which is the input to Chromium's own
+rounding rather than a replacement for its output, so navigator.deviceMemory and
+the Device-Memory request header agree and neither can leave the bucket set
+{2, 4, 8, 16, 32} that Chromium 152 can produce on desktop. Verified through the
+shipped binary: on this 36 GiB host, stock Google Chrome 152.0.7977.83 and a
+composed launch both report 32. This paragraph used to say the rounding was
+"the next increment", and it was: 0006 is that increment.
 
 The profile parses on first Get() rather than from an explicit startup hook.
 The command line is fully populated before anything in base runs, so there is no

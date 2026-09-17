@@ -42,6 +42,12 @@ dynamic-range and colour-gamut media features as well as screen.colorDepth.
 Conformance disproved it: colorDepth matched the reference Mac while both media
 features failed, which is only possible if they read different state. They do.
 
+This hunk sits immediately above the same upstream cross-process screen-cache
+TODO that patch 0010's prose settles. Both media features were included in that
+probe: a top frame and a cross-origin out-of-process iframe report the same
+(color-gamut) and (dynamic-range) answers, and under a profile claiming p3 and
+HDR both report the profile's answers rather than the host's.
+
 Ledger: css.color-gamut, css.dynamic-range.
 diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
 index 2fd4f6f..0f66556 100644

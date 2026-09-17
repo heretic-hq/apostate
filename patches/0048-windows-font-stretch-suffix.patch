@@ -20,8 +20,29 @@ Paths above are under third_party/blink/renderer/.
 Skia0873ec164a06966b90ae0d43ef783cfb180084ae:
 - src/ports/SkFontConfigInterface_direct.cpp:552-586,623-672
 
-Windows capture evidence for Arial Narrow and the successive CSS fallback metric samples
-is unavailable; the missing-family branch remains pending for that control.
+The Arial Narrow control now exists, and it confirms this branch.
+resources/fingerprints/raw/windows-chrome-20260910T140813Z.json measures
+40px "Arial Narrow" at width 160.05859375 with fontBoundingBox ascent 36 and
+descent 8, which is byte-identical to 40px Arial in the same capture. So the
+reference Windows host has no narrow face, took exactly this retry, and got
+Arial back at its normal width with no synthetic condensing -- which is why this
+patch adds none.
+
+The same capture's detection probe is the sharper half of the control. It
+reports "Arial Narrow" as detected, measuring 720 against all three generic
+baselines, the same triple Arial produces, while families that are genuinely
+absent and carry no stretch suffix -- Menlo and Zapfino -- return the baseline
+triple 587/720/692 and are not detected. Without this retry a Windows persona on
+Linux advances to the next CSS fallback family, returns the baseline triple, and
+is missing from its detected set a family every real Windows machine reports.
+That is the divergence the patch removes, and it is readable by any detector
+that probes font presence by width.
+
+What the control does not settle: on a host that does have a real narrow face
+installed, Fontconfig returns it for the condensed request and the advances
+differ from the reference, where Windows had nothing narrower to hand back. That
+is an outcome of which font files are provisioned, not a question about this
+policy.
 
 V1 compilation and V3 checks remain required, including a real narrow family,
 style/stretch requests and src:local() exclusion. No font files, fontconfig,

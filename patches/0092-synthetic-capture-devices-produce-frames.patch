@@ -1,0 +1,1200 @@
+Subject: [PATCH] media: serve the capture devices the profile claims
+
+Patch 0020 made enumerateDevices() report the microphones and cameras the
+profile claims. It did that in MediaDevicesManager, which is where the browser
+assembles the list a page sees, and it said in as many words that wiring those
+devices to a capture backend was the follow-up. This is that follow-up, and it
+also moves the emission down to where it should have been.
+
+Measured on the shipped 152.0.7977.83 macOS artifact, with camera and
+microphone permission granted through Browser.grantPermissions. That route
+was chosen over --use-fake-ui-for-media-stream because the switch name does
+not settle whether it also replaces the backend; it does not, and that was
+checked rather than assumed — under that switch alone getUserMedia still
+returns the host's own "Default - MacBook Pro Microphone (Built-in)". A
+profile claiming four microphones and four
+cameras on a host that has two of each enumerates eight devices. The four real
+ones open. The four claimed ones give, every time:
+
+    getUserMedia({audio: {deviceId: {exact: <claimed mic>}}})
+      -> NotReadableError: Could not start audio source
+    getUserMedia({video: {deviceId: {exact: <claimed camera>}}})
+      -> NotReadableError: Could not start video source
+
+That is worse than not claiming the device. A page can enumerate without any
+permission at all, then ask for the permission it was going to ask for anyway,
+and learn that hardware the browser advertised does not exist. Enumeration and
+capture are the same surface to a detector; only the number of steps differs.
+
+That the plumbing works at this layer was also measured rather than assumed:
+the same binary run with --use-fake-device-for-media-stream=device-count=2
+enumerates two cameras created by a VideoCaptureDeviceFactory, and
+getUserMedia with an exact deviceId opens either of them and delivers frames.
+That is the identical layer this patch adds a device at.
+
+Where the devices come from now. A camera is added by wrapping the platform
+VideoCaptureDeviceFactory, and a microphone by
+AudioManagerBase::GetAudioInputDeviceDescriptions. Those two objects are what
+the rest of the browser asks both of its questions of: what devices exist, and
+open this one. MediaDevicesManager's list is built from their answers, so the
+devices still enumerate exactly as before, and now the same list is the one
+VideoCaptureManager and AudioInputDeviceManager look in when a page calls
+getUserMedia. The MediaDevicesManager injection 0020 added is removed in the
+same change; a device known only to the layer that answers enumerateDevices()
+is precisely the device that enumerates and will not open, which is the bug.
+
+AudioSystemHelper::ComputeInputParameters answers for a claimed microphone
+before it reaches the platform manager, for two reasons. The platform manager
+has never heard of the device. And on a host with no microphone at all, the
+HasAudioInputDevices() guard above that call refuses before the platform
+manager is even asked — on a headless VM, which is the case this patch is for,
+that guard alone is enough to make every claimed microphone unopenable.
+
+The stream itself is FakeAudioInputStream, which is Chromium's own
+hardware-less input stream and is already wired into this switch for
+--disable-audio-input. Only the stream implementation changes; the advertised
+parameters stay what ComputeInputParameters reported, so the sampleRate,
+channelCount and latency a page reads are the same numbers before and after the
+stream opens. 48 kHz mono at 10 ms, fixed rather than copied from the host,
+because the device is not the host's; that is also what the macOS reference
+host's own built-in microphone reports.
+
+What the devices produce, which is the part with a real choice in it.
+
+Chromium's fake video device paints a pacman sprite on a rolling gradient with
+a frame counter burned in. It is the worst of the available answers, and how
+bad was measured rather than assumed. Running the shipped binary with
+--use-fake-device-for-media-stream and reading one frame back through a canvas:
+the top-left pixel is exactly (0, 255, 0), saturated green, so identifying the
+device costs one pixel comparison and no template match at all. The track it
+produces also reports exposureMode "manual", exposureTime 50, focusMode
+"manual" and focusDistance 50 in getSettings(), none of which the host's real
+camera reports, and a default frame rate of 20, which no camera has. And
+asking it for 1920x1080 at 30 gives OverconstrainedError, because it offers
+neither. It is not used here, and neither is its device class.
+
+Three other answers were considered and rejected. A black frame: a real sensor
+does not produce exact zeros, not even with the lens covered, because there is
+always a black level and read noise, so min == max == 0 is a one-line test. A
+constant frame: successive frames would be bit-identical, and no real capture
+ever is — this was measured, the host's built-in camera differs between
+consecutive frames by a mean of about 2 levels per channel, and the OBS virtual
+camera on the same host differs by exactly 0, which is how a virtual camera
+gives itself away. A full-amplitude noise field: spatially flat, where real
+frames are dominated by low spatial frequencies with noise as a small term on
+top.
+
+So the frame is a dim, low-contrast scene: a smooth luma gradient with a
+vignette, a fixed near-neutral chroma cast, a slow exposure drift and a
+low-amplitude grain. That is what a camera pointed at an evenly lit wall, or
+sitting behind a privacy cover, actually delivers. Measured from the generator
+at 1920x1080: mean luma 74 to 98 depending on seed, nothing clipped at either
+end, mean absolute frame-to-frame difference 1.79 levels against the host
+camera's 2.07 to 2.29, and mean absolute horizontal neighbour difference 1.79
+against about 85 for a noise field of the same amplitude.
+
+The microphone is the same argument. Digital silence is not what a microphone
+delivers; an analogue-to-digital converter always has a noise floor, and an
+all-zero buffer is three lines of WebAudio away from being noticed.
+BeepingSource, which is what FakeAudioInputStream produces today, emits a
+periodic burst, and the level of it was measured on the shipped binary over
+three seconds with the browser's own processing disabled: peak 1.13, above
+full scale, and RMS 0.483 in 16 of 169 windows. The host's real microphone
+over the same three seconds gave peak 0.016 and RMS 0.0032. A microphone that
+clips twice a second in a silent room is not a microphone. It is kept for --use-fake-device-for-media-stream, because that
+switch is how WebRTC's audio/video synchronisation tests ask for a signal to
+synchronise against, and it is replaced everywhere else with a low-level
+broadband hiss, low-passed twice so its spectrum falls with frequency the way
+room tone does. Measured over one second: RMS 0.0030 and peak 0.0114, against
+0.0032 and 0.0111 measured from the reference host's own microphone in a quiet
+room, with no periodic component — the strongest autocorrelation at any lag
+from 5 ms to 500 ms is 5.6% of the zero-lag power.
+
+None of this is per-call randomness. The scene, the cast, the grain sequence
+and the noise sequence are all functions of the profile seed and the device
+identifier, so the same profile produces the same capture on the next launch,
+and the surfaces a page can read twice — device id, group id, label,
+resolution, frame rate, sample rate, channel count — do not vary within a
+launch at all. Frame content is a time series and not one of those surfaces: a
+camera whose frames did not change would be the anomaly.
+
+Labels come from the profile. media.devices has been in the schema and in the
+composed profile all along, carrying a vendor-real, platform-correct label and
+a group pairing key for each claimed device, and nothing read it. Nothing read
+it because 0020 only needed counts. A label is observable once a capture
+permission is granted, and a device with an empty label sitting in a list next
+to labelled host devices is its own signal, so the parser now reads them and
+the emitters use them. Devices the profile puts in one group get one group id,
+so a page that pairs a microphone with a camera by groupId sees the pairing the
+profile claims.
+
+Two things the claimed camera deliberately does not do. It reports no
+facingMode, because facingMode is populated on Android and ChromeOS and the
+macOS reference camera reports an empty list; a desktop camera claiming "user"
+contradicts every desktop camera a detector has seen. And it reports no pan,
+tilt or zoom, which is also what the reference camera reports.
+
+What a claimed camera offers is 320x240, 640x360, 640x480, 1280x720 and
+1920x1080, all at 30 fps, and it delivers whichever of those the constraint
+resolution picked. A page reads the maxima of that list through
+getCapabilities() and the negotiated entry through getSettings(), so claiming
+1920x1080 and delivering 640x480 would be the same kind of contradiction as
+enumerating a device that cannot be opened. 30 fps rather than 60 because a
+built-in camera that claims 60 at 1080p is a webcam almost nobody has, and the
+claim is checkable by counting frames.
+
+Not covered. Audio output devices: audiooutput_count is in the schema but 0020
+never parsed it and nothing synthesises an output device, so there is no
+enumerate-but-cannot-use gap on that side to close. Video group ids: the
+browser guesses those by matching a camera's label against the audio device
+labels in MediaDevicesManager, so the profile's group key steers audio pairing
+and the camera gets the same treatment a real camera gets.
+
+Compile-unverified: this cannot be built in this session. The generator
+measurements above were taken by compiling the frame and sample generators
+standalone with the surrounding Chromium types replaced by plain arrays; the
+generator bodies are the same code.
+
+Ledger: media.device-counts, media.capture-open.
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -215,6 +215,25 @@
+     return media_videoinput_count_;
+   }
+ 
++  // One entry of the claimed enumerateDevices() topology.
++  //
++  // `group` is a pairing key rather than a groupId: entries sharing it are one
++  // physical device, and the emitter gives them the same per-origin groupId.
++  // The label is the only field a page can read, and only after a capture
++  // permission is granted.
++  struct MediaDevice {
++    std::string kind;
++    std::string label;
++    std::string group;
++  };
++
++  // The claimed topology, in catalogue order. Empty means the profile named
++  // counts without naming devices, in which case a synthesised device carries
++  // no label — the same thing a page sees before a permission is granted.
++  const std::vector<MediaDevice>& media_devices() const {
++    return media_devices_;
++  }
++
+   // navigator.keyboard.getLayoutMap(), replayed from the capture.
+   //
+   // This is a user setting rather than a device property — the same Mac gives a
+@@ -522,6 +541,7 @@
+   std::optional<int> audio_hardware_buffer_frames_;
+   std::optional<int> media_audioinput_count_;
+   std::optional<int> media_videoinput_count_;
++  std::vector<MediaDevice> media_devices_;
+   std::map<std::string, std::string> keyboard_layout_map_;
+   std::map<std::string, int64_t> gl_limits_;
+   std::set<std::string> gl_extensions_;
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -347,6 +347,42 @@
+         }
+       }
+     }
++
++    // The claimed topology. The counts above say how many devices of each kind
++    // the machine has; these say what they are called and which of them are
++    // one physical device. A label is observable once a capture permission is
++    // granted, and an empty label sitting next to labelled host devices is its
++    // own signal, so the labels have to come from somewhere that knows the
++    // claimed platform. The compositor already selects them from the
++    // media_topology catalogue, where a Realtek codec string is a Windows
++    // artifact and is not selectable on macOS. Nothing read them before this.
++    if (const ListValue* devices = media->FindList("devices")) {
++      for (const auto& entry : *devices) {
++        const DictValue* device = entry.GetIfDict();
++        if (!device) {
++          LOG(ERROR) << "apostate: media.devices entries must be objects; "
++                     << "ignoring";
++          continue;
++        }
++        const std::string* kind = device->FindString("kind");
++        const std::string* label = device->FindString("label");
++        const std::string* group = device->FindString("group");
++        if (!kind || !label || !group || label->empty() ||
++            label->size() > 256 || group->empty() || group->size() > 128 ||
++            (*kind != "audioinput" && *kind != "audiooutput" &&
++             *kind != "videoinput")) {
++          LOG(ERROR) << "apostate: malformed media.devices entry; ignoring";
++          continue;
++        }
++        if (profile->media_devices_.size() >= 48) {
++          LOG(ERROR) << "apostate: media.devices holds more than 48 entries; "
++                     << "ignoring the rest";
++          break;
++        }
++        profile->media_devices_.push_back(
++            Profile::MediaDevice{*kind, *label, *group});
++      }
++    }
+   }
+ 
+   if (const DictValue* media_hw = dict->FindDict("media")) {
+--- a/base/BUILD.gn
++++ b/base/BUILD.gn
+@@ -1695,6 +1695,8 @@
+     "process/process_metrics.h",
+     "scoped_native_library.cc",
+     "scoped_native_library.h",
++    "apostate/media_devices.cc",
++    "apostate/media_devices.h",
+     "apostate/profile.cc",
+     "apostate/profile.h",
+     "system/sys_info.cc",
+--- a/media/audio/audio_manager_base.cc
++++ b/media/audio/audio_manager_base.cc
+@@ -8,6 +8,7 @@
+ #include <memory>
+ #include <optional>
+ 
++#include "base/apostate/media_devices.h"
+ #include "base/command_line.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
+@@ -310,6 +311,57 @@
+                                    "AudioManager starts.");
+ }
+ 
++namespace {
++
++// Microphones the profile claims and the host does not have.
++//
++// Here, rather than where enumerateDevices() answers, because this is the list
++// the audio service itself works from: the same descriptions feed the
++// browser's device cache, device-change notifications and the parameters
++// lookup that runs before a stream is opened. A device added above this layer
++// is a device the audio service has never heard of, which is how a device can
++// enumerate and then fail to open.
++void AppendProfileInputDevices(AudioDeviceDescriptions* descriptions) {
++  // The virtual "default" and "communications" entries are not hardware, so
++  // they do not count towards what the host really has.
++  size_t host_devices = 0;
++  for (const auto& description : *descriptions) {
++    if (!AudioDeviceDescription::IsDefaultDevice(description.unique_id) &&
++        !AudioDeviceDescription::IsCommunicationsDevice(description.unique_id)) {
++      ++host_devices;
++    }
++  }
++
++  const std::vector<base::apostate::SyntheticMediaDevice> synthetic =
++      base::apostate::SyntheticAudioInputDevices(host_devices);
++  if (synthetic.empty()) {
++    return;
++  }
++
++  // A machine with a microphone also enumerates a virtual default entry
++  // pointing at it; a machine with none enumerates nothing at all. If the host
++  // is the second kind and the profile claims the first, the default entry has
++  // to come too, or the claimed machine is one whose microphone the operating
++  // system does not consider a recording device.
++  const bool host_had_devices = !descriptions->empty();
++  if (!host_had_devices) {
++    descriptions->emplace_back(synthetic.front().label,
++                               AudioDeviceDescription::kDefaultDeviceId,
++                               synthetic.front().group_id,
++                               /*is_system_default=*/true,
++                               /*is_communications_device=*/false);
++  }
++  bool first = true;
++  for (const auto& device : synthetic) {
++    descriptions->emplace_back(device.label, device.id, device.group_id,
++                               /*is_system_default=*/!host_had_devices && first,
++                               /*is_communications_device=*/false);
++    first = false;
++  }
++}
++
++}  // namespace
++
+ void AudioManagerBase::GetAudioInputDeviceDescriptions(
+     AudioDeviceDescriptions* device_descriptions) {
+   CHECK(GetTaskRunner()->BelongsToCurrentThread());
+@@ -318,6 +370,7 @@
+       &AudioManagerBase::GetDefaultInputDeviceID,
+       &AudioManagerBase::GetCommunicationsInputDeviceID,
+       &AudioManagerBase::GetGroupIDInput);
++  AppendProfileInputDevices(device_descriptions);
+   base::UmaHistogramEnumeration(
+       "Media.Audio.InputDeviceEnumerationOutcome",
+       GetAudioEnumerationOutcome(
+@@ -501,6 +554,17 @@
+     params.set_format(AudioParameters::AUDIO_FAKE);
+   }
+ 
++  // A microphone the profile claims has no hardware behind it, so no platform
++  // backend can open it. FakeAudioInputStream is the browser's own
++  // hardware-less input stream and is already wired into this switch below;
++  // what it produces is decided in ChooseSource(), not here. Note this changes
++  // the stream implementation, not the advertised parameters: the sample rate,
++  // channel count and buffer length a page reads stay what
++  // AudioSystemHelper::ComputeInputParameters reported for this device.
++  if (base::apostate::IsSyntheticAudioInputId(device_id)) {
++    params.set_format(AudioParameters::AUDIO_FAKE);
++  }
++
+   SendLogMessage(
+       log_callback,
+       base::StrCat({__func__, "({device_id=", device_id, "}, {params=[",
+--- a/media/audio/audio_system_helper.cc
++++ b/media/audio/audio_system_helper.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "media/audio/audio_system_helper.h"
+ 
++#include "base/apostate/media_devices.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "media/audio/audio_manager.h"
+ #include "media/base/limits.h"
+@@ -102,6 +103,19 @@
+     const std::string& device_id) {
+   DCHECK(audio_manager_->GetTaskRunner()->BelongsToCurrentThread());
+ 
++  // A microphone the profile claims. The platform manager has never heard of
++  // it and would answer with whatever it answers for an unknown device, and
++  // on a host with no microphone at all the HasAudioInputDevices() check below
++  // refuses before that even happens — which is how a device that enumerates
++  // ends up failing to open. The format is fixed rather than derived from the
++  // host, because the device is not the host's.
++  if (base::apostate::IsSyntheticAudioInputId(device_id)) {
++    return AudioParameters(AudioParameters::AUDIO_PCM_LOW_LATENCY,
++                           ChannelLayoutConfig::Mono(),
++                           base::apostate::kSyntheticAudioInputSampleRate,
++                           base::apostate::kSyntheticAudioInputBufferFrames);
++  }
++
+   // TODO(olka): remove this when AudioManager::GetInputStreamParameters()
+   // returns invalid parameters if the device is not found.
+   if (AudioDeviceDescription::IsLoopbackDevice(device_id)) {
+--- a/media/audio/fake_audio_input_stream.cc
++++ b/media/audio/fake_audio_input_stream.cc
+@@ -4,9 +4,11 @@
+ 
+ #include "media/audio/fake_audio_input_stream.h"
+ 
++#include <algorithm>
+ #include <memory>
+ #include <string>
+ 
++#include "base/apostate/media_devices.h"
+ #include "base/atomicops.h"
+ #include "base/command_line.h"
+ #include "base/files/file_path.h"
+@@ -33,8 +35,71 @@
+ 
+ namespace {
+ std::atomic<bool> g_fake_input_streams_are_muted;
+-}
+ 
++// What a microphone in a quiet room delivers.
++//
++// Not digital silence: a real analogue-to-digital converter always has a noise
++// floor, and an all-zero buffer is three lines of WebAudio away from being
++// noticed. Not a tone either — BeepingSource, which this replaces outside
++// explicit test mode, emits a 400 Hz burst twice a second, which is both
++// perfectly periodic and nothing a room does.
++//
++// So: a low-level broadband hiss, low-passed twice so its spectrum falls with
++// frequency the way room tone and preamp noise do rather than being flat. The
++// level is the level the reference host's own built-in microphone delivers in
++// a quiet room.
++class RoomToneSource : public AudioOutputStream::AudioSourceCallback {
++ public:
++  // One-pole coefficient, applied twice. Below 0.3 the spectrum has a clear
++  // downward tilt across the audible band, which is what room tone looks like
++  // on an analyser; at 1.0 it would be flat white noise, which does not.
++  static constexpr float kCutoff = 0.22f;
++  // Delivers an RMS of 0.0030 and a peak of 0.0114 over a second, against
++  // 0.0032 and 0.0111 measured from the reference host's built-in microphone.
++  static constexpr float kLevel = 0.021f;
++
++  explicit RoomToneSource(uint64_t seed) : state_(seed | 1) {}
++
++  RoomToneSource(const RoomToneSource&) = delete;
++  RoomToneSource& operator=(const RoomToneSource&) = delete;
++
++  ~RoomToneSource() override = default;
++
++  int OnMoreData(base::TimeDelta /*delay*/,
++                 base::TimeTicks /*timestamp*/,
++                 const AudioGlitchInfo& /*glitch_info*/,
++                 AudioBus* dest) override {
++    for (float& sample : dest->channel(0)) {
++      state_ ^= state_ << 13;
++      state_ ^= state_ >> 7;
++      state_ ^= state_ << 17;
++      const float white =
++          static_cast<float>(static_cast<int32_t>(state_ >> 32)) /
++          2147483648.0f;
++      low_ += kCutoff * (white - low_);
++      lower_ += kCutoff * (low_ - lower_);
++      sample = kLevel * lower_;
++    }
++    // Every channel of a built-in microphone sees the same room, so the
++    // channels are correlated. Independent noise per channel is what a
++    // synthesiser produces and not what a room does, and the difference
++    // survives a two-channel correlation.
++    for (int channel = 1; channel < dest->channels(); ++channel) {
++      std::ranges::copy(dest->channel(0), dest->channel(channel).begin());
++    }
++    return dest->frames();
++  }
++
++  void OnError(ErrorType /*type*/) override {}
++
++ private:
++  uint64_t state_;
++  float low_ = 0.0f;
++  float lower_ = 0.0f;
++};
++
++}  // namespace
++
+ AudioInputStream* FakeAudioInputStream::MakeFakeStream(
+     AudioManagerBase* manager,
+     const AudioParameters& params) {
+@@ -202,7 +267,18 @@
+     }
+     return std::make_unique<FileSource>(params_, path_to_wav_file, looping);
+   }
+-  return std::make_unique<BeepingSource>(params_);
++
++  // BeepingSource exists so WebRTC's audio/video synchronisation tests have
++  // something to synchronise against, and --use-fake-device-for-media-stream
++  // is how a test asks for it. Outside that switch this stream is serving a
++  // microphone the profile claims, and a microphone that emits a periodic
++  // 400 Hz burst is a worse answer than no microphone at all.
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++          switches::kUseFakeDeviceForMediaStream)) {
++    return std::make_unique<BeepingSource>(params_);
++  }
++  return std::make_unique<RoomToneSource>(
++      base::apostate::SyntheticDeviceSeed("audioinput"));
+ }
+ 
+ void FakeAudioInputStream::BeepOnce() {
+--- a/media/capture/BUILD.gn
++++ b/media/capture/BUILD.gn
+@@ -75,6 +75,8 @@
+     "content/smooth_event_sampler.h",
+     "content/video_capture_oracle.cc",
+     "content/video_capture_oracle.h",
++    "video/apostate_video_capture_device.cc",
++    "video/apostate_video_capture_device.h",
+     "video/blob_utils.cc",
+     "video/blob_utils.h",
+     "video/fake_video_capture_device.cc",
+--- a/media/capture/video/create_video_capture_device_factory.cc
++++ b/media/capture/video/create_video_capture_device_factory.cc
+@@ -11,6 +11,7 @@
+ #include "build/build_config.h"
+ #include "gpu/config/gpu_driver_bug_workarounds.h"
+ #include "media/base/media_switches.h"
++#include "media/capture/video/apostate_video_capture_device.h"
+ #include "media/capture/video/fake_video_capture_device_factory.h"
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+@@ -104,12 +105,22 @@
+     gpu::GpuDriverBugWorkarounds* gpu_workarounds) {
+   if (ShouldUseFakeVideoCaptureDeviceFactory()) {
+     return CreateFakeVideoCaptureDeviceFactory();
+-  } else {
+-    // |ui_task_runner| is needed for the Linux ChromeOS factory to retrieve
+-    // screen rotations.
+-    return CreatePlatformSpecificVideoCaptureDeviceFactory(ui_task_runner,
+-                                                           gpu_workarounds);
+   }
++  // |ui_task_runner| is needed for the Linux ChromeOS factory to retrieve
++  // screen rotations.
++  std::unique_ptr<VideoCaptureDeviceFactory> platform_factory =
++      CreatePlatformSpecificVideoCaptureDeviceFactory(ui_task_runner,
++                                                      gpu_workarounds);
++  if (!platform_factory) {
++    return platform_factory;
++  }
++  // Cameras the profile claims are added here, around the platform factory,
++  // because this one object answers both questions the rest of the browser
++  // asks about a camera: what cameras exist, and open this one. Adding a
++  // camera to only the first answer produces a camera that enumerates and
++  // then cannot be opened.
++  return std::make_unique<ApostateVideoCaptureDeviceFactory>(
++      std::move(platform_factory));
+ }
+ 
+ }  // namespace media
+--- /dev/null
++++ b/base/apostate/media_devices.h
+@@ -0,0 +1,75 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_APOSTATE_MEDIA_DEVICES_H_
++#define BASE_APOSTATE_MEDIA_DEVICES_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include <string>
++#include <string_view>
++#include <vector>
++
++#include "base/base_export.h"
++
++namespace base::apostate {
++
++// A capture device the profile claims and the host does not have.
++//
++// The identifiers are raw: MediaDevicesDispatcherHost replaces both with a
++// per-origin HMAC before either reaches a renderer, so neither string is
++// observable and neither needs to imitate a platform's naming. The label is
++// observable once a capture permission is granted, which is why it comes from
++// the profile's topology rather than from this file.
++struct BASE_EXPORT SyntheticMediaDevice {
++  std::string id;
++  std::string label;
++  // Devices sharing a profile `group` share this, so a page that pairs a
++  // microphone with a camera by groupId sees the pairing the profile claims.
++  std::string group_id;
++};
++
++// The devices to append when the host already reports `host_device_count` of
++// that kind. Empty when no profile is configured, when the profile carries no
++// count, or when the host already has at least as many as the profile claims.
++//
++// The profile sets a floor rather than an exact count for the reason patch 0020
++// gives: removing a device a machine really has, to make a number match, breaks
++// capture on a machine that can actually capture.
++BASE_EXPORT std::vector<SyntheticMediaDevice> SyntheticAudioInputDevices(
++    size_t host_device_count);
++BASE_EXPORT std::vector<SyntheticMediaDevice> SyntheticVideoInputDevices(
++    size_t host_device_count);
++
++// Whether an identifier names one of the devices above. Both prefixes are
++// namespaced so they cannot collide with a platform identifier, and neither is
++// "default" or "communications", which are special-cased downstream.
++BASE_EXPORT bool IsSyntheticAudioInputId(std::string_view id);
++BASE_EXPORT bool IsSyntheticVideoInputId(std::string_view id);
++
++// The format a synthetic microphone reports and delivers.
++//
++// A page reads all three: sampleRate and channelCount directly from
++// MediaStreamTrack.getSettings(), and latency as frames over rate. They are
++// fixed rather than taken from the host, because the device is not the host's
++// and a claimed microphone that inherits the host's odd rate says so. 48 kHz
++// mono at 10 ms is what every built-in laptop microphone Chromium opens
++// reports, and is what the macOS reference host measured.
++inline constexpr int kSyntheticAudioInputSampleRate = 48000;
++inline constexpr int kSyntheticAudioInputChannels = 1;
++inline constexpr int kSyntheticAudioInputBufferFrames =
++    kSyntheticAudioInputSampleRate / 100;
++
++// A stable 64-bit value for a synthetic device, derived from the profile
++// identity and the device identifier.
++//
++// It selects what the device's frames and samples look like. It is a function
++// of the seed, not of the call, so two launches of the same profile capture the
++// same scene and two reads within one launch never disagree.
++BASE_EXPORT uint64_t SyntheticDeviceSeed(std::string_view device_id);
++
++}  // namespace base::apostate
++
++#endif  // BASE_APOSTATE_MEDIA_DEVICES_H_
+--- /dev/null
++++ b/base/apostate/media_devices.cc
+@@ -0,0 +1,126 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a GPL-3.0 license that can be
++// found in the LICENSE file.
++
++#include "base/apostate/media_devices.h"
++
++#include <algorithm>
++
++#include "base/apostate/profile.h"
++#include "base/hash/hash.h"
++#include "base/strings/strcat.h"
++#include "base/strings/string_number_conversions.h"
++
++namespace base::apostate {
++
++namespace {
++
++constexpr char kAudioInputPrefix[] = "apostate-audioinput-";
++constexpr char kVideoInputPrefix[] = "apostate-videoinput-";
++
++// A device the profile claims but does not name gets no label, and a device it
++// names beyond the first of its kind gets the catalogue label with an index.
++// Two identical built-in cameras on one machine is not a case the catalogue
++// describes, and inventing a second vendor string would be inventing evidence.
++std::string LabelForIndex(const std::vector<Profile::MediaDevice>& devices,
++                          std::string_view kind,
++                          size_t index) {
++  size_t seen = 0;
++  std::string last;
++  for (const auto& device : devices) {
++    if (device.kind != kind) {
++      continue;
++    }
++    if (seen == index) {
++      return device.label;
++    }
++    last = device.label;
++    ++seen;
++  }
++  if (last.empty()) {
++    return std::string();
++  }
++  return StrCat({last, " (", NumberToString(index - seen + 2), ")"});
++}
++
++// The pairing key, not the label. Devices the profile puts in one group get one
++// group id, so a page pairing a microphone with a camera sees what the profile
++// claims. Namespaced so it cannot equal a platform group id.
++std::string GroupForIndex(const std::vector<Profile::MediaDevice>& devices,
++                          std::string_view kind,
++                          size_t index,
++                          std::string_view fallback_prefix) {
++  size_t seen = 0;
++  for (const auto& device : devices) {
++    if (device.kind != kind) {
++      continue;
++    }
++    if (seen == index) {
++      return StrCat({"apostate-group-", device.group});
++    }
++    ++seen;
++  }
++  return StrCat({fallback_prefix, NumberToString(index), "-group"});
++}
++
++std::vector<SyntheticMediaDevice> Build(const Profile& profile,
++                                        std::optional<int> wanted,
++                                        std::string_view kind,
++                                        std::string_view prefix,
++                                        size_t host_device_count) {
++  std::vector<SyntheticMediaDevice> result;
++  if (!wanted.has_value() || *wanted <= 0) {
++    return result;
++  }
++  const size_t claimed = static_cast<size_t>(*wanted);
++  for (size_t i = host_device_count; i < claimed; ++i) {
++    result.push_back(SyntheticMediaDevice{
++        StrCat({prefix, NumberToString(i)}),
++        LabelForIndex(profile.media_devices(), kind, i),
++        GroupForIndex(profile.media_devices(), kind, i, prefix)});
++  }
++  return result;
++}
++
++}  // namespace
++
++std::vector<SyntheticMediaDevice> SyntheticAudioInputDevices(
++    size_t host_device_count) {
++  const Profile* profile = Profile::Get();
++  if (!profile) {
++    return {};
++  }
++  return Build(*profile, profile->media_audioinput_count(), "audioinput",
++               kAudioInputPrefix, host_device_count);
++}
++
++std::vector<SyntheticMediaDevice> SyntheticVideoInputDevices(
++    size_t host_device_count) {
++  const Profile* profile = Profile::Get();
++  if (!profile) {
++    return {};
++  }
++  return Build(*profile, profile->media_videoinput_count(), "videoinput",
++               kVideoInputPrefix, host_device_count);
++}
++
++bool IsSyntheticAudioInputId(std::string_view id) {
++  return id.starts_with(kAudioInputPrefix);
++}
++
++bool IsSyntheticVideoInputId(std::string_view id) {
++  return id.starts_with(kVideoInputPrefix);
++}
++
++uint64_t SyntheticDeviceSeed(std::string_view device_id) {
++  const Profile* profile = Profile::Get();
++  const std::string material =
++      StrCat({profile ? profile->source_id() : std::string(), "/", device_id});
++  // PersistentHash is stable across builds and processes, which matters
++  // because the same profile has to produce the same scene on the next
++  // launch. It selects a scene; it protects nothing.
++  return (static_cast<uint64_t>(PersistentHash(material)) << 32) |
++         PersistentHash(StrCat({material, "/2"}));
++}
++
++}  // namespace base::apostate
+--- /dev/null
++++ b/media/capture/video/apostate_video_capture_device.h
+@@ -0,0 +1,116 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef MEDIA_CAPTURE_VIDEO_APOSTATE_VIDEO_CAPTURE_DEVICE_H_
++#define MEDIA_CAPTURE_VIDEO_APOSTATE_VIDEO_CAPTURE_DEVICE_H_
++
++#include <stdint.h>
++
++#include <memory>
++#include <vector>
++
++#include "base/containers/heap_array.h"
++#include "base/memory/weak_ptr.h"
++#include "base/threading/thread_checker.h"
++#include "base/time/time.h"
++#include "media/capture/capture_export.h"
++#include "media/capture/video/video_capture_device.h"
++#include "media/capture/video/video_capture_device_factory.h"
++
++namespace media {
++
++// A camera the profile claims and the host does not have.
++//
++// Delivers I420 frames at the negotiated format. The frames are a dim,
++// low-contrast scene: a smooth luma gradient with a vignette, a slow exposure
++// drift and a low-amplitude grain, all derived from the profile seed. They are
++// deliberately not Chromium's fake-device pattern, which is a recognisable
++// sprite and timestamp burn-in; not a constant image, which no real sensor
++// produces; and not black, which a real sensor does not produce either.
++class CAPTURE_EXPORT ApostateVideoCaptureDevice : public VideoCaptureDevice {
++ public:
++  ApostateVideoCaptureDevice(VideoCaptureFormats supported_formats,
++                             uint64_t seed);
++
++  ApostateVideoCaptureDevice(const ApostateVideoCaptureDevice&) = delete;
++  ApostateVideoCaptureDevice& operator=(const ApostateVideoCaptureDevice&) =
++      delete;
++
++  ~ApostateVideoCaptureDevice() override;
++
++  // The formats every synthetic camera offers. A page reads the maxima of this
++  // list through MediaStreamTrack.getCapabilities(), and the negotiated entry
++  // through getSettings(), so the list is what makes the two agree.
++  static VideoCaptureFormats SupportedFormats();
++
++  // VideoCaptureDevice:
++  void AllocateAndStart(const VideoCaptureParams& params,
++                        std::unique_ptr<Client> client) override;
++  void StopAndDeAllocate() override;
++  void GetPhotoState(GetPhotoStateCallback callback) override;
++  void SetPhotoOptions(mojom::PhotoSettingsPtr settings,
++                       SetPhotoOptionsCallback callback) override;
++  void TakePhoto(TakePhotoCallback callback) override;
++
++ private:
++  void CaptureFrame();
++  void PaintFrame(uint64_t frame_index);
++
++  const VideoCaptureFormats supported_formats_;
++  const uint64_t seed_;
++
++  VideoCaptureFormat format_;
++  std::unique_ptr<Client> client_;
++  // The scene without exposure drift or grain, painted once per allocation.
++  base::HeapArray<uint8_t> scene_;
++  // The frame handed to the client.
++  base::HeapArray<uint8_t> frame_;
++  base::TimeTicks first_frame_time_;
++  uint64_t frame_index_ = 0;
++
++  base::ThreadChecker thread_checker_;
++  base::WeakPtrFactory<ApostateVideoCaptureDevice> weak_factory_{this};
++};
++
++// Wraps the platform factory and adds the cameras the profile claims.
++//
++// This is the layer the whole browser agrees on: the same GetDevicesInfo()
++// result feeds enumerateDevices(), device-change events and getUserMedia's
++// device selection, and CreateDevice() is reached with a descriptor from that
++// same list. A camera added anywhere above this is one that enumerates and
++// then fails to open, which is what this patch exists to fix.
++class CAPTURE_EXPORT ApostateVideoCaptureDeviceFactory
++    : public VideoCaptureDeviceFactory {
++ public:
++  explicit ApostateVideoCaptureDeviceFactory(
++      std::unique_ptr<VideoCaptureDeviceFactory> platform_factory);
++
++  ApostateVideoCaptureDeviceFactory(const ApostateVideoCaptureDeviceFactory&) =
++      delete;
++  ApostateVideoCaptureDeviceFactory& operator=(
++      const ApostateVideoCaptureDeviceFactory&) = delete;
++
++  ~ApostateVideoCaptureDeviceFactory() override;
++
++  // VideoCaptureDeviceFactory:
++  VideoCaptureErrorOrDevice CreateDevice(
++      const VideoCaptureDeviceDescriptor& device_descriptor) override;
++  void GetDevicesInfo(GetDevicesInfoCallback callback) override;
++
++#if BUILDFLAG(IS_WIN)
++  scoped_refptr<DXGIDeviceManager> GetDxgiDeviceManager() override;
++  void OnGpuInfoUpdate(const CHROME_LUID& luid) override;
++#endif
++
++ private:
++  void OnPlatformDevicesInfo(GetDevicesInfoCallback callback,
++                             std::vector<VideoCaptureDeviceInfo> devices_info);
++
++  const std::unique_ptr<VideoCaptureDeviceFactory> platform_factory_;
++  base::WeakPtrFactory<ApostateVideoCaptureDeviceFactory> weak_factory_{this};
++};
++
++}  // namespace media
++
++#endif  // MEDIA_CAPTURE_VIDEO_APOSTATE_VIDEO_CAPTURE_DEVICE_H_
+--- /dev/null
++++ b/media/capture/video/apostate_video_capture_device.cc
+@@ -0,0 +1,341 @@
++// Copyright 2026 The Apostate Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "media/capture/video/apostate_video_capture_device.h"
++
++#include <algorithm>
++#include <cmath>
++#include <iterator>
++#include <limits>
++#include <numbers>
++#include <utility>
++
++#include "base/apostate/media_devices.h"
++#include "base/containers/span.h"
++#include "base/functional/bind.h"
++#include "base/location.h"
++#include "base/task/single_thread_task_runner.h"
++#include "build/build_config.h"
++#include "media/base/video_frame.h"
++#include "media/capture/mojom/image_capture_types.h"
++#include "media/capture/video/blob_utils.h"
++#include "ui/gfx/color_space.h"
++#include "ui/gfx/geometry/size.h"
++
++namespace media {
++
++namespace {
++
++// What a built-in laptop camera offers. A page reads the maxima of this list
++// as MediaStreamTrack.getCapabilities() and the negotiated entry as
++// getSettings(), so a claim of 1920x1080 here is a claim the device then has
++// to honour. It does: AllocateAndStart() paints at the negotiated size.
++//
++// 30 fps throughout. A built-in camera that claims 60 at 1080p is a webcam
++// almost nobody has, and the claim is checkable by counting delivered frames.
++constexpr struct {
++  int width;
++  int height;
++} kSupportedSizes[] = {
++    {320, 240}, {640, 360}, {640, 480}, {1280, 720}, {1920, 1080},
++};
++constexpr float kFrameRate = 30.0f;
++
++uint64_t NextRandom(uint64_t state) {
++  // xorshift64. Cheap, deterministic, and only ever used to pick grain.
++  state ^= state << 13;
++  state ^= state >> 7;
++  state ^= state << 17;
++  return state;
++}
++
++// A value in [lo, hi] chosen by the seed. Consumes and advances `state`.
++int Pick(uint64_t* state, int lo, int hi) {
++  *state = NextRandom(*state);
++  return lo + static_cast<int>((*state >> 11) % (hi - lo + 1));
++}
++
++const VideoCaptureFormat& ClosestFormat(const VideoCaptureFormats& formats,
++                                        const VideoCaptureFormat& requested) {
++  // Area distance, then frame-rate distance. Constraint resolution upstream
++  // has already decided what it wants; this only has to land on the entry a
++  // real camera would have picked.
++  const VideoCaptureFormat* best = &formats.front();
++  int64_t best_distance = std::numeric_limits<int64_t>::max();
++  for (const auto& format : formats) {
++    const int64_t dw = format.frame_size.width() - requested.frame_size.width();
++    const int64_t dh =
++        format.frame_size.height() - requested.frame_size.height();
++    const int64_t distance = dw * dw + dh * dh;
++    if (distance < best_distance) {
++      best_distance = distance;
++      best = &format;
++    }
++  }
++  return *best;
++}
++
++}  // namespace
++
++// static
++VideoCaptureFormats ApostateVideoCaptureDevice::SupportedFormats() {
++  VideoCaptureFormats formats;
++  for (const auto& size : kSupportedSizes) {
++    formats.emplace_back(gfx::Size(size.width, size.height), kFrameRate,
++                         PIXEL_FORMAT_I420);
++  }
++  return formats;
++}
++
++ApostateVideoCaptureDevice::ApostateVideoCaptureDevice(
++    VideoCaptureFormats supported_formats,
++    uint64_t seed)
++    : supported_formats_(std::move(supported_formats)), seed_(seed) {}
++
++ApostateVideoCaptureDevice::~ApostateVideoCaptureDevice() = default;
++
++void ApostateVideoCaptureDevice::AllocateAndStart(
++    const VideoCaptureParams& params,
++    std::unique_ptr<Client> client) {
++  DCHECK(thread_checker_.CalledOnValidThread());
++
++  format_ = ClosestFormat(supported_formats_, params.requested_format);
++  const size_t allocation =
++      VideoFrame::AllocationSize(PIXEL_FORMAT_I420, format_.frame_size);
++  scene_ = base::HeapArray<uint8_t>::Uninit(allocation);
++  frame_ = base::HeapArray<uint8_t>::Uninit(allocation);
++
++  const int width = format_.frame_size.width();
++  const int height = format_.frame_size.height();
++  const size_t luma_size = static_cast<size_t>(width) * height;
++
++  // The scene. A real camera pointed at an ordinary indoor surface delivers a
++  // low-contrast image dominated by low spatial frequencies, with the corners
++  // darker than the centre because every lens vignettes. That is what this
++  // paints. It is deliberately not a recognisable image: there is nothing a
++  // detector can match a template against, and nothing that looks like a test
++  // card.
++  uint64_t state = seed_ | 1;
++  const int base_luma = Pick(&state, 54, 112);
++  // Magnitude and sign separately, so no seed can draw a tilt of nearly zero
++  // in both axes and leave a frame that is flat apart from the vignette. Real
++  // scenes are lit from somewhere.
++  const int tilt_x = Pick(&state, 6, 18) * (Pick(&state, 0, 1) ? 1 : -1);
++  const int tilt_y = Pick(&state, 6, 18) * (Pick(&state, 0, 1) ? 1 : -1);
++  const int vignette = Pick(&state, 14, 34);
++  const int chroma_u = Pick(&state, 120, 136);
++  const int chroma_v = Pick(&state, 120, 136);
++
++  base::span<uint8_t> scene = scene_.as_span();
++  for (int y = 0; y < height; ++y) {
++    // Normalised to [-1024, 1024] so the whole thing stays in integers.
++    const int ny = (2 * y - height) * 1024 / std::max(height, 1);
++    for (int x = 0; x < width; ++x) {
++      const int nx = (2 * x - width) * 1024 / std::max(width, 1);
++      const int radial = (nx * nx + ny * ny) >> 20;
++      const int value = base_luma + (tilt_x * nx >> 10) + (tilt_y * ny >> 10) -
++                        (vignette * radial >> 1);
++      scene[static_cast<size_t>(y) * width + x] =
++          static_cast<uint8_t>(std::clamp(value, 4, 235));
++    }
++  }
++  // Chroma is a constant cast, close to neutral: a room has a colour
++  // temperature and a camera's white balance never lands exactly on it. It
++  // never changes, so it is written into the delivered frame once here rather
++  // than on every capture.
++  const size_t chroma_size = static_cast<size_t>((width + 1) / 2) *
++                             static_cast<size_t>((height + 1) / 2);
++  base::span<uint8_t> frame = frame_.as_span();
++  std::ranges::fill(frame.subspan(luma_size, chroma_size),
++                    static_cast<uint8_t>(chroma_u));
++  std::ranges::fill(frame.subspan(luma_size + chroma_size, chroma_size),
++                    static_cast<uint8_t>(chroma_v));
++
++  client_ = std::move(client);
++  frame_index_ = 0;
++  first_frame_time_ = base::TimeTicks::Now();
++  client_->OnStarted();
++  CaptureFrame();
++}
++
++void ApostateVideoCaptureDevice::StopAndDeAllocate() {
++  DCHECK(thread_checker_.CalledOnValidThread());
++  weak_factory_.InvalidateWeakPtrs();
++  client_.reset();
++  scene_ = base::HeapArray<uint8_t>();
++  frame_ = base::HeapArray<uint8_t>();
++}
++
++void ApostateVideoCaptureDevice::PaintFrame(uint64_t frame_index) {
++  const int width = format_.frame_size.width();
++  const int height = format_.frame_size.height();
++
++  // Auto-exposure breathing: a slow global brightness walk of a couple of
++  // levels. Without it the luma histogram is identical on every frame, which
++  // no camera with an exposure loop produces.
++  const double phase = static_cast<double>(frame_index) / (kFrameRate * 6.4);
++  const int drift = static_cast<int>(
++      std::lround(2.5 * std::sin(2.0 * std::numbers::pi * phase)));
++
++  base::span<const uint8_t> scene = scene_.as_span();
++  base::span<uint8_t> frame = frame_.as_span();
++  for (int y = 0; y < height; ++y) {
++    const size_t row = static_cast<size_t>(y) * width;
++    // Grain is sensor read noise: low amplitude, zero mean, uncorrelated
++    // between frames. It is what makes two successive frames differ, which
++    // every real capture does and a still image does not.
++    uint64_t state = (seed_ ^ (frame_index * 0x9E3779B97F4A7C15ull) ^
++                      (static_cast<uint64_t>(y) << 32)) |
++                     1;
++    uint64_t bits = 0;
++    for (int x = 0; x < width; ++x) {
++      if ((x & 7) == 0) {
++        state = NextRandom(state);
++        bits = state;
++      }
++      const int byte = static_cast<int>((bits >> ((x & 7) * 8)) & 0xF);
++      const int grain = (byte & 3) - ((byte >> 2) & 3);
++      frame[row + x] = static_cast<uint8_t>(
++          std::clamp(scene[row + x] + drift + grain, 0, 255));
++    }
++  }
++}
++
++void ApostateVideoCaptureDevice::CaptureFrame() {
++  DCHECK(thread_checker_.CalledOnValidThread());
++  if (!client_) {
++    return;
++  }
++
++  PaintFrame(frame_index_);
++
++  const base::TimeTicks now = base::TimeTicks::Now();
++  VideoFrameMetadata metadata;
++  metadata.source_size = format_.frame_size;
++  metadata.device_scale_factor = 1.0f;
++  client_->OnIncomingCapturedData(
++      frame_.data(), static_cast<int>(frame_.size()), format_,
++      gfx::ColorSpace::CreateREC601(), /*clockwise_rotation=*/0,
++      /*flip_y=*/false, now, now - first_frame_time_,
++      /*capture_begin_timestamp=*/std::nullopt, metadata);
++
++  // Scheduled against the start time rather than against now, so the frame
++  // rate a page measures is the frame rate the device claims and does not
++  // drift with how long painting took.
++  ++frame_index_;
++  const base::TimeTicks next =
++      first_frame_time_ + base::Seconds(frame_index_ / kFrameRate);
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE,
++      base::BindOnce(&ApostateVideoCaptureDevice::CaptureFrame,
++                     weak_factory_.GetWeakPtr()),
++      std::max(next - base::TimeTicks::Now(), base::TimeDelta()));
++}
++
++void ApostateVideoCaptureDevice::GetPhotoState(GetPhotoStateCallback callback) {
++  DCHECK(thread_checker_.CalledOnValidThread());
++  // The base class drops this callback, which leaves ImageCapture's promise
++  // pending forever. A real camera resolves it, and a promise that never
++  // settles is a clearer signal than any value could be.
++  mojom::PhotoStatePtr state = mojo::CreateEmptyPhotoState();
++  state->width = mojom::Range::New();
++  state->width->current = format_.frame_size.width();
++  state->width->min = kSupportedSizes[0].width;
++  state->width->max = kSupportedSizes[std::size(kSupportedSizes) - 1].width;
++  state->width->step = 1.0;
++  state->height = mojom::Range::New();
++  state->height->current = format_.frame_size.height();
++  state->height->min = kSupportedSizes[0].height;
++  state->height->max = kSupportedSizes[std::size(kSupportedSizes) - 1].height;
++  state->height->step = 1.0;
++  std::move(callback).Run(std::move(state));
++}
++
++void ApostateVideoCaptureDevice::SetPhotoOptions(
++    mojom::PhotoSettingsPtr settings,
++    SetPhotoOptionsCallback callback) {
++  DCHECK(thread_checker_.CalledOnValidThread());
++  // Nothing here is adjustable, which is also true of most built-in cameras.
++  std::move(callback).Run(true);
++}
++
++void ApostateVideoCaptureDevice::TakePhoto(TakePhotoCallback callback) {
++  DCHECK(thread_checker_.CalledOnValidThread());
++  if (!client_) {
++    return;
++  }
++  std::move(callback).Run(RotateAndBlobify(
++      frame_.data(), static_cast<uint32_t>(frame_.size()), format_, 0));
++}
++
++ApostateVideoCaptureDeviceFactory::ApostateVideoCaptureDeviceFactory(
++    std::unique_ptr<VideoCaptureDeviceFactory> platform_factory)
++    : platform_factory_(std::move(platform_factory)) {}
++
++ApostateVideoCaptureDeviceFactory::~ApostateVideoCaptureDeviceFactory() =
++    default;
++
++VideoCaptureErrorOrDevice ApostateVideoCaptureDeviceFactory::CreateDevice(
++    const VideoCaptureDeviceDescriptor& device_descriptor) {
++  if (base::apostate::IsSyntheticVideoInputId(device_descriptor.device_id)) {
++    return VideoCaptureErrorOrDevice(
++        std::make_unique<ApostateVideoCaptureDevice>(
++            ApostateVideoCaptureDevice::SupportedFormats(),
++            base::apostate::SyntheticDeviceSeed(device_descriptor.device_id)));
++  }
++  return platform_factory_->CreateDevice(device_descriptor);
++}
++
++void ApostateVideoCaptureDeviceFactory::GetDevicesInfo(
++    GetDevicesInfoCallback callback) {
++  platform_factory_->GetDevicesInfo(base::BindOnce(
++      &ApostateVideoCaptureDeviceFactory::OnPlatformDevicesInfo,
++      weak_factory_.GetWeakPtr(), std::move(callback)));
++}
++
++void ApostateVideoCaptureDeviceFactory::OnPlatformDevicesInfo(
++    GetDevicesInfoCallback callback,
++    std::vector<VideoCaptureDeviceInfo> devices_info) {
++  for (const auto& synthetic :
++       base::apostate::SyntheticVideoInputDevices(devices_info.size())) {
++    VideoCaptureDeviceDescriptor descriptor(
++        synthetic.label, synthetic.id, /*model_id=*/std::string(),
++#if BUILDFLAG(IS_MAC)
++        VideoCaptureApi::MACOSX_AVFOUNDATION,
++#elif BUILDFLAG(IS_WIN)
++        VideoCaptureApi::WIN_MEDIA_FOUNDATION,
++#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++        VideoCaptureApi::LINUX_V4L2_SINGLE_PLANE,
++#else
++        VideoCaptureApi::UNKNOWN,
++#endif
++        // No pan, tilt or zoom: a built-in camera has none, and the reference
++        // macOS capture reports none.
++        VideoCaptureControlSupport(),
++        VideoCaptureTransportType::APPLE_USB_OR_BUILT_IN,
++        // Not front or back. facingMode is populated on Android and ChromeOS;
++        // the reference macOS camera reports an empty facingMode list, and a
++        // desktop camera that claims "user" contradicts every desktop camera a
++        // detector has seen.
++        VideoFacingMode::MEDIA_VIDEO_FACING_NONE);
++    VideoCaptureDeviceInfo info(descriptor);
++    info.supported_formats = ApostateVideoCaptureDevice::SupportedFormats();
++    devices_info.push_back(std::move(info));
++  }
++  std::move(callback).Run(std::move(devices_info));
++}
++
++#if BUILDFLAG(IS_WIN)
++scoped_refptr<DXGIDeviceManager>
++ApostateVideoCaptureDeviceFactory::GetDxgiDeviceManager() {
++  return platform_factory_->GetDxgiDeviceManager();
++}
++
++void ApostateVideoCaptureDeviceFactory::OnGpuInfoUpdate(
++    const CHROME_LUID& luid) {
++  platform_factory_->OnGpuInfoUpdate(luid);
++}
++#endif
++
++}  // namespace media

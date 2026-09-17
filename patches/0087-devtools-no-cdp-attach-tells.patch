@@ -29,6 +29,14 @@ no second visit to compare against.
         session, no Runtime.enable 6.4
         Runtime.enable             1.009
 
+Those ratios are why this matters more than the size of any single number.
+A detector does not have to know how fast the machine is, does not have to hold
+a corpus, does not have to compare against a previous visit and does not have to
+touch the network. It divides two timings it took in its own page and reads the
+quotient as a boolean. That is ten lines of JavaScript that anyone can ship, and
+it is a stronger position than most fingerprinting work ever reaches, which is
+the whole justification for this patch.
+
 Two causes, both in V8Debugger. Runtime.enable calls
 setMaxCallStackSizeToCapture, which asked the isolate to capture stack traces
 for uncaught exceptions; V8 then walks the live JS stack on the throwing thread,
@@ -43,12 +51,25 @@ depends on us.
 Both now depend on whether a debug delegate is installed, which is Debugger.
 enable. DevTools enables that domain when it attaches, so a human debugging
 keeps full console stacks and exception stack traces. Neither Playwright nor
-Puppeteer enables it in normal operation, so ordinary automation now costs what
+Puppeteer enables it for plain navigation, so ordinary automation now costs what
 an idle browser costs. The point is not that the numbers get smaller, it is that
 every state this browser can be in is a state stock Chrome can also be in: with
 no delegate it behaves exactly like Chrome with nothing attached, and with one
 exactly like Chrome with DevTools open. Upstream's own precondition is kept, so
 the uncaught-exception request only ever narrows.
+
+The residual is coverage. page.coverage.startJSCoverage() sends Debugger.enable
+- confirmed off the wire against puppeteer-core 25.11.0, which issues
+Debugger.enable, Profiler.enable and Profiler.startPreciseCoverage - so a run
+with coverage on is back in the DevTools-shaped state and the ratios return. A
+narrower gate was measured and rejected: Debugger.setAsyncCallStackDepth would
+separate a front-end from a coverage run, but DevTools sends maxDepth 0 from
+asyncStackTracesStateChanged whenever the user has disabled async stack traces,
+so gating on it would silently strip synchronous console stacks from anyone who
+turned off an unrelated checkbox. A predictable rule with one documented hole is
+worth more than a clever rule that fails quietly, so the hole is documented
+instead: do not collect JS coverage in the same run you expect to be
+unremarkable.
 
 The console serialisation half was mostly folklore and is worth stating plainly,
 because the probe everyone cites does not work. Arguments are stringified
@@ -87,19 +108,46 @@ is cheap.
 
 The endpoint now declines anything a document sent, and declines it by closing
 the connection rather than answering. Answering at all is the leak: any HTTP
-response, including an error, resolves a no-cors fetch. A closed connection
-reaches the page as the same generic failure a refused connection produces. The
-discriminators are Origin and Sec-Fetch-Site, both forbidden header names that
-page script cannot set or clear, and the rule is built so that every client that
-is not a document still works: Puppeteer and Playwright send neither header, the
-front-end this endpoint serves sends this endpoint's own origin, and a
-chrome:// or devtools:// front-end sends a scheme no page can have. What remains
-is that the kernel still completes the TCP handshake before we hang up, so an
-open port and a refused one differ by one loopback round trip. Measured, that
-difference sits inside the spread of repeated probes to a port that was never
-open, and performance.now is clamped to a coarser resolution than the difference
-in a page that is not cross-origin isolated, but it is not zero and is reported
-rather than claimed away.
+response, including an error, resolves a no-cors fetch. The discriminators are
+Origin and Sec-Fetch-Site, both forbidden header names, so page script cannot
+set or clear them. Fifteen request shapes were tried against a stand-in
+endpoint, including fetch with sec-fetch-site and origin supplied by hand, a
+hand-built Request, XMLHttpRequest.setRequestHeader, sendBeacon, EventSource,
+link rel=prefetch, a video src, a form GET into an iframe, an anchor ping, a
+dedicated worker fetch, a service worker fetch, a WebSocket and an iframe
+navigation. They produced six distinct header shapes at the endpoint and every
+one of them carries Origin or Sec-Fetch-Site; the hand-supplied values never
+arrived. So there is no page-reachable shape the rule misses.
+
+The other half of the rule is that nothing legitimate breaks, which is measured
+rather than assumed. Driving the shipped binary with puppeteer-core 25.11.0 and
+capturing its traffic through a proxy, its HTTP request carries no Origin and no
+Sec-Fetch-Site, and neither does its WebSocket handshake. Playwright's default
+transport is --remote-debugging-pipe, which opens no socket at all. Serving a
+document from the endpoint's own authority reproduces the "open localhost:9222
+in a browser" workflow exactly: the top-level navigation arrives as
+Sec-Fetch-Site none, the front-end's script, stylesheet, favicon and /json/list
+fetches as same-origin, and its WebSocket with the endpoint's own Origin. All
+served. chrome://inspect does not go through a document at all - it builds a raw
+"GET %s HTTP/1.1" and a handshake carrying only Upgrade, Connection,
+Sec-WebSocket-Key and Sec-WebSocket-Version - so it is unaffected, and a
+devtools:// front-end's Origin has a scheme no page can hold.
+
+The boundary is worth stating plainly, because it is easy to assume it is
+stronger than it is: this makes the endpoint unreachable from a page, not from a
+process. Anything on the machine that can open a socket and leave those headers
+off still connects, and that is precisely why Playwright and Puppeteer still
+work. It is protection against a web page, not isolation of the port.
+
+What remains is that the kernel completes the TCP handshake before we hang up.
+Over forty interleaved probes each: a port that answers resolves 40 out of 40; a
+port that accepts and closes, which is what a page now sees, rejects with
+TypeError 40 out of 40 with a median of 0.3 ms; a port that never listened
+rejects with TypeError 40 out of 40 with a median of 0.2 ms. The outcome channel
+is gone. A 0.1 ms median gap is left, which is exactly one tick of the 0.1 ms
+performance.now resolution this page measured, and the two distributions overlap
+across their whole range. It is not zero and it is reported rather than claimed
+away.
 
 Last, performance.memory and console.memory had no emitter. Both read V8's heap
 statistics through the same MemoryInfo, and V8 sizes its heap from installed

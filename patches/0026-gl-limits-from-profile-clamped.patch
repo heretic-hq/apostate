@@ -35,10 +35,21 @@ that cannot be falsified does not need to come from the profile at all, and one
 outside the list would otherwise be served without anyone having reasoned about
 how a page could check it.
 
-Extensions are not covered here and remain a gap: a profile claiming an
-extension the driver lacks still exposes it, and getExtension is called before
-its methods are, so that is falsifiable too. It belongs at the same choke point
-and is a separate row.
+Extensions are not covered here: a profile claiming an extension the driver
+lacks would still expose it, and getExtension is called before its methods are,
+so that is falsifiable too. It belongs at the same choke point and is a separate
+row.
+
+This paragraph used to call that a gap. Patch 0028 serves it at
+ExtensionSupportedAndAllowed, which both getSupportedExtensions and getExtension
+run through, and withholds every name the claimed device does not have. What
+cannot be done is the other direction, adding a name the host lacks, for exactly
+the reason above. That residual is one name wide and only appears across
+backends: measured through the shipped binary on an Apple M4 Max host, the
+backend-matched anchor delivers all 39 WebGL1 and all 36 WebGL2 extensions it
+claims, and a cross-backend anchor is short by OVR_multiview2 alone. The anchor
+axis's existing backend filter is what keeps that to zero on a normal launch,
+and patch 0093 records the limitation when --fingerprint-anchor pins past it.
 
 Ledger: webgl.max-limits.
 diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc

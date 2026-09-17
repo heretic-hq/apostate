@@ -62,8 +62,12 @@ Design notes, in full in docs/subsystems/network-proxy.md:
 
   - No NetLog event type is added: `NetLog()` returns the underlying UDP
     socket's source, so a net-export capture gains no new field and in
-    particular none holding the relay address or a credential. Patch 0001
-    deferred dedicated SOCKS auth events for the same reason.
+    particular none holding the relay address or a credential. This socket
+    therefore emits no SOCKS phase event of any kind rather than some of them,
+    and a failed association is read from the connect result. Patch 0096 adds
+    dedicated SOCKS5 authentication events for the stream socket, which owns a
+    NetLog source of its own; those types are available here if this socket is
+    ever given one.
 
 Credentials reuse `SOCKS5Credentials` from patch 0001 and are held only by the
 socket. Nothing puts them in a session key, a pool key or a NetLog parameter.

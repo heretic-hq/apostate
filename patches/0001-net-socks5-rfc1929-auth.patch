@@ -23,14 +23,16 @@ Notes:
     failure, which is what a proxy requiring credentials answers when none were
     configured.
   - Reuses the existing SOCKS_UNEXPECTED_AUTH and SOCKS_UNEXPECTED_VERSION
-    NetLog events. Dedicated auth phase events would need
-    net_log_event_type_list.h and are left to a follow-up.
+    NetLog events. Patch 0096 replaces both reuses with dedicated
+    authentication events, because SOCKS_UNEXPECTED_AUTH is documented in
+    net_log_event_type_list.h as an authentication METHOD we do not support
+    rather than a credential the proxy rejected, and the RFC 1929
+    subnegotiation version is not the SOCKS version. Nothing on the wire
+    differs between the two, so this patch's handshake is unaffected.
   - Tests cover the authenticated handshake, credential rejection, and a proxy
     answering 0xFF when no credentials were configured. The existing
     CompleteHandshake test is the regression guard for the unauthenticated
     greeting staying byte-identical.
-    NetLog events. Dedicated auth phase events would need
-    net_log_event_type_list.h and are left to a follow-up.
 diff --git a/net/socket/socks5_client_socket.cc b/net/socket/socks5_client_socket.cc
 index 3eeeb7e..ca2b9ea 100644
 --- a/net/socket/socks5_client_socket.cc

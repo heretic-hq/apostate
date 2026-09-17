@@ -41,14 +41,16 @@ comparison this patch waited for is not needed to say that: the Windows path is
 the untouched default.
 
 What the enablement does change is Linux software rendering, and there it is a
-difference from stock that is worth naming. A Linux host with no GPU that is
-served no profile inherits itself, and then offers KHR_parallel_shader_compile
-where stock's SwiftShader does not — one extra name in getSupportedExtensions(),
-enumerable. Serving a profile removes it, because patch 0028 deletes any
-extension the claim does not contain while the native parallel path keeps
-running underneath, so the compile speed is kept and the enumeration is stock.
-That makes the remedy the same swiftshader-backend anchor patch 0027's prose
-asks for, and until it exists this is the one page-visible cost of the speedup.
+difference from stock that is worth naming. No compiled anchor was captured
+through a software rasteriser, so on a Linux host with no GPU patch 0093 leaves
+the GPU cluster host-inherited, and the extension list is then the host's own —
+which offers KHR_parallel_shader_compile where stock's SwiftShader does not.
+One extra name in getSupportedExtensions(), enumerable. A served claim removes
+it, because patch 0028 deletes any extension the claim does not contain while
+the native parallel path keeps running underneath, so the compile speed is kept
+and the enumeration is stock. That makes the remedy the same swiftshader-backend
+anchor patch 0027's prose asks for, and until it exists this is the one
+page-visible cost of the speedup.
 
 Still open, and only this: the ANGLE end2end tests added below have not been
 run, because this checkout cannot build them.

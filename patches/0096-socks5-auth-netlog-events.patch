@@ -1,0 +1,190 @@
+Subject: [PATCH] net: dedicated NetLog events for the SOCKS5 authentication phase
+
+Patch 0001 added RFC 1929 authentication and reused the existing SOCKS event
+types for it, because dedicated ones needed a new entry in
+net_log_event_type_list.h. Three of those reuses are wrong in a way that costs
+a real diagnosis:
+
+  A rejected credential logged SOCKS_UNEXPECTED_AUTH, whose documented meaning
+  in that file is "the SOCKS proxy server asked for an authentication method
+  that we don't support". So a wrong password and a proxy offering only GSSAPI
+  produced the same event, and they need opposite fixes.
+
+  A bad RFC 1929 subnegotiation version logged SOCKS_UNEXPECTED_VERSION, which
+  reads as a bad SOCKS version. The subnegotiation carries its own version
+  octet, fixed at 0x01, which has nothing to do with the 0x05 in the greeting.
+
+  A proxy closing the connection mid-authentication logged
+  SOCKS_UNEXPECTEDLY_CLOSED_DURING_GREETING, naming a phase that had already
+  finished successfully.
+
+There was also no phase event at all for the authentication exchange, so a
+net-export dump went straight from SOCKS5_GREET_READ to
+SOCKS5_HANDSHAKE_WRITE whether or not credentials had been sent, and the
+timing of a slow authenticating proxy was attributed to the CONNECT request.
+
+This adds five event types next to the existing SOCKS5ClientSocket block and
+uses them: SOCKS5_AUTH_WRITE and SOCKS5_AUTH_READ as begin/end phase events
+alongside the greet and handshake pairs, and SOCKS5_AUTH_REJECTED,
+SOCKS5_AUTH_UNEXPECTED_VERSION and SOCKS5_AUTH_UNEXPECTEDLY_CLOSED in place of
+the three misreported failures. The greeting's own method-selection failure
+keeps SOCKS_UNEXPECTED_AUTH, where that event's documented meaning is exactly
+right.
+
+NetLog is a debugging facility. It is not page-visible, no byte on the wire
+changes, and the unauthenticated greeting stays byte-identical to upstream's,
+so nothing a detector can reach moves. The new events carry a status octet and
+a version octet and no credential: the username and password are not put in a
+NetLog parameter here for the same reason patch 0001 kept them off
+ProxyServer.
+
+The datagram relay in patch 0079 is left alone and is not a half-instrumented
+path: it emits no SOCKS events of any kind by its own design, returning the
+underlying UDP socket's NetLog source so a capture gains no field that could
+hold a relay address, and its authentication failures surface as the connect
+result. These types are available to it if that ever changes.
+
+Tests: the existing authenticated-handshake test now asserts that an
+authentication phase appears in the log, and the existing rejected-credential
+test asserts that the rejection reports as SOCKS5_AUTH_REJECTED and not as
+SOCKS_UNEXPECTED_AUTH, which is the distinction the old code lost. Both are
+assertions about what a net-export reader sees. Compile-unverified: this
+cannot be built in this session.
+
+Primary source at Chromium 79460ebecaa5625e57a5fb679a735659e73dc687:
+- net/log/net_log_event_type_list.h: the SOCKS and SOCKS5ClientSocket blocks.
+- net/socket/socks5_client_socket.cc: SOCKS5ClientSocket::DoLoop and
+  SOCKS5ClientSocket::DoAuthReadComplete.
+
+Ledger: proxy.socks5-authentication (diagnostics only; no observable changes).
+diff --git a/net/log/net_log_event_type_list.h b/net/log/net_log_event_type_list.h
+--- a/net/log/net_log_event_type_list.h
++++ b/net/log/net_log_event_type_list.h
+@@ -3357,7 +3357,35 @@
+ 
+ // The time spent waiting for the "greeting" response from the SOCKS server.
+ EVENT_TYPE(SOCKS5_GREET_READ)
++
++// The time spent sending the RFC 1929 username/password request to the SOCKS
++// server. Present only when the proxy selected method 0x02.
++EVENT_TYPE(SOCKS5_AUTH_WRITE)
++
++// The time spent waiting for the RFC 1929 authentication response.
++EVENT_TYPE(SOCKS5_AUTH_READ)
++
++// This event indicates that the SOCKS server closed the connection during the
++// RFC 1929 authentication exchange, after selecting that method.
++EVENT_TYPE(SOCKS5_AUTH_UNEXPECTEDLY_CLOSED)
++
++// This event indicates that the RFC 1929 subnegotiation version in the
++// server's authentication response was not 0x01. This is the subnegotiation's
++// own version and is unrelated to the SOCKS version. The extra parameters show
++// its value:
++//   {
++//     "version": <Integer subnegotiation version in the response>,
++//   }
++EVENT_TYPE(SOCKS5_AUTH_UNEXPECTED_VERSION)
+ 
++// This event indicates that the SOCKS server rejected the credentials it was
++// sent. The extra parameters show the RFC 1929 status octet, where any value
++// other than 0x00 is a failure:
++//   {
++//     "status": <Integer status octet in the response>,
++//   }
++EVENT_TYPE(SOCKS5_AUTH_REJECTED)
++
+ // The time spent sending the CONNECT request to the SOCKS server.
+ EVENT_TYPE(SOCKS5_HANDSHAKE_WRITE)
+ 
+diff --git a/net/socket/socks5_client_socket.cc b/net/socket/socks5_client_socket.cc
+--- a/net/socket/socks5_client_socket.cc
++++ b/net/socket/socks5_client_socket.cc
+@@ -252,17 +252,23 @@
+         break;
+       case STATE_AUTH_WRITE:
+         DCHECK_EQ(OK, rv);
++        net_log_.BeginEvent(NetLogEventType::SOCKS5_AUTH_WRITE);
+         rv = DoAuthWrite();
+         break;
+       case STATE_AUTH_WRITE_COMPLETE:
+         rv = DoAuthWriteComplete(rv);
++        net_log_.EndEventWithNetErrorCode(NetLogEventType::SOCKS5_AUTH_WRITE,
++                                          rv);
+         break;
+       case STATE_AUTH_READ:
+         DCHECK_EQ(OK, rv);
++        net_log_.BeginEvent(NetLogEventType::SOCKS5_AUTH_READ);
+         rv = DoAuthRead();
+         break;
+       case STATE_AUTH_READ_COMPLETE:
+         rv = DoAuthReadComplete(rv);
++        net_log_.EndEventWithNetErrorCode(NetLogEventType::SOCKS5_AUTH_READ,
++                                          rv);
+         break;
+       case STATE_HANDSHAKE_WRITE:
+         DCHECK_EQ(OK, rv);
+@@ -458,8 +464,7 @@
+     return result;
+ 
+   if (result == 0) {
+-    net_log_.AddEvent(
+-        NetLogEventType::SOCKS_UNEXPECTEDLY_CLOSED_DURING_GREETING);
++    net_log_.AddEvent(NetLogEventType::SOCKS5_AUTH_UNEXPECTEDLY_CLOSED);
+     return ERR_SOCKS_CONNECTION_FAILED;
+   }
+ 
+@@ -475,15 +480,15 @@
+   read_buf_.reset();
+ 
+   // The subnegotiation carries its own version number, which RFC 1929 fixes at
+-  // 0x01. It is not the SOCKS version.
++  // 0x01. It is not the SOCKS version, so it does not report as one.
+   if (version != kAuthSubnegotiationVersion) {
+-    net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_VERSION,
+-                                   "version", version);
++    net_log_.AddEventWithIntParams(
++        NetLogEventType::SOCKS5_AUTH_UNEXPECTED_VERSION, "version", version);
+     return ERR_SOCKS_CONNECTION_FAILED;
+   }
+ 
+   if (status != kAuthStatusSuccess) {
+-    net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_AUTH,
++    net_log_.AddEventWithIntParams(NetLogEventType::SOCKS5_AUTH_REJECTED,
+                                    "status", status);
+     return ERR_SOCKS_CONNECTION_FAILED;
+   }
+diff --git a/net/socket/socks5_client_socket_unittest.cc b/net/socket/socks5_client_socket_unittest.cc
+--- a/net/socket/socks5_client_socket_unittest.cc
++++ b/net/socket/socks5_client_socket_unittest.cc
+@@ -183,6 +183,15 @@
+   rv = callback_.WaitForResult();
+   EXPECT_THAT(rv, IsOk());
+   EXPECT_TRUE(user_sock_->IsConnected());
++
++  // Someone reading a net-export dump has to be able to see that an
++  // authentication exchange happened at all; the greeting events alone do not
++  // say whether the proxy selected method 0x02.
++  auto net_log_entries = net_log_observer_.GetEntries();
++  EXPECT_TRUE(LogContainsEntryWithTypeAfter(
++      net_log_entries, 0, NetLogEventType::SOCKS5_AUTH_WRITE));
++  EXPECT_TRUE(LogContainsEntryWithTypeAfter(
++      net_log_entries, 0, NetLogEventType::SOCKS5_AUTH_READ));
+ }
+ 
+ // A proxy that rejects the credentials must fail the connection rather than
+@@ -201,6 +210,15 @@
+   rv = callback_.WaitForResult();
+   EXPECT_THAT(rv, IsError(ERR_SOCKS_CONNECTION_FAILED));
+   EXPECT_FALSE(user_sock_->IsConnected());
++
++  // Wrong credentials and an unsupported authentication method are different
++  // failures and a proxy diagnosis depends on telling them apart, so the
++  // rejection must not report as SOCKS_UNEXPECTED_AUTH.
++  auto net_log_entries = net_log_observer_.GetEntries();
++  EXPECT_TRUE(LogContainsEntryWithTypeAfter(
++      net_log_entries, 0, NetLogEventType::SOCKS5_AUTH_REJECTED));
++  EXPECT_FALSE(LogContainsEntryWithTypeAfter(
++      net_log_entries, 0, NetLogEventType::SOCKS_UNEXPECTED_AUTH));
+ }
+ 
+ // Without credentials the greeting is unchanged, so a proxy that requires

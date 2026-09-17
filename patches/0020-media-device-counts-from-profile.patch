@@ -7,34 +7,23 @@ property of the headless host, and it is readable from any page with no
 permission — enumerateDevices() returns the counts before it returns anything
 identifying.
 
-Injected where every enumeration result lands, not at the accessor. The same
-snapshot MediaDevicesManager::DevicesEnumerated feeds into the cache also
-drives device-change events and getUserMedia's device selection, so a device
-added at enumerateDevices() would be one the rest of the browser does not
-believe in — the count would agree with the claimed device while the behaviour
-around it disagreed.
-
 The profile sets a floor, not an exact count. If the host genuinely has capture
-hardware those devices are real and are kept, and the patch only tops the list
-up to the claimed number. Removing real devices to hit an exact count would
-break capture on a machine that can actually capture, to fix a number.
-
-Identifiers are opaque on purpose. MediaDevicesDispatcherHost replaces every
-device_id with a per-origin HMAC before it reaches a renderer, so the raw string
-is never observable and does not need to imitate any platform's naming
-convention. "default" and "communications" are deliberately avoided: both are
-special-cased downstream and mean something specific.
+hardware those devices are real and are kept, and only the shortfall is made
+up. Removing real devices to hit an exact count would break capture on a
+machine that can actually capture, to fix a number.
 
 Counts rather than booleans because a machine can have several cameras, bounded
 at 16 so that a malformed profile cannot make the browser synthesise an
 unbounded device list.
 
-Known limit, not fixed here. These devices enumerate but cannot capture: a page
-that is granted permission and calls getUserMedia gets an error where a real Mac
-gets a stream. That is reachable only after a permission prompt, which is a
-different threat model from the unprompted enumeration this fixes, but it is a
-real residual and belongs in the ledger rather than in silence. Wiring the
-synthetic devices to a capture backend is the follow-up.
+This patch parses the counts. It does not emit the devices: patch 0092 does
+that, at the audio manager and the video capture device factory, because those
+are the two objects the rest of the browser asks both what devices exist and
+open this one. An earlier version of this patch injected the devices into
+MediaDevicesManager instead, which is only the first of those two questions,
+and the result was a device that enumerated and then failed to open with
+NotReadableError. That injection is gone; the reasoning it was based on was
+right and was applied one layer too high.
 
 Ledger: media.device-counts.
 diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
@@ -98,84 +87,3 @@ index 546eda3..6e71f86 100644
    std::optional<std::string> timezone_;
    std::optional<bool> prefers_dark_;
    std::optional<std::string> accept_languages_;
-diff --git a/content/browser/renderer_host/media/media_devices_manager.cc b/content/browser/renderer_host/media/media_devices_manager.cc
-index 759135b..0c92bf6 100644
---- a/content/browser/renderer_host/media/media_devices_manager.cc
-+++ b/content/browser/renderer_host/media/media_devices_manager.cc
-@@ -46,6 +46,8 @@
- #include "mojo/public/cpp/bindings/remote.h"
- #include "services/audio/public/mojom/device_notifications.mojom.h"
- #include "services/video_capture/public/cpp/features.h"
-+#include "base/apostate/profile.h"
-+#include "base/strings/string_number_conversions.h"
- #include "third_party/blink/public/common/mediastream/media_devices.h"
- #include "third_party/blink/public/mojom/mediastream/media_devices.mojom.h"
- 
-@@ -1503,12 +1505,66 @@ void MediaDevicesManager::AudioDevicesEnumerated(
-   DevicesEnumerated(request_id, type, snapshot);
- }
- 
-+namespace {
-+
-+// Capture devices the claimed machine has and the build host does not.
-+//
-+// Injected here rather than at enumerateDevices() because this is where every
-+// enumeration result lands: the same snapshot feeds the cache, device-change
-+// events and getUserMedia's device selection, so a device added at the
-+// accessor would be one the rest of the browser does not believe in.
-+//
-+// The identifiers are opaque on purpose. MediaDevicesDispatcherHost replaces
-+// every device_id with a per-origin HMAC before it reaches a renderer, so the
-+// raw string is never observable and does not need to imitate a platform's
-+// naming. "default" and "communications" are deliberately not used: those are
-+// special-cased downstream and mean something specific.
-+void AppendProfileDevices(MediaDeviceType type,
-+                          blink::WebMediaDeviceInfoArray* snapshot) {
-+  const base::apostate::Profile* profile = base::apostate::Profile::Get();
-+  if (!profile) {
-+    return;
-+  }
-+
-+  std::optional<int> wanted;
-+  const char* prefix = nullptr;
-+  switch (type) {
-+    case MediaDeviceType::kMediaAudioInput:
-+      wanted = profile->media_audioinput_count();
-+      prefix = "apostate-audioinput-";
-+      break;
-+    case MediaDeviceType::kMediaVideoInput:
-+      wanted = profile->media_videoinput_count();
-+      prefix = "apostate-videoinput-";
-+      break;
-+    default:
-+      return;
-+  }
-+  if (!wanted.has_value()) {
-+    return;
-+  }
-+
-+  // Top up rather than replace. If the host genuinely has capture hardware,
-+  // those devices are real and stay; the profile only sets the floor. Removing
-+  // real devices to hit an exact count would break capture on a machine that
-+  // can actually capture.
-+  for (size_t i = snapshot->size(); i < static_cast<size_t>(*wanted); ++i) {
-+    snapshot->emplace_back(prefix + base::NumberToString(i),
-+                           std::string() /* label */,
-+                           prefix + base::NumberToString(i) + "-group");
-+  }
-+}
-+
-+}  // namespace
-+
- void MediaDevicesManager::DevicesEnumerated(
-     uint64_t request_id,
-     MediaDeviceType type,
--    const blink::WebMediaDeviceInfoArray& snapshot) {
-+    const blink::WebMediaDeviceInfoArray& snapshot_in) {
-   DCHECK_CURRENTLY_ON(BrowserThread::IO);
-   DCHECK(blink::IsValidMediaDeviceType(type));
-+  blink::WebMediaDeviceInfoArray snapshot = snapshot_in;
-+  AppendProfileDevices(type, &snapshot);
-   UpdateSnapshot(type, snapshot);
-   cache_infos_[static_cast<size_t>(type)].UpdateCompleted();
-   cache_is_populated_[static_cast<size_t>(type)] = true;

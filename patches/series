@@ -89,3 +89,6 @@
 0091-compose-detects-a-gpuless-host.patch
 0093-gpu-cluster-inherits-when-no-anchor-serves.patch
 0094-webshare-reports-a-cancelled-share.patch
+0092-synthetic-capture-devices-produce-frames.patch
+0095-windows-script-fallback-table.patch
+0096-socks5-auth-netlog-events.patch

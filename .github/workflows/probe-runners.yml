@@ -17,6 +17,12 @@ name: probe runners
 
 on:
   workflow_dispatch:
+    inputs:
+      measure_windows_checkout:
+        description: "Also sync Chromium on a 2 vCPU Windows runner and measure what it occupies"
+        required: false
+        type: boolean
+        default: false
   # Weekly, because runner images are rebuilt continuously and a component
   # disappearing is exactly the failure this catches. Wednesday keeps it clear
   # of the nightly build window.
@@ -114,3 +120,50 @@ jobs:
           PROBE_TARGET: ${{ matrix.target }}
         shell: bash
         run: bash scripts/verify-runner.sh "$PROBE_TARGET"
+
+  # Answers one number: how much disk a Windows Chromium checkout actually
+  # occupies. A local macOS build measured 66GB total, but that included
+  # third_party/swift-toolchain, which Windows never fetches, so the Windows
+  # figure has to be measured rather than inferred. Runs on 2 vCPU because
+  # gclient sync is network-bound -- the work is identical to the 32 vCPU
+  # runner at a sixteenth of the rate, and learning this from a failed 32 vCPU
+  # build would cost hours of the most expensive runner we use.
+  measure-windows-checkout:
+    name: measure-windows-checkout
+    if: ${{ inputs.measure_windows_checkout }}
+    runs-on: blacksmith-2vcpu-windows-2025
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Initialize workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$(cygpath -m "$RUNNER_TEMP")"
+          workspace="$root/apostate-workspace"
+          mkdir -p "$workspace"
+          printf 'APOSTATE_WORKSPACE=%s\n' "$workspace" >> "$GITHUB_ENV"
+      - name: Reclaim Windows disk
+        shell: bash
+        run: bash scripts/reclaim-windows-disk.sh
+      - name: Bootstrap pinned toolchain
+        shell: bash
+        run: bash scripts/bootstrap.sh
+      - name: Fetch pinned Chromium
+        shell: bash
+        run: bash scripts/fetch-sources.sh windows-x64
+      - name: Measure the checkout
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          df -h /c
+          printf 'checkout total: %s MB\n' \
+            "$(du -sm "$APOSTATE_WORKSPACE/src" 2>/dev/null | cut -f1)"
+          echo "--- largest subtrees (MB)"
+          du -sm "$APOSTATE_WORKSPACE/src"/* "$APOSTATE_WORKSPACE/src/third_party"/* 2>/dev/null |
+            sort -rn | head -15

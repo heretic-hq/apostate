@@ -96,6 +96,14 @@ jobs:
         if: ${{ startsWith(inputs.target, 'windows-') }}
         shell: bash
         run: bash scripts/provision-windows-debuggers.sh
+      # 130GB is the volume size; only 55GB of it is free, against a measured
+      # 66GB build. Removes measured, build-irrelevant software from the image.
+      # Never fatal: reclaiming less than hoped must not fail a build that
+      # would otherwise have fitted.
+      - name: Reclaim Windows disk
+        if: ${{ startsWith(inputs.target, 'windows-') }}
+        shell: bash
+        run: bash scripts/reclaim-windows-disk.sh
       # Still the first thing after checkout, which costs seconds. The tools it
       # checks are reached by scripts that run hours in, so a gap found here is
       # the difference between a 30-second failure and a wasted build. Shared

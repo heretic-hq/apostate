@@ -58,6 +58,7 @@ The build scripts share workspace and tool paths through `scripts/lib.sh`.
 | `scripts/verify-runner.sh` | Check the target against the runner OS and architecture |
 | `scripts/verify-host-tooling.sh` | Report every tool or SDK component the target's build will need and this host lacks |
 | `scripts/provision-windows-debuggers.sh` | Install the pinned SDK's Debugging Tools feature when the image lacks it |
+| `scripts/reclaim-windows-disk.sh` | Remove measured, build-irrelevant software from the Windows runner image |
 | `scripts/bootstrap.sh` | Fetch pinned depot_tools and check host prerequisites |
 | `scripts/fetch-sources.sh` | Fetch and sync the pinned Chromium revision |
 | `scripts/apply-patches.sh` | Apply the patch series without fuzz |
@@ -320,12 +321,30 @@ that pin travels with `build/CHROMIUM_VERSION`, which is why
 component of the pinned version *disappearing* is a real failure and the
 listing is how it would be recognised.
 
-Windows has 130 GB of storage at every instance size, the least of the four
-targets. A complete `macos-arm64` build measures 66 GB — 49 GB checkout, 16 GB
-output, 0.7 GB depot_tools — so 130 GB carries a full build with headroom.
+Windows has the least storage of the four targets, and the advertised 130 GB is
+the volume size, not free space: measured on the image, 76 GB is the image
+itself and **55 GB is free**. A complete `macos-arm64` build measures 66 GB —
+50 GB checkout, 16 GB output, 0.7 GB depot_tools — so the build does not fit as
+shipped. `scripts/reclaim-windows-disk.sh` removes measured, build-irrelevant
+software before the build; the candidates came from a disk census on the image,
+not from a list of things that sound unnecessary.
+
+What is deliberately NOT reclaimed matters as much. The 17.5 GB of dependency
+`.git` directories in the checkout look like free disk and are not:
+`third_party/angle/src/commit_id.py` reads git to bake `ANGLE_COMMIT_HASH` into
+the binary and falls back to `"unknown hash"` when `.git` is absent, and that
+string reaches ANGLE's `GL_VERSION`, which pages can read. Pruning them would
+break coherence and introduce a novel observable in one step. The active Python
+in `hostedtoolcache` is likewise load-bearing — `python3` resolves into it — and
+`C:\Windows\Installer` is needed by the SDK installer this build runs.
+
 `scripts/bootstrap.sh` reports free space on every run, and the workflow
 reports disk again after the build even when it fails, so each target's real
-consumption ends up in its log.
+consumption ends up in its log. The Windows checkout's own size is measured by
+the `measure-windows-checkout` job in
+`.github/workflows/probe-runners.yml`, which syncs Chromium on a 2 vCPU runner
+rather than inferring it from the macOS figure — macOS fetches
+`third_party/swift-toolchain`, 3.9 GB that Windows never sees.
 
 Each job sets `APOSTATE_WORKSPACE` to the generated directory
 `$RUNNER_TEMP/apostate-workspace`. Chromium, depot_tools, caches, output and

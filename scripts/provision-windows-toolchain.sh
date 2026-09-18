@@ -408,24 +408,51 @@ say "installer sha256 $got_sha"
   got      $got_sha
 The pinned URL served different bytes. Verify the release before repinning."
 
+# Bounded by this script, not by the job timeout, and logged to a file this
+# script prints. Measured the hard way: the first run of this phase ran
+# winsdksetup.exe for 43m43s and the 45-minute job timeout killed the step,
+# which destroyed the only evidence of what it had been doing. A job timeout is
+# the wrong instrument for a process that might hang -- it reports "cancelled"
+# and takes the log with it. So: a deadline the script owns, its own /log, and
+# the tail printed whether it succeeds, fails or runs out of time.
+APOSTATE_SDK_INSTALL_TIMEOUT="${APOSTATE_SDK_INSTALL_TIMEOUT:-25m}"
+sdk_log="$work/winsdk-install.log"
 say "installing SDK $version: desktop C++ headers and libraries, and the debuggers"
+say "bounded at $APOSTATE_SDK_INSTALL_TIMEOUT; log to $sdk_log"
+started="$(date -u +%s)"
 # MSYS rewrites arguments that look like paths, so /features would arrive as a
 # Windows path and the installer would reject it.
 set +e
 MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+  timeout --signal=TERM --kill-after=60 "$APOSTATE_SDK_INSTALL_TIMEOUT" \
   "$installer_exe" /features \
     OptionId.DesktopCPPx64 \
     OptionId.DesktopCPPx86 \
     OptionId.WindowsDesktopDebuggers \
-    /quiet /norestart
+    /quiet /norestart /log "$(cygpath -w "$sdk_log" 2>/dev/null || printf '%s' "$sdk_log")"
 sdk_rc=$?
 set -e
+elapsed="$(( $(date -u +%s) - started ))"
+say "winsdksetup.exe exited $sdk_rc after ${elapsed}s"
+
+# Whatever happened, show what the installer said. winsdksetup writes several
+# files beside the path given to /log, so take them all.
+for log in "$sdk_log" "$sdk_log".*; do
+  [ -f "$log" ] || continue
+  printf -- '----- %s (last 40 lines) -----\n' "$(basename "$log")"
+  tail -40 "$log" | tr -d '\r'
+done
+
 # 3010 is ERROR_SUCCESS_REBOOT_REQUIRED: installed, reboot pending. The files
 # are in place, and the requirement re-check below is the real success signal.
 case "$sdk_rc" in
   0) ;;
   3010) say "installer reported a pending reboot (3010); files are in place" ;;
-  *) die "winsdksetup.exe exited $sdk_rc; its log is at %TEMP%\\Windows Kits\\10\\WindowsSDK.log" ;;
+  124|137) die "winsdksetup.exe did not finish within $APOSTATE_SDK_INSTALL_TIMEOUT.
+Its log tail is above. Raise APOSTATE_SDK_INSTALL_TIMEOUT if the install is
+merely slow on this runner class; if it is stuck, the pinned SDK revision has
+to be baked into the runner image instead of installed per job." ;;
+  *) die "winsdksetup.exe exited $sdk_rc; its log tail is above" ;;
 esac
 
 say "SDK version directories after install"

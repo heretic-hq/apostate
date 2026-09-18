@@ -117,9 +117,13 @@ bound available and the host's real panel size is not checked.
 
 `--fingerprint-locale` is applied where the locale policy resolves, not over the
 finished profile, because the speech-voice table is keyed on the resolved
-Accept-Language list. The keyboard layout map stays as the policy set it, which
-is deliberate: a locale that does not match the physical layout is an ordinary
-thing on a real machine.
+Accept-Language list. It moves no keyboard layout, because the locale policy no
+longer carries one: the maps it used to set were a five-key stub identical on
+every option, and the layout a machine reports follows its physical keyboard
+rather than its Accept-Language list. A locale that does not match the physical
+layout is an ordinary thing on a real machine, so the map stays the host's unless
+a capture-derived profile replays one. See
+[known limitations](LIMITATIONS.md).
 
 A value that is not one of the catalogue's own buckets is honoured and reported.
 `--fingerprint-explain` names the field, the value, the command line as the

@@ -42,6 +42,12 @@ Six blocks:
 | `locale` | timezone, languages, keyboard layout | the user's setting, not the device's |
 | `theme` | dark mode, contrast, system colours | the user's setting, independent of the panel |
 
+The keyboard layout slot in the `locale` block is empty today. The options
+carried a five-key stub identical on every locale, which is not a layout, and the
+maps we have measured differ by *platform* rather than by locale, so this block
+has nothing to vary until per-locale maps are captured. See
+[known limitations](../LIMITATIONS.md).
+
 `css.media` is split by feature rather than assigned whole, because it answers
 two unrelated questions in one probe: what the panel can do (`color-gamut`,
 `dynamic-range`, `pointer`) and what the user chose (`prefers-color-scheme`,

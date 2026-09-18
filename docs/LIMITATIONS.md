@@ -449,6 +449,31 @@ lands on the claimed delta, and neither the Python nor the Node launcher does
 that yet. Until one of them does, the two fields record the reference
 measurement and change nothing a page can read.
 
+## The keyboard layout map is replayed, not composed
+
+`navigator.keyboard.getLayoutMap()` is served from `keyboard.layout_map` when a
+profile carries one, replaced whole rather than merged. Nothing composes one: no
+dispersion table emits a keyboard section, so a launch that draws its identity
+from a seed inherits the host's map, and the surface has no per-seed variation at
+all. A profile derived from a capture does replay it, which is the path the
+field exists for.
+
+The catalogue used to compose a five-entry map — `KeyA`, `KeyQ`, `KeyW`, `KeyY`,
+`KeyZ`, the letters that separate QWERTY from AZERTY and QWERTZ — on every
+locale option. Because the loader replaces the host map whole, a profile carrying
+that stub reported a keyboard with five keys, which no keyboard has, and the
+reference machines report 48. The stubs are gone. An absent map inherits a real
+one; a truncated map invents a device that cannot exist, and that is the worse
+of the two.
+
+Serving it per platform is not available yet, and the measurements say why the
+obvious version of it would be wrong. The reference maps differ by platform in
+one entry — `IntlBackslash` is `§` on macOS, `\` on Windows and `<` on Linux —
+so a map is not interchangeable across a claimed platform even when the key count
+matches. The 49-entry variant, which adds `IntlYen`, turned up on both Linux and
+Intel-macOS captures of one host, so that key follows the physical keyboard
+rather than the OS and no rule from a claimed platform can produce it.
+
 ## Canvas and audio are rendered, not replayed
 
 There is no stored canvas bitmap or audio buffer to hand back. Those surfaces
@@ -461,6 +486,17 @@ An `OfflineAudioContext` render is fixed by the FFT kernel CPUID selects and by
 the host libm, so it differs between arm64 and x86-64 hosts. Profiles are
 partitioned by instruction set for that reason, and a profile does not move an
 audio render across architectures.
+
+**The audio device's own numbers are the host's.** `AudioContext.sampleRate` and
+`destination.maxChannelCount` come out of the audio service from the real output
+device, and the schema declares no key for either, so a profile cannot move them.
+`audio.hardware_buffer_frames` IS served, and `baseLatency` is
+`framesPerBuffer / sampleRate`, so the numerator follows the profile while the
+denominator follows the host: a claimed 256 frames on a 44100 Hz host reports
+0.005805 where the reference machine measured 0.005333. That is a different
+value rather than a closer one, and 44100 against 48000 is itself a coarse
+hint about the operating system. Both surfaces are recorded as unresolved in the
+ledger rather than as served.
 
 ## Platform support
 
@@ -529,6 +565,18 @@ page as the srflx candidate its own STUN server produces over the same
 association. And the enterprise `WebRtcUdpPortRange` constraint no longer
 applies, because the port a page sees is the proxy's rather than one this host
 chose.
+
+**The interface topology is the host's, whatever the address says.** Nothing in
+the profile describes the machine's network interfaces, so the network service
+still enumerates the real ones and every candidate carries their arithmetic. A
+candidate's `priority` encodes which interface it came from and how that
+interface ranks, `network-id` counts them, and `network-cost` is a direct readout
+of the adapter type — 0 ethernet, 10 wifi, 50 unknown, 250 to 980 cellular, plus
+one if the adapter is a VPN. mDNS does not cover any of it: the sanitiser
+rewrites the address and leaves priority, foundation, `network-id` and
+`network-cost` untouched. So a page that never learns an IP can still read how
+many interfaces the machine has, what kind each is, and whether one of them is a
+VPN.
 
 ## Proxies
 

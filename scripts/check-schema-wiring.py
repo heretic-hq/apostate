@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """V0 gate: a profile key is declared, read, or a stated exception — never inert.
 
-Four times this project shipped an artifact that described a key nothing read.
+Five times this project shipped an artifact that described a key nothing read.
 `fonts.enumeration_allowlist` sat in the schema, was composed into every profile,
 and was read by no C++ for its entire life. `fonts.provisioned_directory` was
 read by no C++ at all. Patches 0097 and 0099 were committed and left out of
-`patches/series`, so they were in the repository and in no build. Each was found
-by hand, late, after the documentation had been promising the feature for weeks.
-This is the automated catch.
+`patches/series`, so they were in the repository and in no build. And
+`ledger/surfaces.jsonl`, the artifact that is supposed to derive the schema, named
+its profile fields in a vocabulary of its own: 43 of its 61 distinct
+`profile_field` values matched no declared key, so `ua.brand_version_list` stood
+where the schema says `browser.brands` and nothing could tell the two apart from a
+typo. That is very likely why the first two went unnoticed for years — with the
+two vocabularies disjoint, no tool could reconcile them, and "the schema declares
+a key the ledger never asked for" was unaskable. Each was found by hand, late,
+after the documentation had been promising the feature for weeks. This is the
+automated catch.
 
-Three checks, all of one class — an artifact claiming something the build does
+Four checks, all of one class — an artifact claiming something the build does
 not do:
 
   1. DECLARED BUT NEVER READ  a key in config/profile.schema.json that no
@@ -22,6 +29,10 @@ not do:
                               and every series entry exists on disk. That file
                               is ordered by dependency rather than by number,
                               so ordering is deliberately not checked.
+  4. NAMED BUT NOT DECLARED   a ledger row's profile_field that names no
+                              declared key. The row points at a field no
+                              profile can carry, so the surface it describes is
+                              inherited from the host however the row reads.
 
     python3 scripts/check-schema-wiring.py            # report, exit 1 on a finding
     python3 scripts/check-schema-wiring.py --verbose  # plus every resolved read
@@ -117,20 +128,54 @@ So an exception is carried next to the thing it excuses, and it is falsifiable:
   * A read outside the schema carries `// wiring-exempt: <key> - <why>` in the
     patch, on the line of the read or just above it. Whoever edits the read
     sees it.
+  * A ledger row whose surface has no declared key at all carries
+    `profile_field_exception` beside its `profile_field`, with the same three
+    parts. Whoever edits the row sees it.
 
-Both directions fail when the exception goes stale: an `x-wiring` on a key that
-is now read is an error, and a `wiring-exempt` for a key that is now declared,
-or whose read is gone, is an error. A stale exception is the same defect wearing
-the opposite sign.
+All three fail when the exception goes stale: an `x-wiring` on a key that is now
+read is an error, a `wiring-exempt` for a key that is now declared, or whose read
+is gone, is an error, and a `profile_field_exception` on a row whose
+`profile_field` now names a declared key is an error. A stale exception is the
+same defect wearing the opposite sign.
 
 Three more rules keep an annotation from being a bare assertion. Its `reason`
-comes from a fixed vocabulary (see X_WIRING_REASONS), so "why is this inert"
-has an answer rather than a paragraph. Its `evidence` must name a file in this
-repository that actually mentions the key — a path nobody can check is not
-evidence. And `derived-upstream`, the one reason whose staleness no other check
-could see, is verified against the dispersion tables: it claims the emitted
-value cannot disagree with the profile's, which stops being true the moment a
-table offers two values for the key.
+comes from a fixed vocabulary (see X_WIRING_REASONS and
+PROFILE_FIELD_EXCEPTION_REASONS), so "why is this inert" has an answer rather
+than a paragraph. Its `evidence` must name a file in this repository that
+actually mentions the key — a path nobody can check is not evidence. And
+`derived-upstream`, the one reason whose staleness no other check could see, is
+verified against the dispersion tables: it claims the emitted value cannot
+disagree with the profile's, which stops being true the moment a table offers
+two values for the key.
+
+
+How the ledger names a key, and why the spelling is not normalised
+-----------------------------------------------------------------
+
+`ledger/surfaces.jsonl` is where the schema is supposed to come from: the surface
+schema says each `profile_field` becomes one property of
+`config/profile.schema.json`. Check 4 is that sentence, enforced. A row's
+`profile_field` is therefore spelled exactly as `load_declared()` spells a path —
+dotted, `[]` for an array item, `*` for an additionalProperties child, so
+`browser.brands[].brand` rather than `browser.brands.brand`. Nothing is
+normalised on the way in, because a checker that quietly accepted both spellings
+would be asserting an equivalence nobody had verified, which is the defect class
+this file exists to catch.
+
+Two shapes are allowed, and neither is a loophole. A string names one key. A
+sorted array names several, for the surfaces that genuinely are served by more
+than one — `screen.avail-dimensions` is served by the four work-area insets and
+by the four absolute `avail_*` coordinates the loader derives from them, and
+truncating that to one key would be a smaller lie than a wrong name but a lie all
+the same. Every element is checked, so an array cannot smuggle an undeclared name
+past the gate.
+
+A row naming a section rather than a leaf (`battery`, `gl_limits`,
+`media.devices`) passes, because an intermediate object is a declared path too
+and a surface really can be the whole section. Consumption is deliberately not
+required: `browser.brands` and `platform.wow64` are declared, correctly named,
+and annotated `x-wiring` because no C++ reads them. Demanding a read here would
+report a second time what check 1 has already explained.
 """
 
 import json
@@ -142,6 +187,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCHEMA = ROOT / "config" / "profile.schema.json"
 PATCH_DIR = ROOT / "patches"
 SERIES = PATCH_DIR / "series"
+LEDGER = ROOT / "ledger" / "surfaces.jsonl"
 
 CPP_SUFFIXES = (".cc", ".cpp", ".mm", ".h")
 TEST_MARKERS = ("_unittest.", "_test.", "_browsertest.", "_fuzzer.")
@@ -169,6 +215,29 @@ X_WIRING_REASONS = {
     # promising a behaviour no C++ has is the defect this gate exists to catch.
     "declared-not-implemented",
 }
+
+PROFILE_FIELD_EXCEPTION = "profile_field_exception"
+PROFILE_FIELD_EXCEPTION_REASONS = {
+    # A deployment or launch choice that travels beside the device profile
+    # rather than inside it: the proxy endpoint on the command line, its
+    # credentials in the launch envelope next to device_profile.
+    "not-a-device-property",
+    # Measured into the anchors for the V3 diff and deliberately left out of
+    # the profile fragment, so there is nothing for a loader to read.
+    "conformance-target-only",
+    # The row is about the profile transport itself rather than one field, so
+    # no single key can name it.
+    "whole-profile",
+    # A spoof surface the schema declares no key for. The profile cannot carry
+    # the value at all, so the surface stays inherited from the host until a
+    # key exists — which is a finding this gate surfaces rather than hides.
+    "undeclared",
+}
+
+# The token half of an `evidence` reference has to be something a reader can
+# search for. A dotted or dashed identifier is; the wildcard is not, so a row
+# whose profile_field ends in one must spell its token out.
+TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*")
 
 # Where a composed profile's field values come from. `derived-upstream` claims
 # the emitted value cannot disagree with the profile's; that stops being true
@@ -681,6 +750,77 @@ def wiring_problem(key, wiring):
 
 
 # ---------------------------------------------------------------------------
+# The named set: what ledger/surfaces.jsonl says supplies each surface
+# ---------------------------------------------------------------------------
+
+
+def ledger_rows():
+    """-> ([(lineno, id, [name], exception)], errors).
+
+    Read line by line rather than through validate-ledger.py: this gate stays
+    dependency-free and must still say something useful about a file that gate
+    would reject outright.
+    """
+    rows, errors = [], []
+    if not LEDGER.is_file():
+        return rows, [f"{LEDGER.relative_to(ROOT)} is missing, so check 4 cannot run"]
+    for lineno, line in enumerate(LEDGER.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError as exc:
+            errors.append(f"ledger/surfaces.jsonl:{lineno} is not valid JSON: {exc}")
+            continue
+        field = row.get("profile_field")
+        if field is None:
+            names = []
+        elif isinstance(field, str):
+            names = [field]
+        elif isinstance(field, list) and all(isinstance(n, str) for n in field):
+            names = list(field)
+        else:
+            errors.append(
+                f"ledger/surfaces.jsonl:{lineno} profile_field must be a string, a list of "
+                f"strings, or null"
+            )
+            continue
+        rows.append((lineno, row.get("id", "?"), names, row.get(PROFILE_FIELD_EXCEPTION)))
+    return rows, errors
+
+
+def profile_field_problem(names, exception):
+    """Is this profile_field_exception usable as evidence, and still needed?"""
+    if not isinstance(exception, dict):
+        return f"{PROFILE_FIELD_EXCEPTION} must be an object carrying reason, why and evidence"
+    missing = [f for f in ("reason", "why", "evidence") if not exception.get(f)]
+    if missing:
+        return f"{PROFILE_FIELD_EXCEPTION} is missing {', '.join(missing)}"
+    if exception["reason"] not in PROFILE_FIELD_EXCEPTION_REASONS:
+        return (f"{PROFILE_FIELD_EXCEPTION}.reason is {exception['reason']!r}; expected one of "
+                f"{sorted(PROFILE_FIELD_EXCEPTION_REASONS)}")
+    if not names:
+        return (f"{PROFILE_FIELD_EXCEPTION} sits on a row whose profile_field is null, so "
+                f"there is no name for it to excuse")
+
+    # `path` or `path:token`, the same shape x-wiring uses, so that the
+    # annotation points at something a reader can check.
+    evidence, _, token = str(exception["evidence"]).partition(":")
+    target = ROOT / evidence
+    if not target.is_file():
+        return (f"{PROFILE_FIELD_EXCEPTION}.evidence names {evidence}, which is not a file "
+                f"in this repository")
+    token = token or parent_of(names[-1])[1] or names[-1]
+    if not TOKEN_RE.fullmatch(token):
+        return (f"{PROFILE_FIELD_EXCEPTION}.evidence has to spell its token as 'path:token'; "
+                f"{token!r} is not something a reader can search for")
+    if token not in target.read_text(encoding="utf-8", errors="replace"):
+        return (f"{PROFILE_FIELD_EXCEPTION}.evidence is {evidence}, which does not mention "
+                f"{token!r}: it cannot be the evidence for this row")
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
@@ -829,6 +969,48 @@ def main() -> int:
         print("  ok   every declared key is read or carries a stated exception")
         print("  ok   every read names a declared key or carries a stated exception")
 
+    rows, ledger_findings = ledger_rows()
+    named = {name for _, _, names, _ in rows for name in names}
+    print("\nledger profile fields")
+    print(f"  {len(rows)} row(s) in ledger/surfaces.jsonl name {len(named)} distinct "
+          f"profile field(s)")
+
+    for lineno, surface, names, exception in rows:
+        absent = [name for name in names if name not in declared]
+        if exception is None:
+            if absent:
+                ledger_findings.append(
+                    f"NAMED BUT NOT DECLARED   {', '.join(absent)}\n"
+                    f"        ledger/surfaces.jsonl:{lineno}  ({surface})\n"
+                    f"        schema: absent. The row points at a field no profile can carry, "
+                    f"so the surface stays inherited from the host however the row reads."
+                )
+            continue
+        if names and not absent:
+            ledger_findings.append(
+                f"STALE EXCEPTION          {', '.join(names)}\n"
+                f"        ledger/surfaces.jsonl:{lineno} ({surface}) carries "
+                f"{PROFILE_FIELD_EXCEPTION}, but config/profile.schema.json declares every "
+                f"name it gives.\n"
+                f"        The exception outlived the problem it described; delete it."
+            )
+            continue
+        problem = profile_field_problem(names, exception)
+        if problem:
+            ledger_findings.append(
+                f"BAD EXCEPTION            {', '.join(names) or '(null)'}\n"
+                f"        ledger/surfaces.jsonl:{lineno} ({surface}): {problem}"
+            )
+        elif verbose:
+            print(f"  note {surface}: {', '.join(names)} exempt "
+                  f"({exception['reason']}) — {exception['why']}")
+
+    for finding in ledger_findings:
+        print(f"  FAIL {finding}")
+    findings.extend(ledger_findings)
+    if not ledger_findings:
+        print("  ok   every profile_field names a declared key or carries a stated exception")
+
     if verbose:
         print("\nresolved reads")
         for path in sorted(consumed):
@@ -842,7 +1024,7 @@ def main() -> int:
             print(f"  {path:48} dynamic key at {where}:{lineno}")
 
     print(f"\n{len(declared)} declared key(s), {len(entries)} sequenced patch(es), "
-          f"{len(findings)} finding(s)")
+          f"{len(rows)} ledger row(s), {len(findings)} finding(s)")
     return 1 if findings else 0
 
 

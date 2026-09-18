@@ -63,9 +63,46 @@
     "profile_field": {
       "type": [
         "string",
+        "array",
         "null"
       ],
-      "description": "Corpus/profile field supplying the value. Required when verdict is 'spoof'. Each such field becomes one property of config/profile.schema.json."
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 2,
+      "description": "The profile key supplying this surface's value, spelled exactly as config/profile.schema.json declares it: dotted, with [] for an array item and * for an additionalProperties child. An array, sorted, when one surface is served by several keys at once; a single key is a string rather than a one-element array. scripts/check-schema-wiring.py requires every name here to be a declared key, so this field and the profile schema cannot drift apart unnoticed. Required when verdict is 'spoof'. A row whose surface has no declared key at all carries profile_field_exception beside it."
+    },
+    "profile_field_exception": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "why",
+        "evidence"
+      ],
+      "description": "Why this row's profile_field names no key that config/profile.schema.json declares. Carried on the row rather than in an allowlist inside the checker, so whoever edits the row sees it, and checked by scripts/check-schema-wiring.py in both directions: a bad annotation fails, and so does one that outlived its problem once the key is declared.",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "enum": [
+            "not-a-device-property",
+            "conformance-target-only",
+            "whole-profile",
+            "undeclared"
+          ],
+          "description": "not-a-device-property: a deployment or launch choice that travels beside the device profile rather than inside it. conformance-target-only: measured for V3 comparison and deliberately not a loader input. whole-profile: the row is about the profile transport, not one field. undeclared: a spoof surface the schema declares no key for, so the surface stays inherited from the host until one is added."
+        },
+        "why": {
+          "type": "string",
+          "minLength": 40
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A repository path, or 'path:token'. The file must exist and must mention the token, which defaults to the last dotted segment of profile_field; a segment nobody can search for, such as the wildcard, must name its token explicitly."
+        }
+      }
     },
     "corpus_coverage": {
       "type": "string",

@@ -31,6 +31,15 @@
 # only success signal. If ATL ever turns out to need the reboot it asked for,
 # this fails naming the component instead of handing the gate a broken toolchain.
 #
+# PROVENANCE OF THAT CLAIM, because it matters which half is measured. The
+# behaviour of this script on 0, 3010, 1641, each documented failure code and an
+# undocumented one was demonstrated against a STUB installer that wrote a chosen
+# exit code and optionally created the files, not against a real
+# reboot-required install. So "a 3010 whose files did not land fails naming the
+# component" is proven; "a real 3010 from this installer leaves usable headers"
+# is reasoned from the fact that headers need no registration, and is exactly
+# what the re-check exists to catch if the reasoning is wrong.
+#
 # It reports what it found either way -- the VS install path, the resolved MSVC
 # toolset, the SDK version directories, and per component whether it was already
 # there or installed by this run -- because every Windows failure on this project
@@ -169,23 +178,40 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$argv = @('modify', '--installPath', $InstallPath)
-if ($ChannelId -ne '') { $argv += @('--channelId', $ChannelId) }
+# Start-Process joins -ArgumentList with spaces and quotes NOTHING, so an array
+# containing "C:\Program Files (x86)\..." arrives at the installer as
+# --installPath C:\Program, followed by Files and (x86)\Microsoft... as stray
+# arguments. Measured: that is exactly how the first real run failed, exit 1
+# after 7 seconds, with the unquoted path visible in this script's own echo.
+# Quote here and pass one pre-joined string.
+function Quote-Arg([string]$value) {
+  if ($value -match '[\s"]') { return '"' + ($value -replace '"', '\"') + '"' }
+  return $value
+}
+
+$argv = @('modify', '--installPath', (Quote-Arg $InstallPath))
+if ($ChannelId -ne '') { $argv += @('--channelId', (Quote-Arg $ChannelId)) }
 # Semicolon-separated rather than a PowerShell array parameter: powershell -File
 # passes arguments as literal strings, so "A,B" would bind as one component id
 # named "A,B" and the installer would reject it. Splitting here is unambiguous.
 foreach ($c in ($Components -split ';' | Where-Object { $_ -ne '' })) {
-  $argv += @('--add', $c)
+  $argv += @('--add', (Quote-Arg $c))
 }
 # --quiet: no UI on a headless runner. --norestart: never reboot the runner out
 # from under the job; a reboot-required result is reported as 3010 instead.
 # --nocache: delete the payloads after installing, because Windows is the
 # target with the least free disk and the packages are not needed again.
 $argv += @('--quiet', '--norestart', '--nocache')
+$commandLine = $argv -join ' '
 
-Write-Host ('running: "{0}" {1}' -f $Installer, ($argv -join ' '))
+# The installer's own logs are the only account of why it failed, and they are
+# written to %TEMP% on a runner that stops existing when the job ends. Note the
+# start time so only this run's logs get printed.
+$started = Get-Date
+
+Write-Host ('running: "{0}" {1}' -f $Installer, $commandLine)
 $clock = [Diagnostics.Stopwatch]::StartNew()
-$proc = Start-Process -FilePath $Installer -ArgumentList $argv -Wait -PassThru
+$proc = Start-Process -FilePath $Installer -ArgumentList $commandLine -Wait -PassThru
 $code = $proc.ExitCode
 
 # The installer does not support --wait: "The --wait parameter can only be
@@ -203,6 +229,21 @@ while ((Get-Date) -lt $deadline) {
 }
 $clock.Stop()
 Write-Host ('installer exit code {0} after {1:N0}s' -f $code, $clock.Elapsed.TotalSeconds)
+
+if ($code -ne 0 -and $code -ne 3010 -and $code -ne 1641) {
+  $logs = @(Get-ChildItem -Path $env:TEMP -Filter 'dd_*.log' -ErrorAction SilentlyContinue |
+    Where-Object { $_.LastWriteTime -ge $started.AddSeconds(-5) } |
+    Sort-Object LastWriteTime)
+  if ($logs.Count -eq 0) {
+    Write-Host 'no dd_*.log was written; the installer failed before it started logging'
+  }
+  foreach ($log in $logs) {
+    Write-Host ('----- {0} (last 60 lines) -----' -f $log.FullName)
+    Get-Content -Path $log.FullName -Tail 60 -ErrorAction SilentlyContinue |
+      ForEach-Object { Write-Host $_ }
+  }
+}
+
 Set-Content -Path $CodeFile -Value ([string]$code) -NoNewline
 exit 0
 PS1
@@ -243,7 +284,7 @@ PS1
     -1073720687) die "installer exit -1073720687: connectivity failure reaching Microsoft's servers" ;;
     -1073741510) die "installer exit -1073741510: the installer was terminated" ;;
     "") die "the installer wrote no exit code; it did not run to completion" ;;
-    *) die "installer exit $rc: see %TEMP%\\dd_setup*.log and dd_client*.log" ;;
+    *) die "installer exit $rc: undocumented. Its own dd_*.log tails are printed above." ;;
   esac
 
   # Re-resolve the toolset: an --add can create a newer VC/Tools/MSVC directory,

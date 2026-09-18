@@ -270,10 +270,16 @@ describes a device, so `launch({proxy: "http://user:pass@host", args:
 ["--fingerprint=12345"]})` launches instead of being refused, and the warning
 that authenticating cost you the fingerprint is retired rather than reworded.
 
-`0106` itself is in the series and has not been built. So on a binary built
-before it, an authenticated proxy still suppresses composition, and the warning
-that used to say so is gone. If you are running an older artifact, check
-`--fingerprint-explain` rather than trusting the absence of a warning.
+`0106` itself is at V0: it applies in series order and has not been built. So on
+a binary built before it, an authenticated proxy still suppresses composition,
+and the npm warning that used to say so has been retired. If you are running an
+older artifact, check `--fingerprint-explain` rather than trusting the absence
+of a warning — it reads the browser's own resolution instead of the launcher's
+guess about it.
+
+This paragraph is the only remaining notice to a pre-`0106` user, so it comes
+out when `0106` reaches V2 — a build and a launch, not merely a place in the
+series — and in the same change that would otherwise leave it stale, not before.
 
 `humanize: true` is rejected rather than accepted as a no-op.
 

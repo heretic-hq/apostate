@@ -157,3 +157,81 @@
 # file any other patch in the series touches, so nothing else orders it, and it
 # is last because it was authored last.
 0109-software-hevc-on-every-shipped-target.patch
+
+# 0111 removes the locale draw 0081 introduced and the compiled locale policy
+# table 0081 added for it, so 0081 comes ahead of it. It also moves the locale
+# overrides out of the policy lambda 0085 hung them on, carries 0085's
+# FieldOverrides and ComposeRequest members as context, and rewrites the
+# fixture and the two ApostateComposeTest cases 0082 wrote against the drawn
+# policy, so 0082 and 0085 do too. 0102's persona-selects-the-anchor rule and
+# 0107's rewrite of those same test cases are ahead of it for the same reason
+# 0107 lists.
+0111-locale-follows-the-launch-and-the-host.patch
+
+# 0110 lifts the proxy credential off --proxy-server's userinfo and out of the
+# --apostate-profile envelope. Its base/apostate/profile.{h,cc} hunks sit in
+# the credential block 0106 rewrote and in the Get() tail 0083 wrote, so both
+# come ahead of it; its chrome/app/chrome_main_delegate.cc hunk wraps the
+# compose call 0084 installed; its chrome/browser/chrome_content_browser_client.cc
+# hunk lands after the switch-copy list 0005 added and 0073 and 0086 extended;
+# and its base/BUILD.gn hunk appends to the base_unittests list 0082 added
+# apostate/compose_unittest.cc to. chrome/common/crash_keys.cc is touched by
+# nothing else in the series. It is independent of 0111.
+0110-proxy-server-url-credentials.patch
+
+# 0112 serves the anchor's GL capability limits the serving table never named
+# and the clamp direction discarded, and stops --fingerprint-explain claiming
+# they were served when they were not. It touches two files.
+#
+# ui/gl/gl_gl_api_implementation.cc carries most of it, and that file's own
+# history is the ordering: 0026 created kApostateGlLimits and the
+# glGetIntegerv hook, 0032 extended the table, 0035 and 0036 added the 64-bit
+# and float query paths it also edits, and 0103 introduced
+# BackendEnforcesGlLimits(), whose test this corrects and whose three call
+# sites it rewrites. 0103 is the binding constraint there. It also reads the
+# driver's unsubstituted GL_RENDERER through GLApiBase, which 0007 established
+# as the substitution point, so 0007 comes ahead of it too.
+#
+# base/apostate/compose.cc carries the explain change: it rewrites the
+# cross-backend limitation text 0102 wrote, and counts gl_limits on the
+# profile merged by the anchor block 0081 wrote, so both come ahead of it.
+# 0111 is the most recent patch to touch that file, so 0112 sits after it --
+# not because it depends on 0111, but because its context must be the text
+# 0111 left behind. It does not touch ComposeProfileForCurrentProcess, where
+# 0113 works, and its compose.cc hunks are ~580 lines above 0113's earliest
+# context line.
+#
+# base/apostate/profile.cc carries the loader fix: the gl_limits parse 0070
+# wrote refuses any value that is not greater than zero, which silently drops
+# the two measured limits that are not -- MIN_PROGRAM_TEXEL_OFFSET at -8 and
+# MAX_SERVER_WAIT_TIMEOUT at 0. 0070 therefore comes ahead of it, and 0110 is
+# the most recent patch to touch that file, so 0112 must follow 0110 too --
+# for context, not for behaviour. Without this hunk the other two files are
+# still wrong for those two limits, because they never reach gl_limits().
+#
+# It is inert on its own: five of the thirteen limits it serves are emitted
+# only after the anchor_gl_layer filter fix in
+# scripts/generate-dispersion-tables.py, which is not a patch and needs a
+# rebuild rather than a series position.
+0112-gl-serve-the-anchor-capability-limits.patch
+
+# 0113 binds the composed identity to the --user-data-dir a launch names, so a
+# persistent profile keeps one machine instead of drawing a new one every
+# launch. It adds a SeedOrigin value and a filesystem layer to ResolveSeed,
+# which 0081 wrote, and 0081 also wrote the ComposeProfileForCurrentProcess
+# block it hoists the state directory out of and the explain report it extends
+# -- so 0081 comes ahead of it three times over.
+#
+# Its compose.cc hunks carry as context the lines the later compositor patches
+# left in that function: 0085's CollectOverrides and request.overrides, 0106's
+# PayloadDescribesDevice branch and ReportAuthoredProfileBypass, and the
+# request block 0111 left after removing request.locale_policies and
+# request.default_accept_languages. So 0085, 0106 and 0111 come ahead of it
+# too, and its compose_unittest.cc hunk appends after the last case 0107 and
+# 0111 left in the file.
+#
+# It is independent of 0110 and of 0112: 0112's compose.cc edit is inside
+# Compose()'s anchor branch, ~580 lines above 0113's earliest context line and
+# in a different function, and neither touches the other's struct members.
+# It is last because it was authored last.
+0113-a-persistent-profile-keeps-one-identity.patch

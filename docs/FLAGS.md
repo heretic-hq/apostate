@@ -15,8 +15,10 @@ not add an observable.
 
 `--fingerprint` selects the whole identity. The same seed produces the same
 device on any host that can serve it, on every launch, with nothing stored on
-disk. Without it, each launch draws a fresh seed and presents a different
-device.
+disk. Without it, a launch that names a `--user-data-dir` presents the
+identity bound to that directory, and a launch that names none draws a fresh
+seed and presents a different device. [How long an identity
+lasts](#how-long-an-identity-lasts) is the whole rule.
 
 The value is any printable ASCII up to 512 bytes. Integers are the usual choice.
 An empty, over-long or non-printable value refuses the launch on stderr and
@@ -98,7 +100,10 @@ not been built or run.
 ## Per-field overrides
 
 An explicit switch sets one field and the seed fills in the rest, so the result
-is one device with a correction rather than two partial identities.
+is one device with a correction rather than two partial identities. The two
+locale switches are the exception to the second half of that: the seed fills in
+nothing for them, because the seed does not reach that surface. What they do not
+set is served by the host. See below.
 
 | Flag | Value | Field it sets |
 | --- | --- | --- |
@@ -134,10 +139,25 @@ launch asked for is refused, and so is one the drawn insets cannot fit inside.
 There is no display yet at composition time, so `--window-size` is the only host
 bound available and the host's real panel size is not checked.
 
-`--fingerprint-locale` is applied where the locale policy resolves, not over the
-finished profile, because the speech-voice table is keyed on the resolved
-Accept-Language list. It moves no keyboard layout, because the locale policy no
-longer carries one: the maps it used to set were a five-key stub identical on
+`--fingerprint-locale` and `--fingerprint-timezone` set exactly the field each
+names, and what neither names is the host's own — not the seed's, which never
+had a value here. So `--fingerprint-timezone=Europe/Berlin` alone gives a
+Berlin zone over the host's own language list, which is an ordinary combination
+on a real machine and is the reason the switch is one field and not two:
+resolving `--fingerprint-locale=en-GB` to the catalogue's `en-gb` policy would
+quietly set `Europe/London` as well, and on the path where a GeoIP lookup
+resolved a country but no locale that would be a timezone invented out of the
+launcher's own answer. To pin both, pass both.
+
+`--fingerprint-locale` is applied where the locale surface resolves, not over
+the finished profile, because the speech-voice table is keyed on the resolved
+Accept-Language list. That also means it is the switch that brings the measured
+voice list back: a launch that names no locale keys onto the empty language set,
+which carries no speech section, so `speechSynthesis` reports the host's real
+providers.
+
+It moves no keyboard layout, because the locale policy no longer carries one:
+the maps it used to set were a five-key stub identical on
 every option, and the layout a machine reports follows its physical keyboard
 rather than its Accept-Language list. A locale that does not match the physical
 layout is an ordinary thing on a real machine, so the map stays the host's unless
@@ -148,7 +168,13 @@ A value that is not one of the catalogue's own buckets is honoured and reported.
 `--fingerprint-explain` names the field, the value, the command line as the
 layer that decided it, and the drawn value it displaced, and says that a
 hand-chosen value has no prevalence data behind it and may be more distinctive
-than a drawn one.
+than a drawn one. The two locale switches displace nothing and carry no such
+caveat: there is no drawn locale to be more distinctive than, and naming a zone
+that matches the connection's exit country is the correct use of the surface
+rather than a risk taken. Their report rows say instead that the value came from
+the command line — which is also where the Python and Node packages put the
+answer from their prelaunch GeoIP lookup — and, when a field is unset, that the
+host serves it and which switch would pin it.
 
 ## Inspecting a launch
 
@@ -172,7 +198,7 @@ apostate fingerprint composition
   host memory         38654705664 bytes
   host backend        metal (platform default, not probed)
   seed                12345
-  seed source         --fingerprint
+  seed source         --fingerprint (pinned by flag, identical on any machine)
   reproduce with      --fingerprint=12345
   root                60eab51485a4...
 
@@ -183,26 +209,54 @@ gpu_identity                     dispersion  physical-ground-truth  apple-m4-max
 cpu                              dispersion  physical-ground-truth  cores-14
 memory                           dispersion  catalogue-value        gib-8
 panel                            dispersion  catalogue-value        mba13-default
-locale                           dispersion  catalogue-value        en-gb
+audio                            dispersion  physical-ground-truth  coreaudio-256
+locale.accept_languages          host-inherited host-inherited      (inherited)
+locale.timezone                  host-inherited host-inherited      (inherited)
 
 limitations
   - anchor macos-metal-apple-850a91233555 has one measured member, so no
     identity rotation is offered on its capability cluster
+  - no launch layer named locale.timezone, so the host's own is served
+    unchanged and nothing is composed for it. On a direct egress that
+    matches; behind a proxy it is the host's and not the exit's. Pass
+    --fingerprint-timezone to pin it, or launch through the Python or Node
+    package, which resolves it from GeoIP of the effective egress and passes
+    that same switch
 ```
+
+The two locale rows are the surface an operator checks against their exit IP,
+so the report names the layer that decided each one. `host-inherited` means no
+`locale` section was composed and the host's own zone and language list are in
+effect; `command-line` means a switch set it, which is also how a GeoIP answer
+from the Python or Node package arrives.
 
 The `evidence` column says where each value came from:
 `physical-ground-truth` is a measurement from a real device, `catalogue-value`
 is authored from platform release history, and a surface left to the host says
 so.
 
-The `reproduce with` line carries the exact argument that recreates the launch
-being reported. No seed is stored on disk, so that line is how you keep a random
-identity you liked. A launch with no `--fingerprint` reports the seed it drew:
+The `seed source` line is the one to read when an identity is not the one you
+expected. It names which of the three lifetimes this launch is in, and
+`reproduce with` carries the exact argument that recreates it.
+
+A launch with no `--fingerprint` and no `--user-data-dir` reports the seed it
+drew, and that line is the only record of it:
 
 ```text
   seed                616c9fdee878b07b0ffab172936c21a7da947f77fa7153f5b1aba863c19acb0d
-  seed source         drawn from OS entropy
+  seed source         drawn from OS entropy for this launch only (ephemeral)
   reproduce with      --fingerprint=616c9fdee878b07b0ffab172936c21a7da947f77fa7153f5b1aba863c19acb0d
+```
+
+A launch that named a `--user-data-dir` reports the file the identity came
+from, and whether this launch is the one that created it. `(created this
+launch)` on a profile you believed was established is the whole diagnosis:
+
+```text
+  seed                4f3c8a1e09b7d2650c3ab8f41d7e5920ac6b13f8e04d7a29bb5c1e6370d8f425
+  seed source         this profile's identity file (stable for this --user-data-dir)
+  identity file       /home/you/profiles/one/apostate/identity (read from disk)
+  reproduce with      --fingerprint=4f3c8a1e09b7d2650c3ab8f41d7e5920ac6b13f8e04d7a29bb5c1e6370d8f425
 ```
 
 The report goes to stdout and is never exposed to a page.
@@ -324,20 +378,199 @@ Strongest first:
 --fingerprint=host        no composition at all; every surface is the host's
 --fingerprint-*           one field each, on top of the seed's values
 --fingerprint=<seed>      the identity that seed selects
-fresh OS entropy          the default, a new identity every launch
+the profile identity      the identity bound to the --user-data-dir you named
+fresh OS entropy          the default when you named no --user-data-dir
 ```
 
-No seed is stored anywhere in this chain. A seed is either on the command line
-or drawn for that one launch.
+### How long an identity lasts
+
+Three cases, and the report tells you which one you are in.
+
+| You launched with | The identity is | It lasts |
+| --- | --- | --- |
+| `--fingerprint=<seed>` | the one that seed selects | forever, on any machine, in any container — the seed is the identity |
+| `--user-data-dir=DIR` and no `--fingerprint` | bound to `DIR` | until `DIR` is deleted; it survives renaming and moving `DIR` |
+| neither | drawn fresh from OS entropy | this launch only, recorded nowhere |
+
+A named `--user-data-dir` keeps its identity because it keeps everything else.
+That directory holds cookies, localStorage and logged-in sessions, so a
+different GPU, core count, installed memory and panel on every launch shows a
+site one account whose hardware changes between visits — which no real machine
+does, and which is a stronger signal than any single fingerprint value.
+
+If you want a fresh machine every run and have been reusing one directory out
+of habit, say so, because you will otherwise get the same machine every time.
+Drop `--user-data-dir` — that is the ephemeral default, and the right answer
+if you did not need the cookies either — or give each run its own directory,
+or delete `DIR/apostate/identity` between runs. Neither choice is the correct
+one in general; they are different sessions and the report tells you which
+one you are running.
+
+The identity lives in `DIR/apostate/identity`: one seed and one newline. Read
+it to pin the same machine elsewhere, write it to choose one by hand, delete it
+to take a new machine on the next launch.
+
+```sh
+cat ~/profiles/one/apostate/identity
+# 4f3c...  -> pass as --fingerprint=4f3c... anywhere
+```
+
+Copying a profile directory clones its identity, deliberately: a copy of a
+profile is a copy of its logged-in sessions, and an identity that changed under
+them would defeat the point. Two copies used at once look like one machine in
+two places, because that is what they are. Use `--fingerprint=<seed>` when you
+want the same profile on a different machine.
+
+Incognito and guest windows share the browser process, so they share its
+identity. A window cannot report different hardware from the browser running
+it.
+
+If the directory cannot be written — read-only, full, or on a medium that
+refuses — the launch still gets a coherent device, but an ephemeral one, and
+says so in its limitations. If the identity file is unreadable it is left
+alone and the launch is ephemeral; if it is present but is not a seed, it is
+replaced once and that is reported too.
+
+## The proxy
+
+```sh
+./chrome --proxy-server=socks5://user:pass@proxy.example:1080
+```
+
+The credential goes in the URL, which is the syntax every other proxy tool
+accepts. It used to fail instantly with `net::ERR_NO_SUPPORTED_PROXIES` on
+every request, because Chromium's proxy URI parser has no userinfo concept and
+one `@` makes the whole chain unparseable, and this document claimed otherwise.
+It works now.
+
+The credential never reaches Chromium's proxy configuration. It is taken off
+the value before anything parses it, held in memory for the launch, and given
+only to the network stack; Chromium is handed the `scheme://host:port` it has
+always wanted. That is not cosmetic — proxy identity is serialized into
+NetLog, net-export, socket-pool group keys, session and cache keys, error
+strings and telemetry, and a credential inside it would be in all of them.
+
+Percent-encode with the usual URL rules, and nothing more than the usual:
+
+| in the password | write | why |
+| --- | --- | --- |
+| `p@ss` | `p@ss` or `p%40ss` | the **last** `@` separates the credential, so a literal one needs no escape |
+| `p:ss` | `p:ss` or `p%3Ass` | the **first** `:` separates username from password, so a later one needs none either |
+| `p/ss` | `p%2Fss` | |
+| `p%ss` | `p%25ss` | |
+| a space | `%20` | `+` stays a literal `+`, as in any URL path |
+
+A malformed escape refuses the launch instead of being read as a literal `%`,
+so `%zz` is an error rather than a password you did not type. So is a decoded
+credential over 4096 bytes, one containing a NUL, or one that is not valid
+UTF-8: nothing is truncated, because half a password authenticates nothing
+while looking like it should.
+
+Schemes that take a credential: `http`, `https`, `socks`, `socks4`, `socks5`,
+and the scheme-less `host:port` form, which Chromium reads as HTTP. A
+credential on `direct://` or `quic://` refuses the launch — the first has no
+peer to authenticate to and the second is Chromium's own MASQUE path, so in
+both a credential is a typo, and dropping it silently would authenticate
+nothing while reporting success. `socks5h://` is not a Chromium proxy scheme
+at all; use `socks5://`, which already resolves the destination proxy-side.
+
+The full proxy-rules grammar works, not just a single URL, so
+`http=http://user:pass@a:8080;https=http://user:pass@b:8443` is fine. Two
+proxies naming *different* credentials refuses the launch: one credential is
+held for the whole launch, and applying one proxy's to another is not something
+to do quietly.
+
+**Against the profile envelope.** An `--apostate-profile` envelope can also
+carry a `proxy_credentials` block, which is how the Node package sends one.
+There is no precedence between them: supplying both refuses the launch. They
+are two sources of truth for one store, so picking either would authenticate
+with a credential you did not name. Use the URL by hand and the envelope from
+the packages, and never both in one launch.
+
+The two channels are otherwise identical, and that is worth saying rather than
+leaving you to infer it. Both end up in the same in-memory store, both are read
+by the same code, and neither is a different kind of credential once it is
+there. So the lifetime is the same — the launch, and no longer; nothing is
+written to disk by either — and the reuse is the same: against an HTTP or HTTPS
+proxy, answering a `407` puts the entry in Chromium's in-memory `HttpAuthCache`
+by way of `HttpAuthController::ResetAuth`, which is what stops the next request
+paying for another challenge. That cache is per network context and is never
+persisted, so it does not outlive the browser. Choose the channel that suits
+how you launch, not for any difference in what happens afterwards.
+
+**Where the credential is not.** Not in `ProxyServer`, `ProxyChain`, NetLog,
+net-export, socket-pool group keys, session or cache keys, error strings, crash
+keys or `--fingerprint-explain`. Six things print the browser's command line
+verbatim, and after the credential is lifted off it there is nothing on it for
+any of them to print:
+
+| surface | what prints it |
+| --- | --- |
+| `chrome://version` | the command-line row |
+| `chrome://gpu` | the same row in its client-info block |
+| `chrome://net-export` | the capture's `clientInfo.command_line` |
+| `--log-net-log` | the same field, written at startup |
+| DevTools `SystemInfo.getInfo` | the `commandLine` field it returns |
+| `chrome://tracing` | Perfetto metadata, unless privacy filtering is on |
+
+An envelope credential is lifted the same way, which is a change — before this
+it was visible in `chrome://version`, base64-encoded, for the whole session.
+
+**Where it still is, and why that is not new.** A child process's argv, inside
+the profile envelope, which is what `ps` shows for the renderers and the
+network process. This is inherent to the design rather than something accepting
+a credential in the URL introduced: the code that spends the credential — the
+one that answers a proxy's `407`, and the one that sends the RFC 1929
+sub-negotiation — runs in the network service, not in the browser, and the
+envelope is the only channel a child process has. `--proxy-server` is not
+copied to children at all. It has worked this way since the envelope existed;
+what changed is that the browser's own command line is now clean too.
+
+Two consequences worth acting on.
+
+**A trace is a credential.** `chrome://tracing` and any Perfetto capture taken
+without privacy filtering record *every* process's command line, so a trace
+taken while a proxy is configured contains the base64 envelope, and base64 is
+not encryption. So "send me a trace so I can look at this" is a request to send
+a proxy password. Rotate the credential, or capture with privacy filtering on,
+or take the trace with no proxy configured. This is reported rather than
+mitigated: the field is there to record the command line, and a browser that
+quietly wrote a different command line into a diagnostic than the one it was
+launched with would be a worse trade.
+
+**A crash report is not.** `--apostate-profile` is on the crash-key ignore
+list, so a crash report from a child does not carry the envelope. Without that
+it would: the 64-byte crash-key bound cuts a base64 payload only three bytes
+short of the username, which is arithmetic and not a guarantee.
+
+And the obvious one: a machine you share with users you do not trust was never
+a place to put a proxy password on a command line.
+
+To confirm a live proxy end to end, including that the exit is the proxy's:
+
+```sh
+./chrome --headless --proxy-server=socks5://user:pass@proxy.example:1080 \
+  --dump-dom https://ip.decodo.com/json
+```
+
+`proxy.ip` is the exit address, `isp.isp` the exit network, `country.name` and
+`city.time_zone` the geography — which is also how you check that a
+`--fingerprint-timezone` you passed agrees with where the traffic actually
+leaves from. A credential-free `--proxy-server` against a proxy that requires
+one fails the connection outright rather than falling back to the direct
+network, so a result at all is proof the credential was accepted, and the
+address in it is proof the proxy's network fetched it. Compare against the same
+URL with no proxy: a different `proxy.ip` is the whole point.
 
 ## Chromium flags worth knowing
 
-These are upstream switches, unchanged, that interact with the identity.
+These are upstream switches that interact with the identity, unchanged except
+where a row says otherwise.
 
 | Flag | Why it matters |
 | --- | --- |
-| `--user-data-dir=DIR` | Keeps cookies, storage and history. Does not keep the identity. |
-| `--proxy-server=URL` | HTTP, HTTPS, SOCKS4 and SOCKS5, with authentication. UDP over SOCKS5 UDP ASSOCIATE carries proxied QUIC and HTTP/3. |
+| `--user-data-dir=DIR` | Keeps cookies, storage and history — and the identity, which is bound to `DIR` and stable across launches. See [How long an identity lasts](#how-long-an-identity-lasts). |
+| `--proxy-server=URL` | HTTP, HTTPS, SOCKS4 and SOCKS5. UDP over SOCKS5 UDP ASSOCIATE carries proxied QUIC and HTTP/3. Not unchanged: a credential in the URL is accepted, which upstream refuses. [The proxy](#the-proxy) is the detail. |
 | `--use-angle=BACKEND` | Selects the backend the GPU process actually renders through. It no longer decides which capability cluster is drawn — the claimed platform does that — so what it changes is throughput and rendered bytes, not the identity. |
 | `--headless` | Supported, and it does not imply software rendering. On a Mac this binary selects ANGLE/Metal in every default configuration including `--headless=new`. A headless Linux server with no GPU is the primary deployment and needs no further switch. |
 | `--lang=TAG` | Sets the UI language independently of the profile's locale, which is usually not what you want. |
@@ -401,12 +634,12 @@ browser starts, through the proxy when one is configured, and the result travels
 as `--fingerprint-locale` and `--fingerprint-timezone` rather than as a profile
 envelope, so asking for a locale does not cost you the composed fingerprint.
 
-A failed lookup never invents a locale. It leaves both switches off, so the
-profile's own drawn locale and timezone apply and the identity stays coherent —
-the same seed produced them. The consequence is worth being explicit about:
-those values will not match the proxy's exit country, so `geoip` is best-effort
-geo-matching and passing `locale` and `timezone` explicitly is the way to
-guarantee it.
+A failed or partial lookup never invents a locale. It leaves off the switch for
+each field it could not answer for, so the host's own value applies there — not
+a drawn one, because the seed does not reach that surface. The consequence is
+worth being explicit about: behind a proxy the host's zone is the host's and not
+the exit's, so `geoip` is best-effort geo-matching and passing `locale` and
+`timezone` explicitly is the way to guarantee it.
 
 Both packages behave identically here and it is exercised. Neither raises from
 `launch()` and neither substitutes a value: they warn into the resolution's own
@@ -423,11 +656,10 @@ resolves through this project's own table, so a German exit gives `de-DE` rather
 than `en-DE`; and a provider timezone that is not an IANA identifier, such as
 `+02:00`, is treated as unresolved rather than passed to the switch.
 
-Proxy credentials go into Chromium's in-memory `HttpAuthCache`, the same place
-interactively typed credentials go. That cache is per network context, is never
-written to disk, and is not reachable from a page. Without it every new
-connection costs a 407 round trip and multi-round authentication schemes never
-finish.
+A `proxy` passed to either package is split the same way the browser splits
+`--proxy-server` by hand: the endpoint goes on the command line and the
+credential travels in the profile envelope. [The proxy](#the-proxy) has what
+happens to it after that, and it is the same either way.
 
 `humanize: true` is rejected rather than accepted as a no-op. There is no
 synthetic input behaviour in this fork.

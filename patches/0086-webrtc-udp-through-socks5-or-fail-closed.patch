@@ -1661,7 +1661,7 @@ Compile-unverified: this cannot be built in this session.
  
  P2PSocketUdp::~P2PSocketUdp() {
    if (interceptor_) {
-@@ -282,6 +266,32 @@
+@@ -282,6 +266,38 @@
                   << kUdpSendSocketBufferSize;
    }
  
@@ -1685,8 +1685,14 @@ Compile-unverified: this cannot be built in this session.
 +    // does not exist. The renderer sees the pipe close and WebRTC gets no
 +    // candidate from it, rather than a candidate whose packets would have gone
 +    // out of a real interface.
-+    LOG(ERROR) << "P2PSocketUdp::Init(): no usable egress for this socket: "
-+               << result;
++    // Logged below ERROR on purpose. Refusing the socket is this patch
++    // working, not failing, and a page that opens a PeerConnection produces
++    // one of these per interface the proxy cannot carry -- six on a
++    // dual-stack host. Shouting about it at ERROR reads as a broken browser
++    // and sent one operator hunting a transport bug that did not exist.
++    LOG(WARNING) << "apostate: refused a WebRTC UDP socket with no proxy "
++                    "egress, so no packet leaves outside the proxy (net error "
++                 << result << ")";
 +    OnError();
 +    return;
 +  }
@@ -1694,7 +1700,7 @@ Compile-unverified: this cannot be built in this session.
    net::IPEndPoint address;
    result = socket_->GetLocalAddress(&address);
    if (result < 0) {
-@@ -293,7 +303,7 @@
+@@ -293,7 +309,7 @@
    VLOG(1) << "Local address: " << address.ToString();
  
    // NOTE: Remote address will be same as what renderer provided.

@@ -38,6 +38,33 @@ def diagnostic():
                        "isolatedLeading": [], "passed": True}}
 
 
+def admissible_capture(label="ordinary"):
+    """The smallest capture the admission gate accepts.
+
+    Derived from the receiver's own constants: a hand-written probe list would
+    go stale the next time the gate is tightened, and a fixture that no longer
+    describes an admissible capture tests nothing.
+    """
+    ua = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+          "Chrome/%d.0.0.0 Safari/537.36" % receiver.EXPECTED_BROWSER_MAJOR)
+    brands = [{"brand": "Not.A/Brand", "version": "99"},
+              {"brand": "Chromium", "version": str(receiver.EXPECTED_BROWSER_MAJOR)}]
+    identity = {
+        "navigator.scalars": {"userAgent": ua, "webdriver": False},
+        "navigator.userAgentData": {
+            "low": {"brands": brands},
+            "high": {"brands": brands,
+                     "uaFullVersion": "%d.0.0.0" % receiver.EXPECTED_BROWSER_MAJOR}},
+    }
+    probes = {pid: {"ok": True, "value": identity.get(pid, {}), "error": None}
+              for pid in receiver.DETERMINISTIC_PROBES}
+    return {"capture_version": receiver.EXPECTED_CAPTURE_VERSION,
+            "context": {"taken_at": "2026-09-18T04:34:27.439Z", "label": label, "ua": ua,
+                        "collector_sha256": "0" * 64, "secure_context": True,
+                        "automation_suspected": False, "automation_signals": []},
+            "probes": probes, "repeat": dict(probes)}
+
+
 class FontContextServerTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -189,11 +216,12 @@ class FontContextServerTest(unittest.TestCase):
         self.assertEqual(self.submit()[0], 200)
         self.assertTrue(self.thread.is_alive())
         self.assertEqual(self.request("GET", "/echo")[0], 200)
-        capture = {"context": {"label": "ordinary"}, "probes": {}, "repeat": {}}
+        capture = admissible_capture()
+        raw = json.dumps(capture).encode()
         self.assertEqual(self.request("POST", "/submit", capture)[0], 200)
         self.thread.join(3)
         self.assertFalse(self.thread.is_alive())
-        self.assertEqual(len(list(self.captures.glob('ordinary-*.json'))), 1)
+        self.assertTrue((self.captures / (hashlib.sha256(raw).hexdigest() + ".json")).exists())
 
 
 if __name__ == '__main__':

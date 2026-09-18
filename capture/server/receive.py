@@ -253,11 +253,40 @@ def admission_rejection_reason(capture):
     return None
 
 
+def failed_probe_errors(capture, limit=240):
+    """Every probe that did not complete, with the error it reported.
+
+    A rejection reason names the first failing probe and stops there, and the
+    body of a rejected capture is never written to disk. An unattended run has
+    nothing left to read afterwards: "probe webgl1 did not complete
+    successfully" does not say whether one field was absent or the browser
+    refused to create a context at all, and those have different fixes. This
+    decides nothing — it records the evidence behind a decision already made.
+    """
+    if not isinstance(capture, dict):
+        return None
+    errors = {}
+    for section in ("probes", "repeat"):
+        entries = capture.get(section)
+        if not isinstance(entries, dict):
+            continue
+        for pid, value in entries.items():
+            if isinstance(value, dict) and value.get("ok") is True:
+                continue
+            reported = value.get("error") if isinstance(value, dict) else None
+            # Truncated: an error string can carry a payload, and a null here
+            # says "failed, with no error recorded" rather than inventing one.
+            errors["%s.%s" % (section, pid)] = (
+                reported[:limit] if isinstance(reported, str) else None)
+    return errors or None
+
+
 def admission_record_path(out_dir, raw_sha256):
     return pathlib.Path(out_dir) / ADMISSION_DIRNAME / (raw_sha256 + ".json")
 
 
-def persist_admission_decision(out_dir, raw_sha256, decision, reason, context=None, capture_path=None):
+def persist_admission_decision(out_dir, raw_sha256, decision, reason, context=None,
+                               capture_path=None, probe_errors=None):
     if not HEX64.fullmatch(raw_sha256):
         raise ValueError("raw capture hash must be 64 hexadecimal characters")
     record = {
@@ -269,6 +298,8 @@ def persist_admission_decision(out_dir, raw_sha256, decision, reason, context=No
     }
     if capture_path is not None:
         record["capture_path"] = str(capture_path)
+    if probe_errors:
+        record["probe_errors"] = probe_errors
     path = admission_record_path(out_dir, raw_sha256)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     encoded = (json.dumps(record, indent=2, sort_keys=True) + "\n").encode()
@@ -782,7 +813,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         context = capture.get("context") if isinstance(capture, dict) else None
         if reason:
             try:
-                persist_admission_decision(self.out_dir, raw_sha256, "rejected", reason, context)
+                persist_admission_decision(self.out_dir, raw_sha256, "rejected", reason, context,
+                                           probe_errors=failed_probe_errors(capture))
             except (OSError, ValueError, json.JSONDecodeError):
                 pass
             self._json(422, {"error": reason, "raw_sha256": raw_sha256})

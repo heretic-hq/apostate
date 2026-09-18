@@ -397,8 +397,15 @@ const browser = await launch({
 ```
 
 `geoip: true` resolves the locale and timezone from the network exit before the
-browser starts, through the proxy when one is configured. A lookup failure is
-reported rather than replaced with `UTC` and `en-US`.
+browser starts, through the proxy when one is configured, and the result travels
+as `--fingerprint-locale` and `--fingerprint-timezone` rather than as a profile
+envelope, so asking for a locale does not cost you the composed fingerprint.
+
+A lookup failure should be reported rather than replaced with `UTC` and `en-US`,
+and only the Python package does that: it raises `GeoIPError`. The Node package
+warns and continues with `en-US` and `UTC`, which is a known defect in the Node
+adapter rather than the intended behaviour. Pass `locale` and `timezone`
+explicitly if you need a failure to be loud on Node.
 
 Proxy credentials go into Chromium's in-memory `HttpAuthCache`, the same place
 interactively typed credentials go. That cache is per network context, is never

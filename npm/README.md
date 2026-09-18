@@ -117,7 +117,7 @@ const browser = await launch({
 | `fingerprint` | a fresh random seed | Seed for the whole identity. `"host"` (also `"off"`, `"false"`, `"0"`, `"disable"`, `"disabled"`) inherits the real machine and composes nothing. |
 | `fingerprintPlatform` | host's own OS on macOS and Windows; `"windows"` on Linux | `windows`, `macos` or `linux`. Selects the GPU cluster as well as the OS identity. Needs that platform's fonts installed — see below. Cannot be combined with host inheritance. |
 | `locale`, `timezone` | derived from the seed | Override just these. |
-| `geoip` | `true` | Derive locale and timezone from the proxy's exit IP. |
+| `geoip` | `true` | Derive locale and timezone from the proxy's exit IP. A failed lookup currently warns and falls back to `en-US`/`UTC` rather than raising — a known defect in this package; pass `locale` and `timezone` explicitly if that matters. |
 | `proxy` | none | `http://`, `https://`, `socks5://`; credentials are kept out of the command line. |
 | `headless` | `true` | |
 | `userDataDir` | off-the-record | Persist cookies and storage. |

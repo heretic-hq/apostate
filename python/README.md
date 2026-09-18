@@ -110,7 +110,7 @@ browser = launch(
 | `fingerprint` | a fresh random seed | Seed for the whole identity. `"host"` (also `"off"`, `"false"`, `"0"`, `"disable"`, `"disabled"`) inherits the real machine and composes nothing. |
 | `fingerprint_platform` | host's own OS on macOS and Windows; `"windows"` on Linux | `windows`, `macos` or `linux`. Selects the GPU cluster as well as the OS identity. Needs that platform's fonts installed — see below. Cannot be combined with host inheritance. |
 | `locale`, `timezone` | derived from the seed | Override just these. |
-| `geoip` | `True` | Derive locale and timezone from the proxy's exit IP. |
+| `geoip` | `True` | Derive locale and timezone from the proxy's exit IP. A failed lookup raises `GeoIPError` rather than inventing `en-US`/`UTC`. |
 | `proxy` | none | `http://`, `https://`, `socks5://`; credentials are kept out of the command line. |
 | `headless` | `True` | |
 | `user_data_dir` | off-the-record | Persist cookies and storage. |

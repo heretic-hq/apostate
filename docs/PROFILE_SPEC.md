@@ -144,10 +144,34 @@ explicit locale/timezone
   > host values
 ```
 
+**How a locale reaches the browser, and why it matters.** A resolved locale or
+timezone travels as the per-field switches `--fingerprint-locale` and
+`--fingerprint-timezone`, which is what the precedence list above already
+implies by putting per-field overrides above the seed. It used to travel as an
+`--apostate-profile` envelope carrying nothing but a locale block, and that was
+a bug rather than a style: `InstallComposedProfile()` returns early whenever
+`--apostate-profile` is present, and `base/apostate/profile.cc` leaves absent
+fields absent by design, so an envelope with only a locale in it meant
+composition never ran. Eleven of twelve axes silently inherited the host and
+`--fingerprint` was ignored. Since `geoip` defaults on, that was very nearly
+every launch. The user-visible point is the one to keep: asking for a locale or
+a timezone no longer costs you the composed fingerprint.
+
+`--apostate-profile` is now reserved for a profile the caller authored. Host
+mode still uses the envelope, because host mode composes nothing either way.
+
 With `geoip: true`, the lookup is performed through the configured proxy, or
 through the direct network when no proxy is configured. The result is fixed for
-the process before Chromium starts. A timeout or lookup failure is reported as
-an error or warning and must not silently invent `UTC` or `en-US`.
+the process before Chromium starts.
+
+A timeout or lookup failure should be reported rather than papered over, and the
+two packages do not currently agree on that. Python raises `GeoIPError` or
+`GeoIPUnavailableError`. Node warns on the console and continues with
+`{locale: "en-US", timezone: "UTC"}`, and has a second unconditional fallback to
+the same pair below it, so a Node caller whose lookup fails gets an invented
+American locale rather than an error. That is a defect in the Node adapter and
+not the intended contract; it is recorded here rather than described as the
+guarantee it is not.
 
 The Node adapter performs the built-in GeoIP request through the configured
 HTTP(S), SOCKS4, or SOCKS5 proxy. Chromium authentication is a separate native
@@ -211,17 +235,23 @@ restate it:
 | Python | `apostate.DEFAULT_PERSONA_BY_HOST` | `apostate.default_persona_for_host(host_token)` |
 | Node | `DEFAULT_PERSONA_BY_HOST` | `defaultPersonaForHost(hostToken)` |
 
-`host_persona()` in the Python package reports the **host's** platform, which is
-what it is for and what it still does. What changed is the assumption that the
-host's platform and the claimed one are the same: they are not, on a Linux host.
-Call `default_persona_for_host(host_persona())` for the claimed one. The Node
-package keeps its host lookup internal and exposes the same answer through
-`normalizePersona()`, which falls back to the host when given nothing.
+`host_persona()` in Python and `hostPersona()` in Node report the **host's**
+platform, which is what they are for and what they still do. What changed is the
+assumption that the host's platform and the claimed one are the same: they are
+not, on a Linux host. Compose the two for the claimed persona —
+`default_persona_for_host(host_persona())`, or `defaultPersonaForHost(hostPersona())`.
+`normalizePersona(undefined)` returns `null` and is not a host lookup; it
+matches Python's `normalize_platform(None)`.
 
-The launch path needs neither: it emits `--fingerprint-platform` only when the
-caller actually specified a persona, so a default launch leaves the choice to
-the browser and the compositor is the single source of truth. The resolver path
-has no browser to ask, since it composes locally, so it applies the table
+Either way, the resolved platform is reported rather than left to be inferred:
+`ProfileResolution.platform` in Python and the `platform` key of
+`resolveProfile()`'s result in Node both carry it, alongside the effective
+`locale` and `timezone`.
+
+The launch path needs none of this: it emits `--fingerprint-platform` only when
+the caller actually specified a persona, so a default launch leaves the choice
+to the browser and the compositor is the single source of truth. The resolver
+path has no browser to ask, since it composes locally, so it applies the table
 itself. One exception, and it is correct: under `fingerprint="host"` the
 reported platform is the host's, because host inheritance composes nothing and
 the host is what the page sees.

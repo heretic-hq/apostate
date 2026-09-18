@@ -44,6 +44,7 @@ schema/capture.schema.json   Native lossless capture format
 collector/                   The measurement page. No dependencies, no build step
 server/receive.py            Local receiver; writes raw captures to disk
 derive/conform.py            Diffs one capture against another — the V3 gate
+collect-unattended.py        Takes a capture on a host with no display
 ```
 
 ## Taking a capture
@@ -53,8 +54,9 @@ python3 capture/server/receive.py --out resources/fingerprints/raw
 ```
 
 Open the printed URL on the target device in a normal browser window and submit.
-The receiver writes `<device>-<timestamp>.json` and prints a probe summary
-including anything that failed.
+The receiver writes `<sha256 of the submitted bytes>.json`, records its
+admission decision under `admissions/`, and prints a probe summary including
+anything that failed.
 
 Then load it into the oracle:
 
@@ -74,14 +76,36 @@ which reaches the driver through the command buffer, still reports a real ANGLE
 string. So a capture taken that way describes a configuration no real user runs,
 and it silently exempts the entire GPUInfo path from whatever is being tested.
 
-For a Linux host with no display, use software rendering explicitly rather than
-disabling GL:
+A host with no display needs more care than it looks. `--headless` is not the
+answer: the receiver rejects any capture whose user agent carries a `Headless`
+marker, because a headless UA is the loudest automation signal there is. Run a
+real headed browser on a virtual display instead. `collect-unattended.py` does
+that, and handles the two host facts that otherwise make every such capture
+inadmissible:
 
 ```sh
-chrome --headless --use-gl=angle --use-angle=swiftshader \
-       --user-data-dir=<fresh> --virtual-time-budget=20000 \
-       "http://127.0.0.1:8777/?auto=1&label=<name>"
+python3 capture/collect-unattended.py --label <name> --out <dir>
 ```
+
+Under Xvfb the only GL driver is Mesa llvmpipe, so Chrome's software-rendering
+blocklist disables `webgl` and `webgpu`, `getContext('webgl')` returns null, and
+the `webgl1` and `webgl2` probes measure nothing at all — which the receiver
+rejects, correctly. `--enable-unsafe-swiftshader` permits WebGL's software
+fallback, and the probes then measure a real software backend. Prefer it to
+`--use-gl=angle --use-angle=swiftshader`: that pair replaces the GL driver, so
+on a host which does have a GPU it quietly produces a software capture from
+hardware — the `--disable-gpu` mistake in different clothes. The fallback
+opt-in changes nothing where a GPU works.
+
+The second fact is `screen.details`. It refuses to prompt mid-capture, so the
+window-management permission has to exist before the run and nobody is present
+to click Allow. The driver writes the grant into the fresh profile, under the
+old name Chrome still stores it by, `window_placement`.
+
+A capture taken this way describes SwiftShader and not the host's GPU, so the
+driver prints the renderer it measured and the two cannot be confused.
+`scripts/import-capture.py` needs `--allow-software-renderer` to admit one, and
+no anchor may claim it as hardware.
 
 `--no-sandbox` is unavoidable when running as root and is itself a deviation
 from a normal launch; prefer a non-root user where possible.
@@ -106,6 +130,12 @@ that way, after two captures of one MacBook five hours apart reported different
 Measured so far on an M4 Max, stock Chrome 152: 29/29 probes conform within a
 session, and 29/29 across separate launches five hours apart, canvas, WebGL and
 audio renders byte-identical throughout.
+
+On a display-less Linux host running SwiftShader under Xvfb, stock Chrome 152:
+39/39 probes conform across two separate unattended launches, canvas, WebGL and
+audio renders byte-identical. A software rasteriser is as deterministic as the
+hardware here, which is what makes such a host usable as a conformance runner
+even though it is useless as a hardware reference.
 
 ## Format
 

@@ -196,7 +196,10 @@ windows_sdk_requirements() {
 windows_sdk_has_symbol() {
   local dir="$1" symbol="$2"
   [ -d "$dir" ] || return 2
-  grep -rlF --include='*.h' -- "$symbol" "$dir" >/dev/null 2>&1
+  # -q, not -l: the SDK's um directory holds a few thousand headers, this runs
+  # on the critical path of every Windows job, and the common case is a match.
+  # -q stops at the first one instead of listing them all.
+  grep -rqF --include='*.h' -- "$symbol" "$dir" 2>/dev/null
 }
 
 # A file's FileVersion, as a bare dotted quad. Windows stamps a trailing

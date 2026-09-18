@@ -346,6 +346,13 @@ without calling `glGetString`. WebGL reaches the driver through the command
 buffer and keeps reporting a real ANGLE string, so the two contradict each
 other. This has already produced a wrong result here once.
 
+Composition does read it, which is the one reason to know about it: it states
+the software backend and outranks `--use-angle`, since naming a hardware backend
+does not bring hardware back. So it is the deliberate way onto the GPU-less
+path on a host the render-node check cannot answer — Windows and macOS. Reach
+for it only for that, and expect the `Disabled` contradiction above to come with
+it.
+
 `--no-sandbox` is a deviation from a normal launch in its own right. It is
 unavoidable as root, so run as a normal user instead.
 

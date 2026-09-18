@@ -276,14 +276,16 @@ presenting as stock headless Chrome is the thing you actually want.
 GPU-less machine under it reports its own SwiftShader with the raised limits
 described above. Host means host.
 
-What a served GPU identity still does not get on such a host is anything the
-backend cannot honour. The extension list remains the intersection of what the
-profile claims and what the host's GL stack really implements, for the reason in
-**One WebGL extension cannot be served across backends** below, and a limit the
-backend would refuse to allocate is still clamped to what it will. The headline
-limit needs no reduction in the common case: `MAX_TEXTURE_SIZE` under
-SwiftShader is 16384, the same value this Mac's real Metal backend reports.
-`--fingerprint-explain` names any clamp or omission that does apply.
+Two things about a served identity on such a host are in flux as this is
+written, and both are described below rather than here: what happens to a
+claimed limit the backend would refuse, and what happens to a claimed extension
+the backend does not implement. Today both are reduced to what the host can
+honour, and the reduction is not hypothetical on the common path — the default
+GPU-less persona claims `MAX_TEXTURE_SIZE` 32768 and a software backend does not
+serve that. Patches that close the gap by raising the backend instead of
+lowering the claim are being written and are in no binary.
+`--fingerprint-explain` names every clamp and omission that applies to a launch,
+which is the value to read rather than this page.
 
 `--fingerprint-anchor` deliberately skips the backend filter, because pinning is
 an explicit request and refusing it is worse than honouring it. A pinned
@@ -424,30 +426,46 @@ larger than the host's panel is refused rather than served.
 Options the host cannot serve are dropped before the seed draws, so a small host
 draws from a smaller set of identities than a large one.
 
-## One WebGL extension cannot be served across backends
+## The extension list and the limit clamp are host-relative
 
 A profile whose GPU cluster matches the host's backend is served exactly.
 Measured through the shipped binary on an Apple M4 Max running real ANGLE/Metal,
 the `macos-metal-apple` anchor claimed 39 WebGL1 and 36 WebGL2 extensions and
 delivered all of them, with nothing missing and nothing extra.
 
-A cluster pinned from another backend is short by exactly one name,
-`OVR_multiview2` on WebGL2. On the same host, `windows-d3d11-intel` delivered 35
+A cluster pinned from another backend, on that same Metal host, is short by
+exactly one name: `OVR_multiview2` on WebGL2. `windows-d3d11-intel` delivered 35
 and 31 against a claimed 35 and 32, and `linux-vulkan-nvidia` delivered 34 and
-28 against 34 and 29. That is the whole extension gap: one name, not a list.
+28 against 34 and 29.
 
-Removal is safe and addition is not, which is why it works this way. A page
-calls `getExtension()` and then calls methods on the object it gets back, so one
-extension claimed but not implemented fails at first use. That is a functional
-break rather than a tell, and it is the one place the browser does not serve
-what the profile claims.
+On a software backend the gap is larger, and it is bounded and known rather than
+unknown. A SwiftShader host offers 36 WebGL1 and 30 WebGL2 extensions, measured
+live on the shipped artifact and byte-identical to the corpus capture taken on
+Linux. Against that list, what each anchor claims and cannot currently get is:
 
-The same filter applies on a host with no GPU, where the profile's GPU identity
-is served over a software backend. Which extension names a software backend
-implements has not been measured here, so treat the size of that gap as unknown
-rather than as the one name above: read `getSupportedExtensions()` from a page on
-the host you intend to deploy on, and compare it against what
-`--fingerprint-explain` says the profile claimed.
+| Claimed cluster | WebGL1 names absent | WebGL2 names absent |
+| --- | --- | --- |
+| `linux-vulkan-nvidia` | 1: `WEBGL_blend_func_extended` | 3: `EXT_render_snorm`, `EXT_texture_norm16`, `WEBGL_blend_func_extended` |
+| `windows-d3d11-intel`, `windows-d3d11-nvidia` | 2: `KHR_parallel_shader_compile`, `WEBGL_blend_func_extended` | 5: `EXT_render_snorm`, `EXT_texture_norm16`, `KHR_parallel_shader_compile`, `WEBGL_blend_func_extended`, `WEBGL_provoking_vertex` |
+| `macos-metal-apple` | 3: `KHR_parallel_shader_compile`, `WEBGL_blend_func_extended`, `WEBGL_compressed_texture_pvrtc` | 7: the five above plus `WEBGL_compressed_texture_pvrtc` and `WEBGL_render_shared_exponent` |
+
+Those counts are computed against the stock-SwiftShader capture. This fork's own
+Linux software path additionally offers `KHR_parallel_shader_compile`, so on a
+Linux build the gap is one name smaller for the three clusters that claim it.
+
+The reason it worked subtractively up to now is that removal is safe and
+addition is not by default: a page calls `getExtension()` and then calls methods
+on the object it gets back, so a name advertised without an implementation
+behind it fails at first use — a functional break rather than a tell.
+
+That is a reason to be careful about addition, not a reason to accept the gap,
+and the gap is no longer being accepted. Patches that serve the claimed
+extension set and the claimed limits on a software backend, by giving the
+backend the capability rather than by lowering the claim, are being written.
+Nothing in that direction is in a binary yet, so what is described in the table
+above is what a launch does today. Read `getSupportedExtensions()` from a page on
+the host you deploy on, and compare it against what `--fingerprint-explain` says
+the profile claimed, rather than trusting either state of this page.
 
 ## Network quality and battery are profile values
 

@@ -276,7 +276,11 @@ the user-facing version of this list.
    display, fonts, audio stack or codec hardware.
 3. Native capability is a ceiling. WebGL and WebGPU limits cannot exceed the
    active backend, extensions and features cannot be added, and a media claim
-   cannot create a decoder or provider that is absent.
+   cannot create a decoder or provider that is absent. The first two clauses are
+   under change for a host with no hardware backend, where the ceiling is the
+   software rasteriser's own and is being raised to meet the claim instead of
+   reducing the claim to meet it. [docs/LIMITATIONS.md](LIMITATIONS.md) has the
+   measured gap and the status; nothing in that direction is in a binary yet.
 4. Capacity only ever goes down. A profile may claim fewer cores than the host
    has, never more, and the same holds for memory, GPU limits, codec support,
    font families, speech voices, and display area against window bounds. A page

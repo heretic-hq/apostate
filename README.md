@@ -119,10 +119,10 @@ render *timing* and per-pixel output, which is a property of the rasteriser
 rather than of the identity.
 
 [docs/LIMITATIONS.md](docs/LIMITATIONS.md) has the measured timing numbers, the
-one capability that stays bound to the host, and the status of this behaviour: it
-is new in this release and is on that page's list of things written but not yet
-run, so read `getSupportedExtensions()` and the renderer string from a page on
-your own host before relying on either.
+exact extension names a software backend does not currently serve, and the
+status of this behaviour: it is new in this release and is on that page's list of
+things written but not yet run, so read `getSupportedExtensions()` and the
+renderer string from a page on your own host before relying on either.
 
 Both packages default to headless, so the `launch()` examples above run
 unchanged on such a host.

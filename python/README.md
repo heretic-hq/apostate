@@ -149,9 +149,9 @@ environment of its own, so the driver hands the browser yours, and exporting
 
 What a page can still tell on such a host is render timing and per-pixel output,
 which come from the rasteriser rather than from the identity. The measured
-numbers, the one capability that stays host-bound, and the status of the served
-GPU identity — new in this release, and on that page's list of behaviours
-written but not yet run — are in
+numbers, the exact extension names a software backend does not currently serve,
+and the status of the served GPU identity — new in this release, and on that
+page's list of behaviours written but not yet run — are in
 [docs/LIMITATIONS.md](https://github.com/heretic-hq/apostate/blob/main/docs/LIMITATIONS.md).
 
 ### Fonts for a cross-platform persona

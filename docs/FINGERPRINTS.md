@@ -83,6 +83,12 @@ voice to speak. A claim below host capability survives every one of those
 probes; a claim above it fails the first. `scripts/check-servable.py` is the
 gate.
 
+The GPU-limit half of that rule is under change on a host with no hardware
+backend. There the ceiling is the software rasteriser's own rather than a
+device's, and it is being raised to meet the claim instead of the claim being
+reduced to meet it. [docs/LIMITATIONS.md](LIMITATIONS.md) has the measured gap
+and the status.
+
 This is the specific respect in which clamping beats spoofing. Reporting the
 host's true 14 cores and 32GB identifies one model of laptop. Reporting a
 fabricated 20 cores contradicts any timing probe. Reporting 8 cores, a real

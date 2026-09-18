@@ -185,10 +185,17 @@ is a headless server with no GPU, and `ANGLE (Google, Vulkan 1.3.0 (SwiftShader
 Device (LLVM ...)))` sorts such a launch out of the ordinary population on a
 substring match, while the timing gap it was supposed to stay coherent with
 costs a page a benchmark to measure. Trading a free signal for an expensive one
-is the wrong direction. Rule 6 is not weakened by this, because a renderer
-string is an identity rather than a capacity: what the host cannot honour — an
-extension it does not implement, a limit it would refuse to allocate — is still
-subtracted rather than claimed.
+is the wrong direction.
+
+Rule 6 is not weakened by this. A renderer string is an identity rather than a
+capacity, and rule 6 is about capacity. What the host cannot honour is a
+separate question from what it is called, and that one is open: a claimed
+extension the backend does not implement, and a claimed limit it would refuse to
+allocate, are reduced to the host today, and patches that instead give the
+backend the capability are being written. Rule 6 governs the answer either way,
+because whatever a launch ends up advertising has to survive being exercised — a
+page allocates at the advertised limit and calls methods on the extension object
+it is handed.
 
 ## 10. Verification
 

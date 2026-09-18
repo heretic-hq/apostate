@@ -23,8 +23,11 @@ until you have seen them work.
   family the font list says is absent
 - Network information and battery state coming from the profile
 - Capture devices the profile claims delivering frames and audio
-- On a host with no usable GPU: the profile's own GPU identity being served
-  there, instead of the host's software rasteriser
+- The whole of the GPU identity change, which is three patches: the claimed
+  platform selecting the capability cluster on every host and the host-dependent
+  default persona (`0102`), the claimed WebGL limits being served on a backend
+  that enforces nothing (`0103`), and the five claimed extensions being served
+  from Blink's own implementation classes (`0104`)
 - The Web Share cancellation message
 - V8's heap ceiling following the profile's memory figure
 - The remote-debugging endpoint refusing what a page sends it
@@ -37,45 +40,87 @@ you expect. Then read that surface the way a page would, from a page, and check
 the value. Where a behaviour above is a safety property rather than a
 convenience, WebRTC in particular, assume it has not taken effect.
 
-## The GPU follows the host's backend, where the host has one
+## The persona chooses the GPU, and the persona is a real choice
 
-`--fingerprint-platform` changes OS identity, client hints, fonts, voices,
-locale, screen geometry and hardware buckets. On a host with a working hardware
-graphics backend it does not change the graphics stack.
+`--fingerprint-platform` sets OS identity, client hints, fonts, voices, locale,
+screen geometry, hardware buckets — and the GPU. The claimed operating system
+selects the capability cluster, on every host, whatever the host's own graphics
+stack is running.
 
-WebGL and WebGPU capability tables are produced by one piece of silicon running
-one driver through one backend. The same NVIDIA card returns a different
-capability table through Direct3D 11 than through Vulkan, and Apple Metal
-differs from both. Those tables cannot be moved without contradicting each
-other, so where the host has hardware the GPU capability cluster and its
-renderer strings are selected from what that hardware can actually serve.
+That works because a capability cluster belongs to a backend rather than to a
+machine, and the catalogue holds exactly one backend per platform. Choosing the
+persona therefore determines the backend, and the host has nothing left to
+decide:
 
-The practical consequence:
+| Persona | Backend | Anchors drawn | Identities |
+| --- | --- | --- | --- |
+| `windows` | ANGLE/D3D11 | `windows-d3d11-intel-79dfeb5b4f99`, `windows-d3d11-nvidia-0947761dfbe9` | 15: six Intel UHD 630 device ids and nine NVIDIA boards |
+| `macos` | ANGLE/Metal | `macos-metal-apple-850a91233555` | 12: M1 through M4 Max |
+| `linux` | ANGLE/Vulkan | `linux-vulkan-nvidia-adf287b8f0ee` | 11: RTX 3090 through RTX PRO 4000 Blackwell |
 
-| Host | Persona | GPU presented |
-| --- | --- | --- |
-| Windows + NVIDIA | Windows | Direct3D 11 NVIDIA, coherent |
-| Linux + NVIDIA | Linux | Vulkan NVIDIA, coherent |
-| Linux + NVIDIA | Windows | Vulkan NVIDIA, and a real Windows Chrome would report Direct3D 11 |
-| macOS Apple Silicon | Windows | Apple Metal, which no Windows machine has |
-| Linux, no GPU | Linux | Vulkan NVIDIA, from the profile |
-| Linux, no GPU | Windows | Direct3D 11, from the profile |
-| Linux, no GPU | macOS | Apple Metal, from the profile |
+The host column is gone from that table because the host no longer appears in
+the answer. A Windows persona presents a Direct3D 11 cluster on a Windows
+machine, on a Mac, on a Linux workstation with an NVIDIA card and on a Linux
+server with no graphics device at all.
 
-The rule behind those last three rows is that the host's backend constrains the
-cluster only where the host has a backend. A machine with no graphics device has
-no hardware for a cluster to be coherent *with*, so there the claimed platform
-picks the cluster and the profile's GPU identity is served as it stands. That is
-the primary deployment rather than the exotic one — see **Software rendering is
-measurable** below, and the headless-server section of the
-[README](../README.md#headless-linux-servers).
+### The default persona depends on the host
 
-So a Windows fingerprint that holds up under GPU inspection wants either a
-Windows host or no graphics device at all. What it does not want is a Mac:
-presenting a Windows persona from Apple Silicon gets you the OS identity, the
-client hints, the screen geometry and the hardware buckets, and leaves an Apple
-GPU underneath them, because that Metal backend's capability table is real and
-cannot be moved. The report says so when it happens.
+A launch that does not pass `--fingerprint-platform` gets:
+
+| Host | Default persona |
+| --- | --- |
+| macOS | `macos` |
+| Windows | `windows` |
+| Linux | `windows` |
+
+The first two are the host's own OS, which is the safe case: a macOS host can
+natively serve any macOS renderer the catalogue offers, and the same for
+Windows. The third is deliberately not the host's own OS, and it is the one to
+understand before deploying.
+
+Windows-on-Linux is chosen as the Linux default because it is the least bad
+cross-OS pairing and because it is what most deployments want. Least bad, not
+free: what it costs is mostly a font question, and fonts are the one part the
+operator can fix. See **Fonts are yours to install** below and
+[docs/FONTS.md](FONTS.md), because on a Linux host this applies to a default
+launch rather than to an opt-in.
+
+`--fingerprint-platform=linux` is the opt-out. It composes the host's own OS on
+a Linux machine and draws the Vulkan cluster.
+
+### Cross-OS is a risk, not a free move
+
+Serving a persona's GPU does not make every claimed OS equally safe. What the
+persona controls is everything composed. What it does not control is everything
+a fork cannot reach: which fonts are actually installed, and the kernel's own
+timing behaviour. Those stay the host's.
+
+So, in rough order of exposure: the host's own OS is safest; Windows on Linux is
+the documented default and needs its fonts; macOS on Linux is the riskier
+pairing, because the macOS core font set is 184 families and a Mac cannot be
+claimed convincingly without them. A launch is given the pairing it asks for
+either way, with the limitation named in `--fingerprint-explain` rather than
+refused. On a Windows persona over a Linux host the report prints:
+
+```text
+  - the persona is windows on a linux host, which is this project's default
+    pairing there and its least bad cross-OS one: the GPU cluster follows the
+    persona, but the Windows font set does not install itself, and a Windows
+    persona missing Windows faces is measurable in text metrics -- install the
+    full set (docs/FONTS.md) or pass --fingerprint-platform=linux to compose
+    the host's own OS
+```
+
+Any other cross-OS pairing gets the general form, naming installed fonts and
+kernel timing as what stays the host's. Neither is a gate and neither is
+page-visible.
+
+### What the host still decides
+
+One thing, and it is the subject of **Software rendering is measurable** below:
+the rasteriser that actually draws. A claimed GPU's throughput and its rendered
+bytes come from the host's backend, not from the claim, and no selection change
+touches that.
 
 ## Fonts are yours to install
 
@@ -172,9 +217,14 @@ No source change closes this. The only ways to close a timing gap are to make
 software rendering fast or to slow real hardware down, and a deliberate timing
 adjustment would itself be a new observable. What the fork does close on the
 software path is the limit values, the extension list and the identity: the
-profile's GPU strings are served there exactly as they are served on a machine
-with a card. What it closes nothing about is render timing and per-pixel output,
-and that is a property of the two rasterisers rather than of this fork.
+backend a host happens to be running does not restrict which identity the
+profile may serve. That is a narrower claim than it sounds, and it is worth
+keeping narrow — it does not say any identity is safe on any host. Which
+operating system the profile claims is a separate choice with its own
+trade-offs, set out in **The persona chooses the GPU, and the persona is a real
+choice** above. What the fork closes nothing about is render timing and
+per-pixel output, and that is a property of the two rasterisers rather than of
+this fork.
 
 So the residual is a throughput and pixel question rather than a string
 question. A site that times WebGL fill rate, or hashes a WebGL readback against
@@ -233,27 +283,28 @@ is. That build reports the raised limits above and, on Linux only, also offers
 are enumerable differences from a stock software-rendering browser. Software
 rendering on macOS and Windows stays stock in that respect, because the
 extension's feature condition is Linux-only. The differences disappear once a
-profile is served, because the profile's limits clamp down to the claimed device
-and its extension list removes anything the claim does not contain.
+profile is served, because the profile then decides both the limits and the
+extension list: see the subsections below.
 
-### A GPU-less host serves the profile's GPU identity
+### A GPU-less host serves a hardware GPU identity
 
-This one has not been built yet. It is a decision the tree carries and no binary
-has run, so read the rest of this subsection as what the tree will do and check
-it yourself before relying on it.
+This has not been built. Patches `0102`, `0103` and `0104` are in the series and
+no binary has been produced from them, so read the rest of this subsection as
+what the tree will do and check it yourself before relying on it.
 
 It also replaces an earlier version of this subsection, which said a GPU-less
 host would be given a measured software-rasteriser cluster and would "look like
 ordinary headless Chrome". That behaviour was withdrawn before it ever shipped,
-for the reason three paragraphs down.
+for the reason two paragraphs down.
 
-A host with no graphics device serves the profile's GPU identity — the same
-identity a host with a card would serve. On a Linux server with no usable GPU a
-seeded launch composes the whole profile, and the graphics surfaces report the
-drawn anchor's renderer and vendor strings: under the default Linux persona, one
-of the eleven NVIDIA identities `linux-vulkan-nvidia-adf287b8f0ee` offers,
-rotated by seed. Timezone, locale, Accept-Language, fonts, screen geometry, core
-count, memory, media topology and voices compose as normal beside it.
+A host with no graphics device draws a hardware anchor of the claimed platform.
+On a Linux server with no usable GPU a seeded launch composes the whole profile,
+and the graphics surfaces report the drawn anchor's renderer and vendor strings.
+Under that host's default persona, which is Windows, that means one of the
+fifteen Direct3D 11 identities the two Windows anchors offer, rotated by seed;
+`--fingerprint-platform=linux` gets the eleven Vulkan NVIDIA ones instead.
+Timezone, locale, Accept-Language, fonts, screen geometry, core count, memory,
+media topology and voices compose as normal beside it.
 
 The alternative was to report the host's own software rasteriser, and it is
 worse on the axis that decides the outcome. `ANGLE (Google, Vulkan 1.3.0
@@ -262,8 +313,8 @@ field where no consumer machine does, and it is byte-identical on every host
 that reports it, so one substring match sorts the launch into a population no
 ordinary user is in. Getting the same answer out of a hardware identity running
 over a software backend costs a page real work: time a fill, hash a readback,
-compare against a reference. One of those is a string compare and the other is a
-benchmark, and the difference between them is the whole reason for this
+allocate at the reported maximum. One of those is a string compare and the
+others are probes, and the difference between them is the whole reason for this
 decision.
 
 `linux-swiftshader-google-6922d61bab83` is therefore not in the drawn candidate
@@ -276,21 +327,62 @@ presenting as stock headless Chrome is the thing you actually want.
 GPU-less machine under it reports its own SwiftShader with the raised limits
 described above. Host means host.
 
-Two things about a served identity on such a host are in flux as this is
-written, and both are described below rather than here: what happens to a
-claimed limit the backend would refuse, and what happens to a claimed extension
-the backend does not implement. Today both are reduced to what the host can
-honour, and the reduction is not hypothetical on the common path — the default
-GPU-less persona claims `MAX_TEXTURE_SIZE` 32768 and a software backend does not
-serve that. Patches that close the gap by raising the backend instead of
-lowering the claim are being written and are in no binary.
-`--fingerprint-explain` names every clamp and omission that applies to a launch,
-which is the value to read rather than this page.
+### Allocating at the reported maximum fails on a software backend
 
-`--fingerprint-anchor` deliberately skips the backend filter, because pinning is
-an explicit request and refusing it is worse than honouring it. A pinned
-cross-backend anchor records a limitation and serves a shorter extension list
-than the card it names.
+This is the residual the decision above leaves, it is measured, and it is the
+one item on this page that a page can turn into a positive detection rather than
+an inference.
+
+On a software backend the reported WebGL limits are the claimed cluster's, and
+the claimed maximum is not usable. Measured through the shipped
+152.0.7977.83 artifact, allocating with `texStorage2D`, attaching, checking
+framebuffer completeness, clearing to green and reading a pixel back:
+
+| Backend | Reports `MAX_TEXTURE_SIZE` | 8192 | 16384 | 32768 |
+| --- | --- | --- | --- | --- |
+| ANGLE/SwiftShader | 16384 | complete, reads green | `FRAMEBUFFER_UNSUPPORTED`, reads black | same |
+| ANGLE/Metal | 16384 | complete, reads green | complete, reads green | `GL_INVALID_VALUE` |
+
+Read the shape rather than the numbers. On hardware the reported maximum is
+usable and only sizes above it fail, which is what a real device does. On the
+software backend the largest size that actually works is 8192, half what is
+reported, and the failure is quiet: `texStorage2D` raises no GL error at all, the
+framebuffer reports unsupported, and a texture cleared to green reads back
+black. A page that allocates at the reported maximum and checks the pixel it
+gets can tell the difference in one probe.
+
+SwiftShader does not enforce any of these numbers. A 3D texture at eight times
+the reported `MAX_3D_TEXTURE_SIZE` is accepted without an error, and multisample
+renderbuffers at 4, 8 and 16 samples all succeed while granting 0. The reported
+figures are soft constants there, not ceilings, which is what makes serving a
+claim possible and what makes the claim unbacked at its own maximum.
+
+Two things about the scope of this. It is not a regression from serving a
+hardware identity: patch `0027` raised the software rasteriser's own
+`MAX_TEXTURE_SIZE` from 8192 to 16384 by editing `OUTLINE_RESOLUTION`,
+seventy-five patches before any of this work, and that is what put the reported
+figure above the usable one. That patch's own header claims a 16384 texture
+allocates and 32768 is correctly refused; the measurement above contradicts the
+first half, so read the patch header for the change and this page for the
+behaviour. And it is not unique to this fork: the product this one is measured
+against reports 16384 on a software backend and fails at 16384 in the same way,
+while stock Chrome reports 8192 and fails only above it. Stock is coherent here
+because it reports what it can do.
+
+`MAX_RENDERBUFFER_SIZE` is not measured. The renderbuffer arm of the probe
+reported `FRAMEBUFFER_UNSUPPORTED` at 8192 as well as above it, so it does not
+discriminate and no number for it belongs here. `MAX_VIEWPORT_DIMS` shows no
+residual: SwiftShader reports 32767 by 32767 and a viewport at 32767 raises no
+error.
+
+### Pinning across platforms
+
+`--fingerprint-anchor` is the one way to get a cluster from a platform the
+persona does not claim, and it is honoured rather than refused, because a pin is
+an explicit request. The launch records that it happened. Nothing else produces
+that combination any more: a drawn launch takes its anchor from the claimed
+platform, so the persona and the cluster always agree unless a pin makes them
+disagree.
 
 ## Capabilities that depend on the machine, not the profile
 
@@ -426,46 +518,76 @@ larger than the host's panel is refused rather than served.
 Options the host cannot serve are dropped before the seed draws, so a small host
 draws from a smaller set of identities than a large one.
 
-## The extension list and the limit clamp are host-relative
+WebGL limits on a software backend are the exception, and the next section is
+about it. A backend that enforces nothing about the numbers it reports is not a
+capacity the way core count is, so there the claim is served upward instead of
+being clamped down. The price of that is a claimed maximum that cannot be
+allocated at, which is stated in full under **Allocating at the reported maximum
+fails on a software backend** above.
+
+## The extension list, and the five names that are served
 
 A profile whose GPU cluster matches the host's backend is served exactly.
 Measured through the shipped binary on an Apple M4 Max running real ANGLE/Metal,
 the `macos-metal-apple` anchor claimed 39 WebGL1 and 36 WebGL2 extensions and
 delivered all of them, with nothing missing and nothing extra.
 
-A cluster pinned from another backend, on that same Metal host, is short by
-exactly one name: `OVR_multiview2` on WebGL2. `windows-d3d11-intel` delivered 35
-and 31 against a claimed 35 and 32, and `linux-vulkan-nvidia` delivered 34 and
-28 against 34 and 29.
+Everywhere else there is a gap between what a cluster claims and what the host's
+GL stack implements, and it is measured. A SwiftShader host — the deployment
+target — offers 36 WebGL1 and 30 WebGL2 names, byte-identical between this
+project's macOS SwiftShader and the Linux SwiftShader capture in the corpus.
+Against that list:
 
-On a software backend the gap is larger, and it is bounded and known rather than
-unknown. A SwiftShader host offers 36 WebGL1 and 30 WebGL2 extensions, measured
-live on the shipped artifact and byte-identical to the corpus capture taken on
-Linux. Against that list, what each anchor claims and cannot currently get is:
-
-| Claimed cluster | WebGL1 names absent | WebGL2 names absent |
+| Claimed cluster | WebGL1 short by | WebGL2 short by |
 | --- | --- | --- |
-| `linux-vulkan-nvidia` | 1: `WEBGL_blend_func_extended` | 3: `EXT_render_snorm`, `EXT_texture_norm16`, `WEBGL_blend_func_extended` |
-| `windows-d3d11-intel`, `windows-d3d11-nvidia` | 2: `KHR_parallel_shader_compile`, `WEBGL_blend_func_extended` | 5: `EXT_render_snorm`, `EXT_texture_norm16`, `KHR_parallel_shader_compile`, `WEBGL_blend_func_extended`, `WEBGL_provoking_vertex` |
-| `macos-metal-apple` | 3: `KHR_parallel_shader_compile`, `WEBGL_blend_func_extended`, `WEBGL_compressed_texture_pvrtc` | 7: the five above plus `WEBGL_compressed_texture_pvrtc` and `WEBGL_render_shared_exponent` |
+| `linux-vulkan-nvidia` | 1 | 3 |
+| `windows-d3d11-intel`, `windows-d3d11-nvidia` | 2 | 5 |
+| `macos-metal-apple` | 3 | 7 |
 
-Those counts are computed against the stock-SwiftShader capture. This fork's own
-Linux software path additionally offers `KHR_parallel_shader_compile`, so on a
-Linux build the gap is one name smaller for the three clusters that claim it.
+The names involved are seven in total: `EXT_render_snorm`,
+`EXT_texture_norm16`, `WEBGL_blend_func_extended`, `WEBGL_render_shared_exponent`,
+`WEBGL_compressed_texture_pvrtc`, `WEBGL_provoking_vertex` and
+`KHR_parallel_shader_compile`.
 
-The reason it worked subtractively up to now is that removal is safe and
-addition is not by default: a page calls `getExtension()` and then calls methods
-on the object it gets back, so a name advertised without an implementation
-behind it fails at first use — a functional break rather than a tell.
+Five of those seven are served rather than dropped — every one whose extension
+object exposes constants, internal formats or blend factors and no methods.
+Blink has a complete implementation class for each; the only thing that was
+refusing them on a software backend is a driver-support lookup. So a page
+enumerates the list, reads the constants and hashes the result, and all of that
+succeeds.
 
-That is a reason to be careful about addition, not a reason to accept the gap,
-and the gap is no longer being accepted. Patches that serve the claimed
-extension set and the claimed limits on a software backend, by giving the
-backend the capability rather than by lowering the claim, are being written.
-Nothing in that direction is in a binary yet, so what is described in the table
-above is what a launch does today. Read `getSupportedExtensions()` from a page on
-the host you deploy on, and compare it against what `--fingerprint-explain` says
-the profile claimed, rather than trusting either state of this page.
+The remaining two of the seven are not served, and two further names that could
+have been added are not either. Each for a reason rather than a size limit:
+
+- `WEBGL_provoking_vertex`, and `OVR_multiview2` outside this list, carry
+  methods. A page calls `getExtension()` and then calls methods on the object it
+  gets back, so a name advertised without an implementation behind it fails at
+  first use — a functional break rather than a tell.
+- `EXT_disjoint_timer_query_webgl2` carries methods too, and serving it would be
+  actively self-defeating: a working GPU timer on a software rasteriser hands a
+  page the throughput ratio directly, and that ratio is the one GPU
+  contradiction no string can cover.
+- `KHR_parallel_shader_compile` has no methods, but its `COMPLETION_STATUS_KHR`
+  is read through `getProgramParameter`, and a page polling it would never see a
+  program finish. It is also unnecessary on the deployment target, where patch
+  `0052` enables it natively on Linux SwiftShader — which is why the gap above
+  is one name smaller on a Linux build for the three clusters that claim it.
+
+The residual after that is narrow and worth stating precisely: a page that
+*renders through* one of the five served names fails where a real device would
+not. An R16 texture on a stack without `GL_EXT_texture_norm16` raises
+`GL_INVALID_ENUM`. Every detector reads the extension list; almost none renders
+through a norm16 format.
+
+The removal direction is unchanged and still subtractive. A profile that does
+not claim a name the host has still loses it, which is what keeps
+`WEBGL_compressed_texture_astc`, `_etc` and `_etc1` off a Windows persona. An
+empty profile list still disables both directions.
+
+All of this is patch `0104`, which is in the series, is compile-unverified and is
+in no binary. Read `getSupportedExtensions()` from a page on the host you deploy
+on and compare it against what `--fingerprint-explain` says the profile claimed,
+rather than trusting this page.
 
 ## Network quality and battery are profile values
 
@@ -746,10 +868,11 @@ cross-platform numbers was taken between two software rasterisers, so how much
 of the difference is the operating system and how much is the test environment
 is not known. Settling it needs a Linux host with a discrete GPU and a capture
 from a Windows machine with the same GPU. Until then, treat a cross-OS WebGL
-claim as untested rather than verified. A host with no graphics device makes
-that case ordinary rather than exotic, because there the persona picks the
-cluster: a Windows persona on a GPU-less Linux server presents a Direct3D 11
-cluster, and how that composes is exactly what has not been measured.
+claim as untested rather than verified. That case is now the ordinary one rather
+than the exotic one, because the persona picks the cluster on every host: a
+Windows persona on a Linux server presents a Direct3D 11 cluster, and how that
+composes against a real Windows machine is exactly what has not been measured.
+It is the largest unmeasured thing behind the current default.
 
 **Three GPU clusters were measured on another Chromium.**
 `windows-d3d11-nvidia-0947761dfbe9` was captured on 153.0.8010.37, and

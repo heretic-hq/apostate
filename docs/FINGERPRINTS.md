@@ -83,11 +83,12 @@ voice to speak. A claim below host capability survives every one of those
 probes; a claim above it fails the first. `scripts/check-servable.py` is the
 gate.
 
-The GPU-limit half of that rule is under change on a host with no hardware
-backend. There the ceiling is the software rasteriser's own rather than a
-device's, and it is being raised to meet the claim instead of the claim being
-reduced to meet it. [docs/LIMITATIONS.md](LIMITATIONS.md) has the measured gap
-and the status.
+GPU limits are the exception, and it is a deliberate one. On a backend that
+enforces nothing about the numbers it reports — a software rasteriser — the
+claim is served upward rather than clamped down, because there the reported
+figure is a soft constant and not a ceiling. The price is a claimed maximum that
+cannot be allocated at, which
+[docs/LIMITATIONS.md](LIMITATIONS.md) states in full with the measurements.
 
 This is the specific respect in which clamping beats spoofing. Reporting the
 host's true 14 cores and 32GB identifies one model of laptop. Reporting a
@@ -165,22 +166,27 @@ not a GPU measurement at all. It is fonts and raster, which is why it is
 excluded from the anchor key and recorded separately so the exclusion stays
 checkable.
 
-Therefore: **`--fingerprint-platform` does not move the GPU cluster on a host
-with a graphics backend.** It changes OS identity, client hints, fonts, voices,
-locale, screen geometry and hardware buckets. Where the host has hardware, the
-GPU cluster is selected from anchors that hardware can actually serve: on a
-macOS host a Windows persona keeps an Apple GPU cluster, and that mismatch is
-reported as a limitation rather than hidden.
+Therefore: **`--fingerprint-platform` selects the GPU cluster.** It changes OS
+identity, client hints, fonts, voices, locale, screen geometry and hardware
+buckets, and the anchor draw is filtered by the claimed platform, on every host.
+The host's own graphics backend is not consulted. `windows` draws one of the two
+Direct3D 11 anchors, `macos` the Metal one, `linux` the Vulkan one, and the
+identity rotates within whichever is drawn.
 
-Where the host has no graphics backend at all, the persona does pick the
-cluster, because there is no capability table for the claim to contradict. A
-GPU-less Linux server presents its persona's cluster and serves the profile's
-GPU identity, not the host's software rasteriser.
+This is only sound because of the result above it: within a backend, silicon
+generation does not matter, so an anchor is a statement about a backend rather
+than about a machine. One backend per platform in the catalogue means the
+persona determines the backend outright, and there is nothing left for the
+host's to decide.
 
-The consequence for deployment: a coherent Windows fingerprint wants either a
-Windows host or a host with no GPU. The middle case, a Windows persona on a Mac
-or on a Linux workstation with a card, is the one that reports a mismatch, and
-that is a property of graphics drivers rather than of this codebase.
+The default persona is the host's own OS on macOS and Windows, and `windows` on
+Linux. The software anchor is excluded from every draw.
+
+The consequence for deployment is a font question rather than a GPU one. A
+coherent Windows fingerprint wants its Windows fonts installed, wherever it
+runs; what it no longer needs is Windows hardware.
+[docs/LIMITATIONS.md](LIMITATIONS.md) has the cross-OS risk ordering and the
+font prerequisite.
 
 ### Three anchors were measured on another build
 
@@ -248,7 +254,7 @@ sampling and no re-draw, so every profile is coherent by construction rather
 than by validation.
 
 ```text
-platform persona -> os release -> anchor (host backend where there is one)
+platform persona -> os release -> anchor (claimed platform)
   -> identity string -> cpu bucket -> memory bucket -> panel -> furniture
   -> font packs -> media topology -> voice table -> locale/timezone
 ```
@@ -265,7 +271,7 @@ prevalence; they are not uniform.
 | Axis | Option unit | Conditioned on | Servability limit |
 | --- | --- | --- | --- |
 | `os_release` | OS build + client-hint `platformVersion` | platform | none |
-| `anchor` | GPU capability cluster | platform, and the host backend where the host has one | a host with a hardware backend must serve the cluster; a host with no graphics device draws on the persona platform instead |
+| `anchor` | GPU capability cluster | platform | the claimed platform's anchors, minus the software one; the host's backend is not consulted |
 | `gpu_identity` | vendor + renderer string pair | anchor | must be registered on the anchor |
 | `cpu` | core-count bucket | platform, device class | `<=` host logical cores |
 | `memory` | `deviceMemory` bucket | device class | `<=` host physical memory |
@@ -362,7 +368,7 @@ One switch family, all resolved before the first renderer starts.
 | --- | --- |
 | `--fingerprint=<seed>` | Deterministic seed. An integer or any printable ASCII up to 512 bytes. |
 | `--fingerprint=host` | Compose nothing. `off`, `false`, `0`, `disable` and `disabled` are synonyms. |
-| `--fingerprint-platform=<windows\|macos\|linux>` | Platform persona. Defaults to the host's. |
+| `--fingerprint-platform=<windows\|macos\|linux>` | Platform persona, which also selects the GPU cluster. Defaults to the host's own OS on macOS and Windows, and to `windows` on Linux. |
 | `--fingerprint-anchor=<id>` | Pin the GPU anchor instead of drawing one. |
 | `--fingerprint-explain` | Write the composition report to stdout and exit. |
 | `--fingerprint-gpu-vendor`, `--fingerprint-gpu-renderer`, `--fingerprint-hardware-concurrency`, `--fingerprint-device-memory`, `--fingerprint-screen-width`, `--fingerprint-screen-height`, `--fingerprint-timezone`, `--fingerprint-locale` | Override one field each; the seed fills the rest. |
@@ -378,8 +384,9 @@ inert under it and a per-field override alongside it stops the launch.
 `--fingerprint-explain` prints, per surface, the resolved value, the layer that
 owns it (invariant, anchor, dispersion, host-inherited), the evidence class, and
 any limitation. It answers what the profile claims and what this host can
-actually serve, and on a cross-platform launch it is where the GPU-cluster
-mismatch from section 4 is reported rather than hidden.
+actually serve, and on a cross-OS launch it is where the pairing's cost is
+reported rather than hidden: which fonts the persona needs, and what stays the
+host's whatever the profile says.
 It writes to stdout, never to a page-visible API.
 
 ### Table transport

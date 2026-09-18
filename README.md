@@ -110,19 +110,33 @@ be passed:
 ./chrome --headless=new --fingerprint=12345
 ```
 
-The browser serves the profile's GPU identity whether or not the host has a
-card. On a machine with no graphics device the persona picks the capability
-cluster, so a default Linux launch presents an NVIDIA identity and
-`--fingerprint-platform=windows` presents a Direct3D 11 one. The host's own
-software rasteriser is not what a page sees. What a page can still tell is
-render *timing* and per-pixel output, which is a property of the rasteriser
-rather than of the identity.
+No GPU is needed because the claimed operating system, not the host's graphics
+stack, selects the GPU identity. A GPU-less server presents the capability
+cluster and renderer string of the OS it claims, and the host's own software
+rasteriser is not what a page sees.
 
-[docs/LIMITATIONS.md](docs/LIMITATIONS.md) has the measured timing numbers, the
-exact extension names a software backend does not currently serve, and the
-status of this behaviour: it is new in this release and is on that page's list of
-things written but not yet run, so read `getSupportedExtensions()` and the
-renderer string from a page on your own host before relying on either.
+**On a Linux host the default claimed OS is Windows, so install the Windows
+fonts.** That is the one setup step this deployment has, and it is the most
+common cause of a session being blocked. A Windows persona whose Windows faces
+are missing is a Windows machine without Arial, which is not a machine that
+exists, and text metrics measure it. The families, where to copy them from and
+how to check are in [docs/FONTS.md](docs/FONTS.md). The alternative is
+`--fingerprint-platform=linux`, which composes the host's own OS and needs
+nothing installed.
+
+Windows-on-Linux is the default because it is the least bad cross-OS pairing and
+what most deployments want, not because it is free. A macOS persona on a Linux
+host is the riskier one: the macOS core set is 184 families.
+
+What a page can still tell on such a host is render *timing* and per-pixel
+output, which come from the rasteriser rather than from the identity, and one
+allocation probe: a texture at the reported `MAX_TEXTURE_SIZE` does not
+actually allocate on a software backend.
+[docs/LIMITATIONS.md](docs/LIMITATIONS.md) has the measured numbers for all of
+it, and the status: this is new in this release and is on that page's list of
+things written but not yet run, so read the renderer string and
+`getSupportedExtensions()` from a page on your own host before relying on
+either.
 
 Both packages default to headless, so the `launch()` examples above run
 unchanged on such a host.
@@ -189,19 +203,24 @@ Nothing is stored, so the same seed gives the same device on any host that can
 serve it, which makes a seed portable in a way a copied profile directory is
 not.
 
-Add `--fingerprint-platform` to choose which operating system the identity
-presents as:
+`--fingerprint-platform` chooses which operating system the identity presents
+as, and the GPU follows it:
 
 ```sh
 ./chrome --fingerprint=12345 --fingerprint-platform=windows
 ```
 
+The default depends on the host: a macOS host claims macOS, a Windows host
+claims Windows, and a Linux host claims Windows. The first two are the host's
+own OS. The third is not, deliberately — it is the least bad cross-OS pairing
+and what most deployments want — and it is the case that needs fonts.
+
 A persona that does not match the host needs that platform's fonts installed on
 the machine, which is a one-time setup step you do yourself:
 [docs/FONTS.md](docs/FONTS.md). Running without them is a common reason a
-session gets blocked. Read [known limitations](docs/LIMITATIONS.md) too: on a
-host with a graphics device the OS identity moves and the GPU does not, and on
-a host without one the GPU moves with the persona.
+session gets blocked. Read [known limitations](docs/LIMITATIONS.md) too, because
+the persona moves the GPU identity on every host while the rasteriser that
+actually draws stays the host's.
 
 To see exactly what a launch decided and why, ask it:
 
@@ -256,7 +275,7 @@ than either signal alone.
 | --- | --- | --- |
 | `--fingerprint` | printable ASCII, up to 512 bytes | Seed for the whole identity. Same seed, same device. |
 | `--fingerprint=host` | `host` | Compose nothing and present the host's real values. |
-| `--fingerprint-platform` | `windows`, `macos`, `linux` | Which OS the identity presents as. Defaults to the host's. |
+| `--fingerprint-platform` | `windows`, `macos`, `linux` | Which OS the identity presents as, GPU included. Defaults to the host's own OS on macOS and Windows, and to `windows` on Linux. |
 | `--fingerprint-anchor` | anchor id | Pin the GPU capability cluster instead of letting the seed draw one. |
 | `--fingerprint-explain` | none | Print the composition report to stdout and exit. |
 | `--fingerprint-gpu-vendor` | exact WebGL vendor string | WebGL `UNMASKED_VENDOR_WEBGL`. |
@@ -316,10 +335,13 @@ Not changed, and not claimable:
 - The Chromium version. The binary really is the version it reports.
 - Anything the machine cannot do. A profile presents fewer cores, less memory,
   a smaller screen and fewer codecs than the host has, never more.
-- The graphics backend, where the host has one. A Windows persona on a Mac keeps
-  an Apple GPU. A host with no graphics device has no backend to keep, so there
-  the persona picks the GPU cluster — see
-  [Headless Linux servers](#headless-linux-servers).
+- The rasteriser that actually draws. The persona moves the GPU identity, so the
+  graphics backend *is* claimable now; what is not is throughput and rendered
+  bytes. A software backend under a discrete-GPU identity renders at software
+  speed and hashes differently, and a texture at the reported
+  `MAX_TEXTURE_SIZE` does not allocate — see
+  [Headless Linux servers](#headless-linux-servers) and
+  [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 - Fonts that are not installed. Enumeration removes families; it cannot add one
   without the font file.
 - The WebRTC packet source, for now. A relay through a SOCKS5 proxy is written

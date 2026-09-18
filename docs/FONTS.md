@@ -4,6 +4,11 @@ If you are running a persona that does not match your host operating system, you
 need that platform's fonts on the machine. This is a setup step you do once, and
 it is worth doing before you debug anything else.
 
+**On a Linux host that is the default.** A Linux machine claims Windows unless
+you pass `--fingerprint-platform=linux`, so a default launch there needs the
+Windows font set. This page is not an advanced topic for that deployment; it is
+the setup.
+
 A persona without its fonts is one of the most common reasons a session gets
 blocked. Installed fonts are cheap for a site to check and hard to fake: a page
 asks whether a family is present, and if the answer is no on a machine claiming
@@ -11,11 +16,18 @@ Windows, that machine is not a Windows machine. The faces a platform ships with
 cannot be uninstalled by a real user, so their absence is a signal with no
 innocent explanation.
 
+It is also the part of a cross-OS persona that you can actually fix. The GPU
+identity follows the persona on every host, and the surfaces a fork cannot reach
+stay the host's whatever the profile says — but fonts are files, and installing
+them closes that gap completely.
+
 Apostate cannot ship them. Apple's and Microsoft's fonts are licensed, and
 redistributing them is not this project's to do. Copy them from a machine you
 own that has them.
 
-The browser assumes you have done this. Nothing warns you if you have not.
+The browser assumes you have done this and does not check the filesystem.
+`--fingerprint-explain` names the prerequisite on a cross-OS launch, and cannot
+confirm you have met it.
 
 ## What to install
 

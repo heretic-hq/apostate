@@ -66,23 +66,34 @@ genuine Windows machine it is the fastest way to tell those two apart.
 ./chrome --fingerprint=12345 --fingerprint-platform=windows
 ```
 
-`--fingerprint-platform` takes `windows`, `macos` or `linux` and defaults to the
-host's own platform. It sets `navigator.platform`, the User Agent, the Client
-Hints platform and version, the OS release, the font set, the voice table, the
-screen geometry pool, the window chrome deltas and the hardware buckets.
+`--fingerprint-platform` takes `windows`, `macos` or `linux`. It sets
+`navigator.platform`, the User Agent, the Client Hints platform and version, the
+OS release, the font set, the voice table, the screen geometry pool, the window
+chrome deltas, the hardware buckets — and the GPU.
 
-On a host with a graphics device it does not move the GPU: the capability
-cluster is selected from what that host's graphics stack can serve, so a Windows
-persona on a Mac presents an Apple GPU.
+It moves the GPU on every host. The claimed platform selects the capability
+cluster, and the host's own graphics backend is not consulted: `windows` draws a
+Direct3D 11 cluster, `macos` an Apple Metal one, `linux` an NVIDIA Vulkan one,
+whatever the machine underneath is running.
 
-On a host with no graphics device it does move the GPU, because there is no
-hardware for a cluster to be coherent with. A GPU-less Linux server under
-`--fingerprint-platform=windows` presents a Direct3D 11 cluster, and under the
-default Linux persona an NVIDIA one; either way the profile's identity is served
-rather than the host's software rasteriser.
-[docs/LIMITATIONS.md](LIMITATIONS.md) has the table of which host-and-persona
-pairs are coherent, and lists the GPU-less behaviour among the ones written for
-this release and not yet run.
+The default is host-dependent:
+
+| Host | Default persona |
+| --- | --- |
+| macOS | `macos` |
+| Windows | `windows` |
+| Linux | `windows` |
+
+A Linux host therefore claims Windows unless told otherwise, which is the one
+default in this browser that is not the host's own OS. It is chosen as the least
+bad cross-OS pairing and because it is what most deployments want, and its cost
+is the Windows font set: install it ([docs/FONTS.md](FONTS.md)) or pass
+`--fingerprint-platform=linux` to compose the host's own OS. The report prints
+that as a limitation on every such launch.
+
+[docs/LIMITATIONS.md](LIMITATIONS.md) has the per-persona cluster table, the
+cross-OS risk ordering, and this behaviour's status: it is patch `0102` and has
+not been built or run.
 
 ## Per-field overrides
 
@@ -177,9 +188,6 @@ locale                           dispersion  catalogue-value        en-gb
 limitations
   - anchor macos-metal-apple-850a91233555 has one measured member, so no
     identity rotation is offered on its capability cluster
-  - the host graphics backend was taken to be the platform default (metal)
-    because the GPU process does not exist yet at composition time; pass
-    --use-angle to state it
 ```
 
 The `evidence` column says where each value came from:
@@ -205,26 +213,32 @@ Run `--fingerprint-explain` first. It is the only thing that will tell you what
 this launch actually claimed and what this host could not serve, and most blocks
 turn out to be named in its `limitations` block.
 
+On a Linux host with the default persona, which claims Windows, the report
+prints the pairing as a limitation with its own remedy:
+
 ```text
 limitations
-  - anchor macos-metal-apple-850a91233555 has one measured member, so no
-    identity rotation is offered on its capability cluster
-  - the host graphics backend was taken to be the platform default (metal)
-    because the GPU process does not exist yet at composition time; pass
-    --use-angle to state it
+  - the persona is windows on a linux host, which is this project's default
+    pairing there and its least bad cross-OS one: the GPU cluster follows the
+    persona, but the Windows font set does not install itself, and a Windows
+    persona missing Windows faces is measurable in text metrics -- install the
+    full set (docs/FONTS.md) or pass --fingerprint-platform=linux to compose
+    the host's own OS
 ```
 
 Each line has an action:
 
-- **A graphics-backend line** means composition guessed the backend. If the
-  guess is wrong, every GPU value is drawn against the wrong cluster. State the
-  real one with `--use-angle`.
+- **A cross-OS persona line** names what stays the host's on that pairing:
+  installed fonts, and the kernel's own timing behaviour. For Windows-on-Linux
+  the action is to install the font set, or to pass
+  `--fingerprint-platform=linux`. Every cross-OS pairing gets a line; the
+  host's own OS gets none.
 - **An identity-rotation line** means this anchor has one measured member, so
   every launch on this host presents the same GPU strings regardless of seed.
 
-Fonts are not in that list and are not meant to be. The report cannot tell you
-whether the claimed platform's faces are on the machine, and it does not pretend
-to. That one is yours to confirm:
+The report names the font prerequisite but cannot confirm you have met it. It
+does not read the filesystem, so nothing in it tells you whether the claimed
+platform's faces are actually present. That half is yours:
 [docs/FONTS.md](FONTS.md) says what to install and how to read which packs this
 launch drew.
 
@@ -241,13 +255,14 @@ per-pixel output. Both are in [docs/LIMITATIONS.md](LIMITATIONS.md).
 ```
 
 `--fingerprint-anchor` pins the measured GPU capability cluster instead of
-letting the seed draw one. A pin deliberately skips the backend filter, because
-an explicit request is worth honouring, so a cross-backend pin is accepted and
-records a limitation: the backend decides which extensions exist, and a pinned
-cluster from another backend serves a shorter extension list than the card it
-names. It is also the only way to ask for the software-rasteriser cluster
-`linux-swiftshader-google-6922d61bab83`, which no seed draws: pin it by id, or
-state its strings with `--fingerprint-gpu-renderer` and
+letting the seed draw one. A drawn launch always takes its cluster from the
+claimed platform, so the persona and the cluster agree by construction; a pin is
+the only way to make them disagree. It is accepted rather than refused, because
+an explicit request is worth honouring, and the launch records that it happened.
+
+It is also the only way to ask for the software-rasteriser cluster
+`linux-swiftshader-google-6922d61bab83`, which no seed draws on any host: pin it
+by id, or state its strings with `--fingerprint-gpu-renderer` and
 `--fingerprint-gpu-vendor`. Anchor ids are listed in
 [corpus/anchors/README.md](../corpus/anchors/README.md).
 
@@ -323,7 +338,7 @@ These are upstream switches, unchanged, that interact with the identity.
 | --- | --- |
 | `--user-data-dir=DIR` | Keeps cookies, storage and history. Does not keep the identity. |
 | `--proxy-server=URL` | HTTP, HTTPS, SOCKS4 and SOCKS5, with authentication. UDP over SOCKS5 UDP ASSOCIATE carries proxied QUIC and HTTP/3. |
-| `--use-angle=BACKEND` | States the graphics backend by hand. Composition cannot query a live GPU process, because none exists yet when the profile is built: on Linux it detects the absence of a graphics device from the DRM render nodes, and otherwise assumes the platform default. Use this when that answer is wrong. |
+| `--use-angle=BACKEND` | Selects the backend the GPU process actually renders through. It no longer decides which capability cluster is drawn — the claimed platform does that — so what it changes is throughput and rendered bytes, not the identity. |
 | `--headless` | Supported, and it does not imply software rendering. On a Mac this binary selects ANGLE/Metal in every default configuration including `--headless=new`. A headless Linux server with no GPU is the primary deployment and needs no further switch. |
 | `--lang=TAG` | Sets the UI language independently of the profile's locale, which is usually not what you want. |
 | `--remote-debugging-pipe` | Opens no socket. Use this rather than a port: a page in the local or private address space can detect an open debugging port. Playwright uses the pipe by default; Puppeteer defaults to a port. |
@@ -346,12 +361,10 @@ without calling `glGetString`. WebGL reaches the driver through the command
 buffer and keeps reporting a real ANGLE string, so the two contradict each
 other. This has already produced a wrong result here once.
 
-Composition does read it, which is the one reason to know about it: it states
-the software backend and outranks `--use-angle`, since naming a hardware backend
-does not bring hardware back. So it is the deliberate way onto the GPU-less
-path on a host the render-node check cannot answer — Windows and macOS. Reach
-for it only for that, and expect the `Disabled` contradiction above to come with
-it.
+It no longer affects the identity either way. Which capability cluster a launch
+serves comes from the claimed platform, so forcing the software rasteriser
+changes what the machine renders — throughput and pixels — and changes nothing
+about what it claims. There is no longer a reason to reach for this switch.
 
 `--no-sandbox` is a deviation from a normal launch in its own right. It is
 unavoidable as root, so run as a normal user instead.

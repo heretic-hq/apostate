@@ -103,7 +103,7 @@ Field meanings:
 | Field | Meaning |
 | --- | --- |
 | `fingerprint` | Seed for the deterministic compositor: an integer, or any printable ASCII up to 512 bytes. `null` requests the default, a fresh seed per launch. The literal `host`, or `off`, `false`, `0`, `disable`, `disabled`, turns composition off. |
-| `fingerprint_platform` | Platform persona: `windows`, `macos` or `linux`. `null` uses the host's own platform. It changes OS identity, client hints, fonts, voices, locale, screen geometry and hardware buckets. It does not move the GPU cluster; see below. |
+| `fingerprint_platform` | Platform persona: `windows`, `macos` or `linux`. `null` requests the host-conditional default, which is the host's own OS on macOS and Windows and `windows` on Linux. It changes OS identity, client hints, fonts, voices, locale, screen geometry, hardware buckets and the GPU cluster; see below. |
 | `profile` | Explicit profile file or inline profile object. `null` means no explicit profile. |
 | `locale` | Explicit locale or Accept-Language policy. `null` means use the precedence rules below. |
 | `timezone` | Explicit IANA timezone. `null` means use the precedence rules below. |
@@ -169,25 +169,37 @@ hardware, and codec behavior remain properties of the composed profile. For
 example, `Asia/Bangkok` may validly be paired with `en-US,en` and English or
 system fonts.
 
-## The persona does not move the GPU cluster
+## The persona selects the GPU cluster
 
 `fingerprint_platform` selects OS identity, client hints, fonts, voices, locale,
-screen geometry and hardware buckets. It does not select the GPU capability
-cluster. The anchor is chosen from the anchors the host's graphics backend can
-actually serve.
+screen geometry, hardware buckets and the GPU capability cluster. The anchor is
+drawn from the anchors captured on the claimed platform, minus the
+software-rasteriser anchor, and the host's own graphics backend is not part of
+the draw.
 
-This is a measured constraint, not a policy preference. Within one backend,
-silicon generation does not matter: Ada, Ampere and Blackwell produce
-byte-identical WebGL capability tables and an identical pixel render digest on
-Linux/Vulkan, so one anchor legitimately covers a range of cards and the
-renderer string is cosmetic relative to it. Across backends nothing transfers:
-the same NVIDIA silicon produces a different capability digest through D3D11
-than through Vulkan, and Apple Metal differs from both.
+That is sound because of a measured result rather than a policy preference.
+Within one backend, silicon generation does not matter: Ada, Ampere and
+Blackwell produce byte-identical WebGL capability tables and an identical pixel
+render digest on Linux/Vulkan, so one anchor legitimately covers a range of
+cards. Across backends nothing transfers: the same NVIDIA silicon produces a
+different capability digest through D3D11 than through Vulkan, and Apple Metal
+differs from both. An anchor is therefore a statement about a backend, the
+catalogue holds one backend per platform, and naming the platform names the
+backend.
 
-Consequently, on a macOS host a Windows persona keeps an Apple Metal cluster,
-and that mismatch is **reported as a limitation rather than hidden**. A coherent
-Windows fingerprint wants a Windows or Linux host with the corresponding
-silicon. That is a property of graphics drivers, not of this codebase.
+`null` does not mean the host's platform. The default is host-conditional:
+`macos` on a macOS host, `windows` on a Windows host, and `windows` on a Linux
+host. A Linux host claiming Windows is the one default that is not the host's
+own OS, and its cost is the Windows font set — see [docs/FONTS.md](FONTS.md) and
+the cross-OS section of [docs/LIMITATIONS.md](LIMITATIONS.md).
+
+Note for package authors and anyone reading the exported helpers:
+`host_persona()` in the Python package and `hostPersona()` in the Node package
+report the **host's** platform, which is what they are for. Since the binary's
+default claimed persona is host-conditional, the two differ on a Linux host, and
+`host_persona()` is not the default persona. A launcher that wants to know what a
+default launch will claim has to apply the table above rather than calling the
+helper.
 
 Identity strings (`unmaskedVendor`, `unmaskedRenderer`, WebGPU
 `vendor`/`architecture`) rotate only among measured members of one anchor,
@@ -274,21 +286,24 @@ the user-facing version of this list.
    it does not turn it into a measurement.
 2. A composed profile does not claim the host owns the corresponding GPU,
    display, fonts, audio stack or codec hardware.
-3. Native capability is a ceiling. WebGL and WebGPU limits cannot exceed the
-   active backend, extensions and features cannot be added, and a media claim
-   cannot create a decoder or provider that is absent. The first two clauses are
-   under change for a host with no hardware backend, where the ceiling is the
-   software rasteriser's own and is being raised to meet the claim instead of
-   reducing the claim to meet it. [docs/LIMITATIONS.md](LIMITATIONS.md) has the
-   measured gap and the status; nothing in that direction is in a binary yet.
-4. Capacity only ever goes down. A profile may claim fewer cores than the host
-   has, never more, and the same holds for memory, GPU limits, codec support,
-   font families, speech voices, and display area against window bounds. A page
-   can measure parallel throughput, allocate until allocation fails, compile a
-   shader at the advertised limit, or ask a voice to speak; a claim below host
-   capability survives all of those and a claim above it fails the first.
-   Options the host cannot serve are dropped before the draw, so a small host
-   draws from a smaller set than a large one.
+3. Native capability is a ceiling where the backend enforces one. A media claim
+   cannot create a decoder or provider that is absent, and WebGL and WebGPU
+   limits cannot exceed a backend that enforces what it reports. A software
+   rasteriser enforces nothing about those numbers, so patch `0103` serves the
+   claim there instead of clamping it, and patch `0104` serves the claimed
+   extensions whose objects carry constants rather than methods. Both are in the
+   series and in no binary. The residual is measured and stated in
+   [docs/LIMITATIONS.md](LIMITATIONS.md): the claimed `MAX_TEXTURE_SIZE` cannot
+   be allocated at on a software backend.
+4. Capacity only ever goes down, with GPU limits on a software backend as the
+   exception in item 3. A profile may claim fewer cores than the host has, never
+   more, and the same holds for memory, codec support, font families, speech
+   voices, and display area against window bounds. A page can measure parallel
+   throughput, allocate until allocation fails, compile a shader at the
+   advertised limit, or ask a voice to speak; a claim below host capability
+   survives all of those and a claim above it fails the first. Options the host
+   cannot serve are dropped before the draw, so a small host draws from a
+   smaller set than a large one.
 5. Canvas, text, audio, font metrics and speech providers can stay
    host-inherited when the native resources are missing. The profile reports
    that rather than adding synthetic output.

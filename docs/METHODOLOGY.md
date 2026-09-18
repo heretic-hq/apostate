@@ -71,8 +71,10 @@ physical device produces it.
 ## 6. Capacity only ever goes down
 
 A profile may claim fewer cores than the host has, never more. Same for memory,
-GPU limits, codec support, font families, speech voices, and display area
-against window bounds.
+codec support, font families, speech voices, and display area against window
+bounds. GPU limits follow the same rule on a backend that enforces them, and
+the opposite one on a backend that does not; §9 has the exception and
+[docs/LIMITATIONS.md](LIMITATIONS.md) has its cost.
 
 This is falsifiability, not modesty. A page can measure parallel throughput,
 allocate until allocation fails, compile a shader at the advertised limit, or
@@ -171,8 +173,8 @@ fragment-shader workload runs about 230 times slower in software and small draw
 calls about 35 times slower, on an identical CPU baseline. Closing that would
 mean either making software rendering fast or slowing real hardware down, and a
 deliberate timing adjustment is a new observable, which rule 3 forbids. So the
-timing gap ships open and the strings do not: a host that renders in software
-serves the profile's GPU identity like any other host.
+timing gap ships open and the strings do not: the backend a host is running does
+not restrict which GPU identity the profile may serve.
 
 That last sentence is a reversal. An earlier revision of this page ended the
 paragraph with "the browser declines to claim a discrete GPU on a host that
@@ -187,15 +189,27 @@ substring match, while the timing gap it was supposed to stay coherent with
 costs a page a benchmark to measure. Trading a free signal for an expensive one
 is the wrong direction.
 
-Rule 6 is not weakened by this. A renderer string is an identity rather than a
-capacity, and rule 6 is about capacity. What the host cannot honour is a
-separate question from what it is called, and that one is open: a claimed
-extension the backend does not implement, and a claimed limit it would refuse to
-allocate, are reduced to the host today, and patches that instead give the
-backend the capability are being written. Rule 6 governs the answer either way,
-because whatever a launch ends up advertising has to survive being exercised — a
-page allocates at the advertised limit and calls methods on the extension object
-it is handed.
+Keep the claim narrow, though, because the tempting overstatement is that any
+identity is now safe anywhere. What is true is that the host's backend does not
+constrain the identity. What the claimed operating system costs is a separate
+question with a real answer: the surfaces a fork cannot reach, installed fonts
+chief among them, stay the host's. So the persona is a choice to be made with
+the trade-off in view, and the compositor's job is to report the trade-off
+rather than to pretend it away.
+
+Rule 6 is not weakened by this, but it is now sharper. A renderer string is an
+identity rather than a capacity, and rule 6 is about capacity. For the
+capacities: on a backend that enforces what it reports, the claim is still
+clamped to the host. On a backend that enforces nothing — a software rasteriser,
+where the reported figures are soft constants — patch `0103` serves the claim
+instead, and patch `0104` serves the claimed extensions whose objects carry
+constants rather than methods. Rule 6 still governs the result, because whatever
+a launch advertises has to survive being exercised: a page allocates at the
+advertised limit and calls methods on the extension object it is handed. Where
+that cannot be made to hold, the residual is measured and written down rather
+than assumed away — the claimed `MAX_TEXTURE_SIZE` is not allocatable on a
+software backend, and [docs/LIMITATIONS.md](LIMITATIONS.md) says so with the
+numbers.
 
 ## 10. Verification
 

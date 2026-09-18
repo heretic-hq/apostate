@@ -96,9 +96,13 @@ noise. Profiles must be partitioned by CPU ISA class.
 
 **WebGL limit tables identify the backend, not the GPU.** On Metal, ANGLE
 hard-codes the entire limit and precision table rather than querying the device,
-so an M1 and an M4 Max return identical numbers. Profiles must be partitioned by
-ANGLE backend, and a claimed GPU model cannot carry a limit profile it does not
-have.
+so an M1 and an M4 Max return identical numbers. A capability cluster is
+therefore a statement about a backend, and clusters must be partitioned by ANGLE
+backend rather than by card. What follows from that is the opposite of what it
+first looks like: because the catalogue holds one backend per platform, naming
+the claimed platform names the backend, and the host's own backend does not have
+to agree. [docs/LIMITATIONS.md](LIMITATIONS.md) has what the host still decides,
+which is throughput and rendered bytes.
 
 Font metrics, by contrast, turned out to be portable: given the same font file
 both platforms produce identical advances, so the requirement is installing the

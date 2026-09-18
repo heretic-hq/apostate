@@ -115,7 +115,7 @@ const browser = await launch({
 | Option | Default | Meaning |
 |---|---|---|
 | `fingerprint` | a fresh random seed | Seed for the whole identity. `"host"` (also `"off"`, `"false"`, `"0"`, `"disable"`, `"disabled"`) inherits the real machine and composes nothing. |
-| `fingerprintPlatform` | the build's own platform | `windows`, `macos` or `linux`. Needs that platform's fonts installed — see below. Cannot be combined with host inheritance. |
+| `fingerprintPlatform` | host's own OS on macOS and Windows; `"windows"` on Linux | `windows`, `macos` or `linux`. Selects the GPU cluster as well as the OS identity. Needs that platform's fonts installed — see below. Cannot be combined with host inheritance. |
 | `locale`, `timezone` | derived from the seed | Override just these. |
 | `geoip` | `true` | Derive locale and timezone from the proxy's exit IP. |
 | `proxy` | none | `http://`, `https://`, `socks5://`; credentials are kept out of the command line. |
@@ -128,10 +128,19 @@ const browser = await launch({
 
 The usual deployment, and the one this is built for: a Linux server with no
 graphics device. Nothing extra is needed and no GPU is required. `headless` is
-already the default, and the profile's GPU identity is served whether or not the
-host has a card — on a machine with no graphics device the persona picks the
-capability cluster, so a default launch presents an NVIDIA identity and
-`fingerprintPlatform: "windows"` presents a Direct3D 11 one.
+already the default, and the claimed operating system rather than the host's
+graphics stack selects the GPU identity, so a GPU-less server presents the
+capability cluster and renderer string of the OS it claims.
+
+**On a Linux host the default claimed OS is Windows, so install the Windows
+fonts.** It is the one setup step here and the most common cause of a block: a
+Windows persona missing Windows faces is measurable in text metrics. The
+families and where to copy them from are in
+[docs/FONTS.md](https://github.com/heretic-hq/apostate/blob/main/docs/FONTS.md).
+Passing `fingerprintPlatform: "linux"` composes the host's own OS instead and
+needs nothing installed. Windows-on-Linux is the default because it is the least
+bad cross-OS pairing, not because it is free; `fingerprintPlatform: "macos"` on
+a Linux host is the riskier one, at 184 core families.
 
 For the most aggressive targets, the suites that score behaviour as well as the
 fingerprint, run headed on a virtual display instead. Still no GPU: the display

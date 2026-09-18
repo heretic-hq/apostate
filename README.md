@@ -296,7 +296,10 @@ than quietly ignoring it.
 
 Precedence, strongest first: `--apostate-profile`, then `--fingerprint=host`,
 then the per-field overrides, then `--fingerprint=<seed>`, then the fresh seed a
-bare launch draws.
+bare launch draws. `--fingerprint=host` is the one row that refuses rather than
+outranks: it composes nothing, so pairing it with a persona, an anchor pin or a
+per-field override stops the launch instead of quietly winning.
+`--fingerprint-explain` still works with it.
 
 Every standard Chromium flag still works, including `--proxy-server`,
 `--headless`, `--user-data-dir` and `--lang`. Drive automation with

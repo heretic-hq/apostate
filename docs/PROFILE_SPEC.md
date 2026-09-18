@@ -135,6 +135,15 @@ An explicit profile file is validated before launch and **bypasses
 composition**: its coherence and servability are the author's responsibility,
 not the catalogue's, and the resolver reports that as a warning.
 
+Read that ladder as resolution order, not as silent precedence. Host mode does
+not quietly outrank the rows under it: because nothing is composed, there is no
+profile for a persona, a pinned anchor or a per-field override to land on, so
+combining any of them with host mode refuses the launch on stderr and exits
+non-zero. `--fingerprint-explain` is the exception and still works. The packages
+follow the same rule from the other side, emitting the per-field locale and
+timezone switches only for a natively composed resolution and never for a
+host-inherited one, since the binary would refuse that pairing.
+
 Network localization has a separate precedence chain:
 
 ```text

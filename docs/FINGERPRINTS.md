@@ -382,8 +382,11 @@ One switch family, all resolved before the first renderer starts.
 
 Precedence, strongest first: `--apostate-profile`, then host mode, then the
 per-field overrides, then `--fingerprint`, then the fresh seed a bare launch
-draws. Host mode disables every layer below it, so a persona or an anchor pin is
-inert under it and a per-field override alongside it stops the launch.
+draws. Host mode is not a layer that quietly outranks the ones below it: since
+nothing is composed, there is no profile for a persona, a pinned anchor or a
+per-field override to land on, so combining any of them with host mode refuses
+the launch on stderr and exits non-zero rather than half-applying.
+`--fingerprint-explain` is the exception and still works.
 
 [docs/FLAGS.md](FLAGS.md) is the user-facing reference for all of these.
 

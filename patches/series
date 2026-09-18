@@ -142,3 +142,9 @@
 # 0101 made unsatisfiable, and its compose_unittest.cc hunks carry the two cases
 # 0106 added as context, so 0101, 0102 and 0106 all come ahead of it.
 0107-compose-tests-follow-the-persona-rule.patch
+
+# 0108 touches two files nothing else in the series touches, so it has no
+# ordering requirement of its own. It is last because it was authored last; in
+# effect it is upstream of 0102, 0103 and 0104, which have no WebGL context to
+# act on without it on a host with no usable GPU driver.
+0108-gl-keep-the-software-webgl-fallback.patch

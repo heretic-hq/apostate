@@ -435,11 +435,13 @@ def load_build_stamp(data_root: Path) -> tuple[object, Path]:
         raise GeneratorError(f"{script}: cannot be loaded as a module")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    if not hasattr(module, "user_agent_for_build"):
-        raise GeneratorError(
-            f"{script} does not export user_agent_for_build; the reference resolver "
-            "changed shape and the compiled tables would carry a stale browser major"
-        )
+    for export in ("user_agent_for_build", "gl_limit_entries"):
+        if not hasattr(module, export):
+            raise GeneratorError(
+                f"{script} does not export {export}; the reference resolver changed "
+                "shape and the compiled tables would disagree with it about a "
+                "page-visible value"
+            )
     return module, script
 
 
@@ -494,7 +496,7 @@ def integral(value: object) -> int | None:
     return None
 
 
-def anchor_gl_layer(path: Path, anchor_id: str, cluster: dict) -> dict:
+def anchor_gl_layer(path: Path, anchor_id: str, cluster: dict, limit_entries) -> dict:
     """The anchor-wide GL capability cluster as a profile fragment.
 
     An anchor is atomic: selecting it takes the whole cluster, not just the
@@ -524,30 +526,19 @@ def anchor_gl_layer(path: Path, anchor_id: str, cluster: dict) -> dict:
 
         for name in sorted(section.get("parameters") or {}):
             value = (section.get("parameters") or {})[name]
-            if name.startswith("MAX_"):
-                exact = integral(value)
-                if exact is None or exact < 1:
-                    continue
-                if limits.get(name, exact) != exact:
+            # `limit_entries` is scripts/profile_resolver.py's gl_limit_entries,
+            # loaded as a module attribute rather than reimplemented, for the
+            # same reason the user-agent stamp is: the compiled tables and the
+            # reference resolver have to agree on every served number, and two
+            # copies of this rule is how they stop agreeing.
+            for key, exact in limit_entries(name, value):
+                if limits.get(key, exact) != exact:
                     die(
                         path,
-                        f"anchor {anchor_id} disagrees with itself on {name}: a "
+                        f"anchor {anchor_id} disagrees with itself on {key}: a "
                         "single limit map cannot represent two contexts",
                     )
-                limits[name] = exact
-            elif (
-                name == "ALIASED_POINT_SIZE_RANGE"
-                and isinstance(value, list)
-                and len(value) == 2
-            ):
-                low, high = integral(value[0]), integral(value[1])
-                # Both endpoints or neither: half an interval is a fabricated
-                # limit, and the schema says a nonintegral endpoint stays
-                # unrepresented and inherited.
-                if low is None or high is None or low < 1 or high < 1:
-                    continue
-                limits["ALIASED_POINT_SIZE_RANGE_MIN"] = low
-                limits["ALIASED_POINT_SIZE_RANGE_MAX"] = high
+                limits[key] = exact
 
         for key in sorted(section.get("precision") or {}):
             entry = (section.get("precision") or {})[key]
@@ -566,19 +557,27 @@ def anchor_gl_layer(path: Path, anchor_id: str, cluster: dict) -> dict:
                 die(path, f"anchor {anchor_id} disagrees with itself on precision {key}")
             precisions[key] = derived
 
-    layer: dict[str, object] = {}
-    if extensions:
-        layer["gl_extensions"] = sorted(extensions)
-    if limits:
-        layer["gl_limits"] = dict(sorted(limits.items()))
-    if precisions:
-        layer["gl_precisions"] = dict(sorted(precisions.items()))
-
     # contextAttributes, antialiasSamples and the render digests deliberately
     # stay out: they are V3 conformance targets with no profile field, not
     # loader inputs.
-    if not layer:
-        die(path, f"anchor {anchor_id}: capability cluster produced no GL layer")
+    #
+    # Limits are required, not optional. An anchor whose cluster yields none
+    # would compile a renderer string into the binary with no capability table
+    # behind it, and every serving hook would fall through to the host's own
+    # numbers -- indistinguishable from success until a page reads one lookup
+    # value and finds a software rasteriser's limits under a discrete-GPU name.
+    if not limits:
+        die(
+            path,
+            f"anchor {anchor_id}: capability cluster produced no GL limits, so its "
+            "renderer string would be served over the host's own capability table",
+        )
+
+    layer: dict[str, object] = {"gl_limits": dict(sorted(limits.items()))}
+    if extensions:
+        layer["gl_extensions"] = sorted(extensions)
+    if precisions:
+        layer["gl_precisions"] = dict(sorted(precisions.items()))
     return layer
 
 
@@ -633,7 +632,7 @@ def member_webgpu(path: Path, anchor_id: str, cluster: dict, capture: str) -> di
     return {"webgpu": section} if section else {}
 
 
-def parse_anchor(path: Path) -> dict | None:
+def parse_anchor(path: Path, limit_entries) -> dict | None:
     raw = load_json(path)
     if not isinstance(raw, dict):
         die(path, "top level must be an object")
@@ -725,7 +724,7 @@ def parse_anchor(path: Path) -> dict | None:
         "pixels": digests.get("webgl1_pixels_sha256", "") or "",
         "weight": weight,
         "members": members,
-        "value": anchor_gl_layer(path, anchor_id, cluster),
+        "value": anchor_gl_layer(path, anchor_id, cluster, limit_entries),
     }
 
 def register_identities(axes: list[dict], anchors: list[dict]) -> int:
@@ -1002,21 +1001,18 @@ def emit_header(meta: dict) -> str:
     out.append("// and total instead of recovering from a failed match.")
     out.append("BASE_EXPORT span<const std::string_view> LanguageSets();")
     out.append("")
-    out.append("// The accept-languages list a launch gets when it names none.")
-    out.append(
-        f"inline constexpr std::string_view kDefaultAcceptLanguages = {cpp_string(meta['default_accept_languages'])};"
-    )
-    out.append("")
     out.append("// Dotted profile paths whose arrays are unioned rather than replaced when")
     out.append("// two option fragments both carry them. Everything else replaces, so a")
     out.append("// font pack is additive without the compositor knowing what a font is.")
     out.append("BASE_EXPORT span<const std::string_view> UnionArrayPaths();")
     out.append("")
-    out.append("// The catalogue's locale and theme policies, id-sorted. Not dispersion")
-    out.append("// axes -- locale is launch precedence plus GeoIP and theme is not one of")
-    out.append("// the nine axes -- but drawn by seed from the same root, so they are")
-    out.append("// compiled in exactly like the axes.")
-    out.append("BASE_EXPORT span<const PolicyOption> LocalePolicies();")
+    out.append("// The catalogue's theme policies, id-sorted. Not a dispersion axis --")
+    out.append("// theme is not one of the nine -- but drawn by seed from the same root,")
+    out.append("// so it is compiled in exactly like the axes.")
+    out.append("//")
+    out.append("// The catalogue's locale policies are deliberately absent. That surface")
+    out.append("// is launch precedence plus GeoIP, then the host, and the compositor")
+    out.append("// selects no policy by id, so there is nothing here for it to read.")
     out.append("BASE_EXPORT span<const PolicyOption> ThemePolicies();")
     out.append("")
     out.append("// Every dispersion axis, in the FINGERPRINTS.md §5 resolution order.")
@@ -1191,7 +1187,12 @@ def emit_source(axes: list[dict], anchors: list[dict], meta: dict) -> str:
     emit_string_array(out, "kLanguageSets", list(meta["language_sets"]))
     emit_string_array(out, "kUnionArrayPaths", list(meta["union_array_paths"]))
 
-    for kind in ("locale", "theme"):
+    # `theme` only. The catalogue's locale policies are not compiled in: the
+    # compositor resolves that surface from launch precedence and the host and
+    # selects no policy by id, so a compiled table would be data the build
+    # carries and nothing reads. Their caller is scripts/profile_resolver.py's
+    # --locale-policy, which reads the catalogue directly.
+    for kind in ("theme",):
         name = f"k{kind.capitalize()}Policies"
         out.append(f"constexpr PolicyOption {name}[] = {{")
         for policy in meta[f"{kind}_policies"]:
@@ -1235,10 +1236,6 @@ def emit_source(axes: list[dict], anchors: list[dict], meta: dict) -> str:
         out.append("  return span<const std::string_view>(kUnionArrayPaths);")
     else:
         out.append("  return {};")
-    out.append("}")
-    out.append("")
-    out.append("span<const PolicyOption> LocalePolicies() {")
-    out.append("  return span<const PolicyOption>(kLocalePolicies);")
     out.append("}")
     out.append("")
     out.append("span<const PolicyOption> ThemePolicies() {")
@@ -1293,12 +1290,15 @@ def collect(directory: Path, suffix: str = ".json") -> list[Path]:
 
 
 def parse_policies(path: Path, raw: dict, kind: str) -> list[dict]:
-    """The catalogue's locale and theme policies.
+    """The catalogue's locale and theme policies, validated and id-sorted.
 
-    These are not dispersion axes -- locale is launch precedence plus GeoIP and
-    theme is not one of the nine axes -- but they are drawn by seed from the
-    same root, so the compositor needs them compiled in exactly like the axes.
-    Sorted by id here because selection is over the id-sorted candidate list.
+    Neither is a dispersion axis. `theme` is drawn by seed from the same root
+    as the axes, so it is compiled in exactly like them. `locale` is launch
+    precedence plus GeoIP, then the host, and nothing in the binary selects one
+    by id, so it is validated here and compiled in nowhere -- its caller is
+    scripts/profile_resolver.py's --locale-policy, which reads the catalogue.
+
+    Sorted by id because selection is over the id-sorted candidate list.
     """
     policies = raw.get("policies")
     if not isinstance(policies, dict):
@@ -1380,31 +1380,19 @@ def parse_catalogue(path: Path, pinned_version: str) -> dict:
             "it option-set matching stops being total",
         )
 
-    # The launch's default language list, taken from the catalogue's first
-    # locale policy so the binary and the packages agree on it.
-    default_accept_languages = ""
-    policies = raw.get("policies")
-    if isinstance(policies, dict):
-        locale_policies = policies.get("locale")
-        if isinstance(locale_policies, list):
-            for policy in locale_policies:
-                if not isinstance(policy, dict):
-                    continue
-                value = policy.get("value")
-                locale = value.get("locale") if isinstance(value, dict) else None
-                candidate = locale.get("accept_languages") if isinstance(locale, dict) else None
-                if isinstance(candidate, str) and candidate:
-                    default_accept_languages = candidate
-                    break
-    if not default_accept_languages:
-        die(path, "no locale policy declares an accept_languages default")
+    # The catalogue's locale policies are still parsed and validated below --
+    # scripts/profile_resolver.py's --locale-policy selects one by id, so a
+    # malformed one is still a catalogue defect worth failing the build over --
+    # but no default language list is derived from them any more. There is no
+    # such thing as the launch's default list: a launch that names none is
+    # served the host's, and the voices table is keyed on the empty projection
+    # rather than on whichever policy happened to be first.
 
     return {
         "profile_schema_version": str(raw["profile_schema_version"]),
         "catalogue_version": str(raw["catalogue_version"]),
         "chromium_version": browser_build,
         "language_sets": sorted(set(language_sets)),
-        "default_accept_languages": default_accept_languages,
         "union_array_paths": list(UNION_ARRAY_PATHS),
         "locale_policies": parse_policies(path, raw, "locale"),
         "theme_policies": parse_policies(path, raw, "theme"),
@@ -1467,7 +1455,7 @@ def main(argv: list[str] | None = None) -> int:
         for path in collect(anchors_dir):
             read_paths.append(path)
             inputs.append((f"anchors/{path.name}", path.read_bytes()))
-            anchor = parse_anchor(path)
+            anchor = parse_anchor(path, resolver.gl_limit_entries)
             if anchor is not None:
                 anchors.append(anchor)
         anchors.sort(key=lambda a: a["id"])
@@ -1479,8 +1467,12 @@ def main(argv: list[str] | None = None) -> int:
         #
         # `machine_class` sits directly after `gpu_identity` because it turns one
         # chip into one machine, and `cpu`, `memory`, `panel`, `media_topology`
-        # and `battery` all hang off that decision. `network` is unconditioned
-        # and only has to land before the profile is serialised.
+        # and `battery` all hang off that decision. `audio` follows
+        # `media_topology` because it describes the same claimed machine's audio
+        # output, but it is conditioned on the platform rather than the machine
+        # class: the buffer size comes from the AudioManager the claimed OS runs,
+        # and the corpus shows no variation within a platform. `network` is
+        # unconditioned and only has to land before the profile is serialised.
         order = {
             name: index
             for index, name in enumerate(
@@ -1495,6 +1487,7 @@ def main(argv: list[str] | None = None) -> int:
                     "furniture",
                     "font_packs",
                     "media_topology",
+                    "audio",
                     "network",
                     "battery",
                     "voices",

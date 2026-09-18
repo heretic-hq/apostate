@@ -1,0 +1,531 @@
+Subject: gl: serve the anchor's capability limits the filter and the table dropped
+
+A live detector read `gpu.gl-caps-contradict-backend` off the shipped
+linux-x64 artifact: renderer "ANGLE (Intel, Intel(R) UHD Graphics 630
+(0x00009BC5) Direct3D11 vs_5_0 ps_5_0, D3D11)" beside a 16384x16384 viewport,
+where Direct3D shader model 5 mandates 32767. Thirteen of the anchor's
+measured parameters were being served from the host. This patch is the serving
+half of the fix; the other half is in scripts/generate-dispersion-tables.py,
+which never emitted five of them, and this patch is inert without it.
+
+One wrong belief, written down in four places, and only one of them was the
+bug anyone had noticed: that a GL capability value is always a positive
+scalar. The generator's anchor_gl_layer filter encoded it by accepting only
+MAX_-prefixed integers >= 1. The serving table encoded it by having no
+direction for a floor. And config/profile.schema.json encoded it a third time
+as `minimum: 1` on gl_limits' additionalProperties -- which would have
+rejected the correct data outright, since MAX_SERVER_WAIT_TIMEOUT is measured
+0 and MIN_PROGRAM_TEXEL_OFFSET is measured -8. That schema is a DATA_ASSET
+copied by scripts/sync-packages.py into python/apostate/assets and
+npm/assets, so the false assumption shipped in the packages too. And the
+loader in base/apostate/profile.cc encoded it a fourth time, refusing any
+gl_limits entry that was not > 0 and logging an ERROR line per launch for
+each -- so even a profile that carried MIN_PROGRAM_TEXEL_OFFSET and
+MAX_SERVER_WAIT_TIMEOUT correctly arrived at the serving hooks without them.
+Fixing the generator alone, or the serving table alone, would have changed
+nothing for those two.
+
+Recorded because the first attempt at that schema fix was wrong in an
+instructive way. It named the two exceptions as explicit properties to carry
+their bounds, and scripts/check-schema-wiring.py rejected it: gl_limits is
+consumed by a wholesale loop in base/apostate/profile.cc, and the checker
+requires every explicitly-named child to appear as a string literal in the
+consuming file. Those literals live in ui/gl, not profile.cc, so the named
+shape asserted a wiring that does not exist. That was a true positive, the
+same class as a falsely-enforced ledger edge, and the right fix was to drop
+the bound from additionalProperties and state the reason in the description.
+
+Three separate defects produced one symptom, and they are worth separating
+because only the third is a policy question.
+
+First, six parameters were in the compiled table and served from the host
+anyway, because nothing in kApostateGlLimits named them:
+UNIFORM_BUFFER_OFFSET_ALIGNMENT, MAX_PROGRAM_TEXEL_OFFSET,
+MIN_PROGRAM_TEXEL_OFFSET, MAX_SERVER_WAIT_TIMEOUT and the two aliased ranges.
+This is the same gap MAX_TEXTURE_LOD_BIAS had before patch 0036 and was found
+the same way -- by diffing an anchor against what the binary actually served,
+rather than by reading the table and believing it. UNIFORM_BUFFER_OFFSET_
+ALIGNMENT is the sharpest: D3D11 mandates 256, the anchors measure 256, a
+software rasteriser reports 16, and a page reads it in one call.
+
+Second, MIN_PROGRAM_TEXEL_OFFSET is a floor and the clamp assumed every limit
+is a ceiling. Claiming -8 where the driver allows -32 is the *narrower* claim,
+so std::min served the driver's -32 and discarded the anchor's number. The
+direction is now a property of the entry. The same distinction applies to the
+two-element limits: an aliased range is an interval, so intersecting it with
+the driver takes the higher floor and the lower ceiling, while
+MAX_VIEWPORT_DIMS is a width and a height -- two independent ceilings, where
+taking the higher of two widths would over-claim.
+
+Third, the enforcement test. 0103 decided, correctly, to serve the claim where
+the backend enforces nothing and keep min(claim, driver) where it does. The
+criterion it stated is "does this backend enforce what it reports". The test it
+shipped asks something narrower -- whether the ANGLE implementation is
+kSwiftShader -- and that is an under-approximation of 0103's own principle
+rather than a deliberate narrowing of it. ANGLE over Mesa llvmpipe reports
+kOpenGL and is indistinguishable by enum from ANGLE over a real GL driver.
+
+That is not hypothetical, and it is the configuration the detector read. On the
+Linux deployment target, headed under Xvfb, the composed identity stops
+Chromium's blocklist matching llvmpipe -- patch 0007 feeds the profile's driver
+strings to the blocklist deliberately, and patch 0108 documents that a
+blocklist which does see llvmpipe disables WebGL outright. So ANGLE/OpenGL on
+llvmpipe is what runs, BackendEnforcesGlLimits() returned true, and min()
+clamped every served limit back to a software rasteriser's table. Measured on
+the same box with the same seed, forcing the backend and changing nothing else:
+
+  default                  viewport 16384, UBO align 16, MAX_SAMPLES 4
+  --use-angle=swiftshader  viewport 32767, UBO align 256, MAX_SAMPLES 16
+
+MAX_SAMPLES 16 against a host reporting 4 is the discriminator: the claim is
+served, so 0103 works when it fires. It was not firing.
+
+llvmpipe was measured against 0103's criterion with 0103's own method, on the
+shipped 152.0.7977.83 linux-x64 artifact: texStorage2D at 1x and 2x the
+reported MAX_TEXTURE_SIZE, texStorage3D at 8x MAX_3D_TEXTURE_SIZE and
+renderbufferStorageMultisample at 4x MAX_SAMPLES all return glError 0 with an
+incomplete framebuffer. It enforces nothing, identically to the SwiftShader
+control run beside it. So this is a correction to the test, not a widening of
+the policy: the set of backends 0103 intended to cover is unchanged, and one
+that always belonged in it is now in it.
+
+Still not IsSoftwareGLImplementation(), for 0103's reason unchanged: that also
+covers D3D11 WARP, whose enforcement has not been measured, and guessing
+permissively is how an over-claim becomes a failing draw call. WARP cannot
+arise on the Linux and macOS targets, and llvmpipe is Linux-only -- on
+macOS/Metal the clamp stays and stays correct.
+
+Why MAX_VIEWPORT_DIMS is served here and not through ANGLE, because the
+obvious fix does not work and the next reader will try it. Patch 0039 already
+consumes MAX_VIEWPORT_DIMS_WIDTH and MAX_VIEWPORT_DIMS_HEIGHT in
+ApplyProfileIntegerCaps, so emitting those two keys looks sufficient. It is
+not: that function only ever does min(caps, claim). It can lower ANGLE's
+number and never raise it, so on any host whose driver reports 16384 --
+llvmpipe and Metal both -- it clamps the anchor's 32767 straight back to 16384
+and changes nothing. The enforcement test is what makes the claim servable and
+it lives on this path, so the range is served here. The 0039 consumer is left
+alone; it still narrows correctly when the claim is the smaller number.
+
+Last, the silent case is now loud, in both places it was quiet.
+
+In the GL hooks: a composed profile that carries a GPU identity and an empty
+gl_limits is precisely the defect that shipped, and every hook returned early
+on it, so the host's numbers went to the page under a claimed device's
+renderer string and looked like success. That pairing now logs once, naming
+the claimed renderer.
+
+In --fingerprint-explain: the cross-backend limitation said "the identity and
+the capability limits are served as composed". On the shipped artifact the
+second half was false, so the one diagnostic an operator runs to find out what
+is honoured was actively reassuring them about the broken thing. The sentence
+no longer asserts anything about limits. Instead compose.cc counts gl_limits
+in the profile it actually merged and reports that, and reports the zero case
+as its own limitation. A count taken from the merged profile cannot drift away
+from the truth the way a hardcoded sentence did, because there is nothing left
+to keep in sync.
+
+Nothing here is page-visible except the served numbers, and no switch is
+added. On an enforcing backend the behaviour is unchanged: min() for ceilings,
+max() for the one floor, warning included.
+
+Ledger: webgl.parameters, webgl2.parameters, gpu.angle-backend, headless.gpu-stack.
+--- a/base/apostate/compose.cc
++++ b/base/apostate/compose.cc
+@@ -1072,15 +1072,22 @@ std::optional<Composition> Compose(const ComposeRequest& request,
+     // the object it receives.
+     //
+     // Note what this does NOT say. It does not say the identity should
+-    // therefore be the host's: the renderer string, the vendor string and the
+-    // numeric limits are all served as the profile composed them.
++    // therefore be the host's: the renderer string and the vendor string are
++    // served as the profile composed them.
++    //
++    // It also no longer claims anything about the numeric limits. It used to
++    // say they "are served as composed", and on the shipped artifact that was
++    // false -- five of them were never emitted into the compiled table at all
++    // and six more were never read by the serving hook, so a diagnostic whose
++    // whole job is to tell an operator what is and is not honoured was
++    // reassuring them about the one thing that was broken. What the limits
++    // actually do is reported below, counted from the merged profile.
+     composition.limitations.push_back(
+         "anchor " + std::string(anchor->id) + " is a " +
+         std::string(anchor->backend) + " cluster on a " +
+         request.host.graphics_backend +
+-        " host: the identity and the capability limits are served as composed, "
+-        "while a method-bearing extension name this host's GL stack lacks is "
+-        "absent from the list");
++        " host: the identity is served as composed, while a method-bearing "
++        "extension name this host's GL stack lacks is absent from the list");
+   }
+   if (anchor && anchor->members.size() == 1) {
+     composition.limitations.push_back(
+@@ -1101,6 +1108,32 @@ std::optional<Composition> Compose(const ComposeRequest& request,
+     MergeFragment(composition.profile,
+                   ParseFragment("anchor", anchor->value_json),
+                   request.union_array_paths);
++
++    // Counted, never asserted. The previous text asserted that the capability
++    // limits were served and was wrong for the entire life of the shipped
++    // build; a count taken from the profile that was actually merged cannot
++    // drift away from the truth the same way, because there is nothing left
++    // to keep in sync.
++    const DictValue* gl_limits = composition.profile.FindDict("gl_limits");
++    const int served = gl_limits ? static_cast<int>(gl_limits->size()) : 0;
++    if (served == 0) {
++      // The defect this counter exists to surface. An anchor contributes a
++      // renderer string and a capability cluster together; a profile with the
++      // string and no cluster presents a claimed device over the host's own
++      // limit table, which a page reads in one call and no GL work.
++      composition.limitations.push_back(
++          "anchor " + std::string(anchor->id) +
++          " contributed NO numeric GL capability limits, so every limit a page "
++          "reads is this host's own while the renderer string names another "
++          "device: that pairing is a one-lookup contradiction and the profile "
++          "is incomplete");
++    } else {
++      composition.limitations.push_back(
++          "anchor " + std::string(anchor->id) + " serves " +
++          NumberToString(served) +
++          " numeric GL capability limits as composed; a limit this host's "
++          "backend enforces below the claim is served at the host's value");
++    }
+     composition.surfaces.push_back({
+         .surface = "anchor",
+         .value = std::string(anchor->id),
+--- a/base/apostate/profile.cc
++++ b/base/apostate/profile.cc
+@@ -1039,22 +1039,31 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+     for (const auto [name, value] : *gl) {
+       // A JSON number past int32 arrives as a double — the same representation
+       // gap webgpu.limits already handles — so accept both, and only integral
+-      // positive values either way. MAX_ELEMENT_INDEX at 2^32-2 is the value
+-      // that proved the int-only loader silently drops entries.
++      // values either way. MAX_ELEMENT_INDEX at 2^32-2 is the value that
++      // proved the int-only loader silently drops entries.
++      //
++      // Integral, not positive. Requiring > 0 here was the fourth place this
++      // codebase assumed a GL capability is always a positive scalar, after
++      // the generator's filter, the serving table's clamp direction and the
++      // profile schema's `minimum: 1`. Two measured values are not:
++      // MIN_PROGRAM_TEXEL_OFFSET is -8 on all four anchors and
++      // MAX_SERVER_WAIT_TIMEOUT is 0. Both were dropped here with an ERROR
++      // line on every launch, so even a profile that carried them correctly
++      // arrived at the serving hooks without them.
+       std::optional<int64_t> v;
+       if (std::optional<int> iv = value.GetIfInt()) {
+         v = *iv;
+       } else if (std::optional<double> dv = value.GetIfDouble()) {
+-        if (std::isfinite(*dv) && *dv > 0 && *dv < 9007199254740992.0 &&
++        if (std::isfinite(*dv) && std::abs(*dv) < 9007199254740992.0 &&
+             std::trunc(*dv) == *dv) {
+           v = static_cast<int64_t>(*dv);
+         }
+       }
+-      if (v && *v > 0) {
++      if (v) {
+         profile->gl_limits_[name] = *v;
+       } else {
+         LOG(ERROR) << "apostate: gl_limits." << name
+-                   << " must be a positive integer; ignoring";
++                   << " must be an integer; ignoring";
+       }
+     }
+   }
+--- a/ui/gl/gl_gl_api_implementation.cc
++++ b/ui/gl/gl_gl_api_implementation.cc
+@@ -10,6 +10,7 @@
+ #include "base/no_destructor.h"
+ 
+ #include <array>
++#include <string_view>
+ #include <vector>
+ 
+ #include "base/command_line.h"
+@@ -247,6 +248,10 @@ namespace {
+ struct ApostateGlLimit {
+   GLenum pname;
+   const char* name;
++  // A MIN_ limit is a floor, not a ceiling, so the safe direction reverses:
++  // claiming -8 where the driver allows -32 is the *narrower* claim, and
++  // std::min would serve the driver's wider -32 and discard the claim.
++  bool is_minimum = false;
+ };
+ 
+ constexpr ApostateGlLimit kApostateGlLimits[] = {
+@@ -294,6 +299,65 @@ constexpr ApostateGlLimit kApostateGlLimits[] = {
+     {GL_MAX_VARYING_COMPONENTS, "MAX_VARYING_COMPONENTS"},
+     {GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS,
+      "MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS"},
++    // Added by 0112. Every one of these was measured in the anchor and
++    // reaching the compiled table, and every one was still served from the
++    // host because nothing consulted the table for it -- the same shape as
++    // the MAX_TEXTURE_LOD_BIAS gap above, found the same way.
++    //
++    // UNIFORM_BUFFER_OFFSET_ALIGNMENT is the sharpest of them: D3D11 mandates
++    // 256 and the anchors measure 256, where a software rasteriser reports 16.
++    // A page reads it in one call beside an ANGLE Direct3D11 renderer string
++    // and needs no GL work at all to call the pair impossible.
++    {GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, "UNIFORM_BUFFER_OFFSET_ALIGNMENT"},
++    {GL_MAX_PROGRAM_TEXEL_OFFSET, "MAX_PROGRAM_TEXEL_OFFSET"},
++    {GL_MIN_PROGRAM_TEXEL_OFFSET, "MIN_PROGRAM_TEXEL_OFFSET",
++     /*is_minimum=*/true},
++    // A GLint64, so it is reachable only through the glGetInteger64v hook.
++    // Measured 0 on all four anchors against a software rasteriser's
++    // 9223372034707292000, which is the largest single-lookup discrepancy in
++    // the whole table.
++    {GL_MAX_SERVER_WAIT_TIMEOUT, "MAX_SERVER_WAIT_TIMEOUT"},
++};
++
++// Two-element limits, and the pair of profile keys each is stored under. A
++// range cannot live in kApostateGlLimits because that table maps one pname to
++// one name, and glGetIntegerv/glGetFloatv write both elements.
++struct ApostateGlRange {
++  GLenum pname;
++  const char* low;
++  const char* high;
++  // True when the pair is an interval, so the first element is a floor and
++  // intersecting with the driver takes the higher of the two. False when it
++  // is two independent ceilings -- MAX_VIEWPORT_DIMS is a width and a height,
++  // not a range, and taking the higher of two widths would over-claim.
++  bool is_interval;
++};
++
++// MAX_VIEWPORT_DIMS is the value the live detector actually caught: an ANGLE
++// Direct3D11 renderer string beside a 16384x16384 viewport, where shader
++// model 5 mandates 32767.
++//
++// It is served here rather than through ANGLE, and that is deliberate.
++// Patch 0039 already consumes MAX_VIEWPORT_DIMS_WIDTH/_HEIGHT in
++// ApplyProfileIntegerCaps, which looks like the natural home, but that
++// function only ever does min(caps, claim) -- it can lower ANGLE's number
++// and never raise it. On every host whose driver reports 16384, including
++// Metal, it would clamp the anchor's 32767 straight back to 16384 and
++// change nothing. The enforcement test below is what makes the claim
++// servable, and it lives on this path.
++constexpr ApostateGlRange kApostateGlIntegerRanges[] = {
++    {GL_MAX_VIEWPORT_DIMS, "MAX_VIEWPORT_DIMS_WIDTH",
++     "MAX_VIEWPORT_DIMS_HEIGHT", /*is_interval=*/false},
++};
++
++// Both are GLfloat ranges, so only the glGetFloatv hook sees them. The line
++// width range is measured [1,1] on all four anchors against [1,255] on a
++// software rasteriser, and the point size range [1,1024] against [1,256].
++constexpr ApostateGlRange kApostateGlFloatRanges[] = {
++    {GL_ALIASED_LINE_WIDTH_RANGE, "ALIASED_LINE_WIDTH_RANGE_MIN",
++     "ALIASED_LINE_WIDTH_RANGE_MAX", /*is_interval=*/true},
++    {GL_ALIASED_POINT_SIZE_RANGE, "ALIASED_POINT_SIZE_RANGE_MIN",
++     "ALIASED_POINT_SIZE_RANGE_MAX", /*is_interval=*/true},
+ };
+ 
+ // True when the active backend enforces the limits it reports, so a claim
+@@ -322,12 +386,90 @@ constexpr ApostateGlLimit kApostateGlLimits[] = {
+ // avoiding costs a detector a multi-hundred-megabyte allocation at the
+ // reported maximum. The cheap check is the one to pass.
+ //
+-// SwiftShader specifically, not IsSoftwareGLImplementation: that also covers
+-// D3D11 WARP, which is a different rasteriser whose enforcement has not been
+-// measured here, and guessing in the permissive direction is how an
+-// over-claim becomes a failing draw call.
+-bool BackendEnforcesGlLimits() {
+-  return GetGLImplementationParts().angle != ANGLEImplementation::kSwiftShader;
++// Which rasterisers those are is decided by name, not by implementation enum,
++// and 0112 corrects that test rather than widening the policy behind it. The
++// rule 0103 stated was always "does the backend enforce what it reports";
++// naming ANGLEImplementation::kSwiftShader was an under-approximation of it,
++// because ANGLE over Mesa llvmpipe reports kOpenGL and is indistinguishable
++// from ANGLE over a real GL driver by enum alone. That is not hypothetical:
++// on the Linux deployment target, headed under Xvfb, the composed identity
++// stops Chromium's blocklist matching llvmpipe, so ANGLE/OpenGL on llvmpipe
++// is what actually runs, and min() clamped every served limit back to a
++// software rasteriser's table.
++//
++// llvmpipe was measured against 0103's own criterion with 0103's own method,
++// on the shipped 152.0.7977.83 linux-x64 artifact: texStorage2D at 1x and 2x
++// the reported MAX_TEXTURE_SIZE, texStorage3D at 8x MAX_3D_TEXTURE_SIZE and
++// renderbufferStorageMultisample at 4x MAX_SAMPLES all return glError 0.
++// It enforces nothing, identically to the SwiftShader control run beside it.
++//
++// Still not IsSoftwareGLImplementation(): that also covers D3D11 WARP, whose
++// enforcement has not been measured, and guessing permissively is how an
++// over-claim becomes a failing draw call. WARP cannot arise on the Linux and
++// macOS targets this list covers, and llvmpipe is Linux-only.
++bool RendererIsNonEnforcingRasteriser(const char* renderer) {
++  if (!renderer) {
++    return false;
++  }
++  const std::string_view name(renderer);
++  return name.find("SwiftShader") != std::string_view::npos ||
++         name.find("llvmpipe") != std::string_view::npos ||
++         name.find("softpipe") != std::string_view::npos;
++}
++
++// `renderer` must be the driver's own GL_RENDERER, read through GLApiBase so
++// it is the unsubstituted string: RealGLApi::glGetStringFn replaces it with
++// the profile's claim, and asking the claim whether the host enforces would
++// answer about the wrong device every time.
++bool BackendEnforcesGlLimits(const char* renderer) {
++  return GetGLImplementationParts().angle !=
++             ANGLEImplementation::kSwiftShader &&
++         !RendererIsNonEnforcingRasteriser(renderer);
++}
++
++// Combine a claim with what the driver reports. On a backend that enforces
++// what it reports, a ceiling takes the lower of the two and a floor the
++// higher, so the served value is always one the driver can actually honour.
++// On a backend that enforces nothing the claim is served whole.
++template <typename T>
++T ApostateServedLimit(T claimed, T real, bool enforces, bool is_minimum) {
++  if (!enforces) {
++    return claimed;
++  }
++  return is_minimum ? std::max(claimed, real) : std::min(claimed, real);
++}
++
++// Serve a two-element range in place. Both endpoints come from the profile or
++// neither does: half a served interval is a pair no device reported.
++template <typename T>
++bool ApostateServeRange(const base::apostate::Profile* profile,
++                        const ApostateGlRange& range,
++                        bool enforces,
++                        T* params) {
++  const auto low = profile->gl_limits().find(range.low);
++  const auto high = profile->gl_limits().find(range.high);
++  if (low == profile->gl_limits().end() ||
++      high == profile->gl_limits().end()) {
++    return false;
++  }
++  // Read and written through std::array and std::copy_n rather than
++  // params[0]/params[1]. The GL entry point contract guarantees two elements
++  // and GLApiBase has just filled both, but raw indexing past [0] trips
++  // -Wunsafe-buffer-usage, and nothing in ui/gl uses the UNSAFE_BUFFERS
++  // escape hatch -- patch 0029 set this pattern for the shader precision
++  // range and there is no reason to be the first to break it.
++  std::array<T, 2> real = {};
++  std::copy_n(params, real.size(), real.begin());
++
++  // Intersecting an interval takes the higher floor and the lower ceiling.
++  // A pair of independent ceilings takes the lower of each.
++  const std::array<T, 2> served = {
++      ApostateServedLimit(static_cast<T>(low->second), real[0], enforces,
++                          /*is_minimum=*/range.is_interval),
++      ApostateServedLimit(static_cast<T>(high->second), real[1], enforces,
++                          /*is_minimum=*/false)};
++  std::copy_n(served.begin(), served.size(), params);
++  return true;
+ }
+ 
+ }  // namespace
+@@ -363,9 +505,40 @@ void RealGLApi::glGetIntegervFn(GLenum pname, GLint* params) {
+   // 0027 raised MAX_TEXTURE_SIZE from 8192 to 16384 and 16384 already fails
+   // completeness under SwiftShader -- and the reference product has it too.
+   const base::apostate::Profile* profile = base::apostate::Profile::Get();
+-  if (!profile || profile->gl_limits().empty() || !params) {
++  if (!profile || !params) {
++    return;
++  }
++  // A composed profile that carries a GPU identity and no capability table is
++  // the defect 0112 exists for, and it used to be silent: every hook returned
++  // here and the host's own numbers went to the page under a claimed device's
++  // renderer string, which is indistinguishable from working. Say so once.
++  if (profile->gl_limits().empty()) {
++    static bool warned = false;
++    if (!warned && profile->gpu_renderer().has_value()) {
++      warned = true;
++      LOG(WARNING) << "apostate: the composed profile claims GPU '"
++                   << *profile->gpu_renderer()
++                   << "' but carries no gl_limits, so every WebGL capability "
++                      "a page reads is this host's own. That pairing is a "
++                      "one-lookup contradiction; the profile is incomplete.";
++    }
+     return;
+   }
++
++  // The renderer the *driver* reports. RealGLApi::glGetStringFn substitutes
++  // the profile's claim, so this deliberately goes to the base: asking the
++  // claim whether the host enforces would answer about the wrong device.
++  // Cached because the GL implementation is fixed for process lifetime, which
++  // is the same assumption GetGLImplementationParts() already makes.
++  static const bool enforces = BackendEnforcesGlLimits(
++      reinterpret_cast<const char*>(GLApiBase::glGetStringFn(GL_RENDERER)));
++
++  for (const auto& range : kApostateGlIntegerRanges) {
++    if (range.pname == pname) {
++      ApostateServeRange(profile, range, enforces, params);
++      return;
++    }
++  }
+   for (const auto& limit : kApostateGlLimits) {
+     if (limit.pname != pname) {
+       continue;
+@@ -376,12 +549,8 @@ void RealGLApi::glGetIntegervFn(GLenum pname, GLint* params) {
+     }
+     const GLint real = *params;
+     const GLint claimed = static_cast<GLint>(it->second);
+-    if (!BackendEnforcesGlLimits()) {
+-      *params = claimed;
+-      return;
+-    }
+-    *params = std::min(claimed, real);
+-    if (claimed > real) {
++    *params = ApostateServedLimit(claimed, real, enforces, limit.is_minimum);
++    if (enforces && (limit.is_minimum ? claimed < real : claimed > real)) {
+       LOG(WARNING) << "apostate: profile claims " << limit.name << " = "
+                    << claimed << " but this driver reports " << real
+                    << "; serving " << real
+@@ -407,6 +576,17 @@ void RealGLApi::glGetFloatvFn(GLenum pname, GLfloat* params) {
+   if (!profile || profile->gl_limits().empty() || !params) {
+     return;
+   }
++  static const bool enforces = BackendEnforcesGlLimits(
++      reinterpret_cast<const char*>(GLApiBase::glGetStringFn(GL_RENDERER)));
++
++  // The aliased line-width and point-size ranges arrive here, both measured
++  // and both previously served from the host.
++  for (const auto& range : kApostateGlFloatRanges) {
++    if (range.pname == pname) {
++      ApostateServeRange(profile, range, enforces, params);
++      return;
++    }
++  }
+   for (const auto& limit : kApostateGlLimits) {
+     if (limit.pname != pname) {
+       continue;
+@@ -417,12 +597,8 @@ void RealGLApi::glGetFloatvFn(GLenum pname, GLfloat* params) {
+     }
+     const GLfloat real = *params;
+     const GLfloat claimed = static_cast<GLfloat>(it->second);
+-    if (!BackendEnforcesGlLimits()) {
+-      *params = claimed;
+-      return;
+-    }
+-    *params = std::min(claimed, real);
+-    if (claimed > real) {
++    *params = ApostateServedLimit(claimed, real, enforces, limit.is_minimum);
++    if (enforces && (limit.is_minimum ? claimed < real : claimed > real)) {
+       LOG(WARNING) << "apostate: profile claims " << limit.name << " = "
+                    << claimed << " but this driver reports " << real
+                    << "; serving " << real << ".";
+@@ -454,6 +630,8 @@ void RealGLApi::glGetInteger64vFn(GLenum pname, GLint64* params) {
+   if (!profile || profile->gl_limits().empty() || !params) {
+     return;
+   }
++  static const bool enforces = BackendEnforcesGlLimits(
++      reinterpret_cast<const char*>(GLApiBase::glGetStringFn(GL_RENDERER)));
+   for (const auto& limit : kApostateGlLimits) {
+     if (limit.pname != pname) {
+       continue;
+@@ -464,12 +642,8 @@ void RealGLApi::glGetInteger64vFn(GLenum pname, GLint64* params) {
+     }
+     const GLint64 real = *params;
+     const GLint64 claimed = static_cast<GLint64>(it->second);
+-    if (!BackendEnforcesGlLimits()) {
+-      *params = claimed;
+-      return;
+-    }
+-    *params = std::min(claimed, real);
+-    if (claimed > real) {
++    *params = ApostateServedLimit(claimed, real, enforces, limit.is_minimum);
++    if (enforces && (limit.is_minimum ? claimed < real : claimed > real)) {
+       LOG(WARNING) << "apostate: profile claims " << limit.name << " = "
+                    << claimed << " but this driver reports " << real
+                    << "; serving " << real << ".";

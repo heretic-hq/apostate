@@ -13,11 +13,27 @@ in a way no consumer can detect.
 """
 
 import argparse
+import importlib.util
 import json
 import math
 import pathlib
 import re
 import sys
+
+# The rule for which measured GL parameters a profile can carry, and what keys
+# each becomes, is owned by scripts/profile_resolver.py and shared rather than
+# restated. Two copies is how this pipeline came to drop five values the
+# anchor pipeline carries -- the decomposition names below are the ones the
+# compiled C++ looks up by string, so a second opinion about them is a bug.
+_RESOLVER_PATH = pathlib.Path(__file__).resolve().parents[2] / "scripts/profile_resolver.py"
+_RESOLVER_SPEC = importlib.util.spec_from_file_location("apostate_profile_resolver",
+                                                        _RESOLVER_PATH)
+_RESOLVER = importlib.util.module_from_spec(_RESOLVER_SPEC)
+_RESOLVER_SPEC.loader.exec_module(_RESOLVER)
+
+GL_LIMIT_RANGE_KEYS = _RESOLVER.GL_LIMIT_RANGE_KEYS
+gl_limit_entries = _RESOLVER.gl_limit_entries
+gl_limit_is_servable = _RESOLVER.gl_limit_is_servable
 
 
 def probe(capture, name):
@@ -38,11 +54,37 @@ def css_rgb_to_argb(value):
 
 
 def derive_gl_limits(gl1, gl2):
-    """Preserve measured limits; reject conflicting context measurements."""
+    """Preserve measured limits; reject conflicting context measurements.
+
+    Which names are servable and what keys each decomposes into comes from
+    ``gl_limit_is_servable`` and ``gl_limit_entries`` in
+    ``scripts/profile_resolver.py``, so a capture-derived profile and an
+    anchor-derived one cannot disagree about either. This pipeline used to
+    keep its own opinion, accepting only MAX_-prefixed values above zero plus
+    ALIASED_POINT_SIZE_RANGE, and silently dropped five measured parameters
+    the compiled tables now carry: ALIASED_LINE_WIDTH_RANGE,
+    MAX_SERVER_WAIT_TIMEOUT (measured 0), MIN_PROGRAM_TEXEL_OFFSET (measured
+    negative) and UNIFORM_BUFFER_OFFSET_ALIGNMENT.
+
+    Validation of the raw capture stays here, because it is this pipeline's
+    job and not the resolver's: a capture is untrusted input and a malformed
+    measurement is an error to report, where an anchor is already-validated
+    corpus data. So a recognised name with a malformed value raises, while an
+    unrecognised name is skipped.
+
+    One deliberate widening, recorded so it is not later mistaken for an
+    accidental loosening: scalars are now accepted through the shared rule's
+    losslessly-integral test rather than ``type(value) is int``, so a capture
+    reporting 16384.0 is kept where it used to be discarded. The strict test
+    was itself a disagreement in miniature -- the anchor layer, the generator
+    and the C++ loader in base/apostate/profile.cc all accept an integral
+    JSON double, and only this pipeline refused one. It cannot change a value
+    this function emitted before; it can only stop one being dropped.
+    """
     parameters = {}
     for src in (gl1, gl2):
         for name, value in (src.get("parameters") or {}).items():
-            if not name.startswith("MAX_") and name != "ALIASED_POINT_SIZE_RANGE":
+            if not gl_limit_is_servable(name):
                 continue
             if name in parameters and parameters[name] != value:
                 raise ValueError(f"WebGL1/WebGL2 disagree on {name}; "
@@ -51,31 +93,32 @@ def derive_gl_limits(gl1, gl2):
 
     limits = {}
     for name, value in parameters.items():
-        if name == "ALIASED_POINT_SIZE_RANGE":
-            if (not isinstance(value, list) or len(value) != 2
-                    or any(type(v) not in (int, float) or not math.isfinite(v)
-                           or not 0 < v <= 2**31 - 1 for v in value)
-                    or value[0] > value[1]):
-                raise ValueError("ALIASED_POINT_SIZE_RANGE must be a finite positive ordered pair")
-            if all(float(v).is_integer() for v in value):
-                limits["ALIASED_POINT_SIZE_RANGE_MIN"] = int(value[0])
-                limits["ALIASED_POINT_SIZE_RANGE_MAX"] = int(value[1])
-            else:
-                print(f"WARNING: nonintegral ALIASED_POINT_SIZE_RANGE {value!r} "
-                      "stays inherited; integer profile caps cannot represent it", file=sys.stderr)
-        elif name == "MAX_VIEWPORT_DIMS":
+        if name == "MAX_VIEWPORT_DIMS":
+            # Two independent dimensions, both required to be exact int32.
             if (not isinstance(value, list) or len(value) != 2
                     or any(type(v) is not int or not 0 < v <= 2**31 - 1
                            for v in value)):
                 raise ValueError("MAX_VIEWPORT_DIMS must contain two positive int32 values")
-            width, height = value
-            limits["MAX_VIEWPORT_DIMS_WIDTH"] = width
-            limits["MAX_VIEWPORT_DIMS_HEIGHT"] = height
-            if width == height:
+            limits.update(gl_limit_entries(name, value))
+            if value[0] == value[1]:
                 # Older binaries understand the scalar square bound.
-                limits[name] = width
-        elif type(value) is int and value > 0:
-            limits[name] = value
+                limits[name] = value[0]
+        elif name in GL_LIMIT_RANGE_KEYS:
+            # An interval: ordered, finite, positive, and float-valued
+            # endpoints are legal because a real device reports them.
+            if (not isinstance(value, list) or len(value) != 2
+                    or any(type(v) not in (int, float) or not math.isfinite(v)
+                           or not 0 < v <= 2**31 - 1 for v in value)
+                    or value[0] > value[1]):
+                raise ValueError(f"{name} must be a finite positive ordered pair")
+            entries = gl_limit_entries(name, value)
+            if entries:
+                limits.update(entries)
+            else:
+                print(f"WARNING: nonintegral {name} {value!r} stays inherited; "
+                      "integer profile caps cannot represent it", file=sys.stderr)
+        else:
+            limits.update(gl_limit_entries(name, value))
     return limits
 
 

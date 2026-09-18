@@ -420,10 +420,9 @@
     },
     "gl_limits": {
       "type": "object",
-      "description": "Measured MAX_* limits and losslessly integral ALIASED_POINT_SIZE_RANGE_MIN/MAX endpoints. Effective limits never exceed native capabilities; point ranges intersect native bounds. Nonintegral point endpoints remain unrepresented and inherited rather than truncated.",
+      "description": "Measured integral GL limits a page can read in one getParameter call, keyed as the parameter is spelled. A two-element range arrives as two scalars, because both the loader and ANGLE's cap lookup read scalars: ALIASED_LINE_WIDTH_RANGE and ALIASED_POINT_SIZE_RANGE as _MIN/_MAX, MAX_VIEWPORT_DIMS as _WIDTH/_HEIGHT. Effective limits never exceed native capabilities on a backend that enforces what it reports, and a MIN_ limit is a floor so the clamp reverses; ranges intersect native bounds. A nonintegral endpoint stays unrepresented and inherited rather than truncated. No positive lower bound: MIN_PROGRAM_TEXEL_OFFSET is measured -8 and MAX_SERVER_WAIT_TIMEOUT 0 on all four anchors, and a minimum of 1 silently excluded both from every composed profile.",
       "additionalProperties": {
-        "type": "integer",
-        "minimum": 1
+        "type": "integer"
       }
     },
     "gl_extensions": {

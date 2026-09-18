@@ -87,6 +87,18 @@ inadmissible:
 python3 capture/collect-unattended.py --label <name> --out <dir>
 ```
 
+The browser has to be the release major, or admission refuses the capture on
+its version alone. A distribution's Chrome package is whatever is current, so a
+server is as likely to be behind as ahead. Google's apt repository carries only
+the newest stable, but older stable `.deb`s stay in the pool — fetch the one
+matching `build/CHROMIUM_VERSION` and unpack it beside the installed browser
+rather than over it, then point the driver at it with `--chrome`:
+
+```sh
+curl -O https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_<version>-1_amd64.deb
+dpkg-deb -x google-chrome-stable_<version>-1_amd64.deb /opt/chrome<major>
+```
+
 Under Xvfb the only GL driver is Mesa llvmpipe, so Chrome's software-rendering
 blocklist disables `webgl` and `webgpu`, `getContext('webgl')` returns null, and
 the `webgl1` and `webgl2` probes measure nothing at all — which the receiver

@@ -261,5 +261,13 @@ jobs:
         run: |
           set -euo pipefail
           test -f npm/package.json
+          test -f npm/package-lock.json
           test -d npm/test
+          # The package has real runtime dependencies -- socks-proxy-agent and
+          # the two proxy agents -- and npm/node_modules is gitignored, so the
+          # test run resolved nothing and died on ERR_MODULE_NOT_FOUND the
+          # first time this workflow ever executed. It passed on every
+          # developer machine because node_modules was already there. `npm ci`
+          # installs the committed lockfile exactly and nothing else.
+          npm ci --prefix npm
           npm --prefix npm test

@@ -113,7 +113,11 @@ jobs:
         run: |
           set -euo pipefail
           test -f npm/package.json
+          test -f npm/package-lock.json
           test -d npm/test
+          # Without this the run resolves no dependencies at all; see the
+          # same step in check.yml.
+          npm ci --prefix npm
           npm --prefix npm test
 
   setup:

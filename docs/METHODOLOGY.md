@@ -265,6 +265,87 @@ launched can carry V2, and a patch that applies in series but has not been built
 yet cannot carry more than V0. The current numbers live in `ledger/`, which is
 where they stay accurate.
 
+### Collecting a V3 capture on a headless Linux server
+
+The deployment target is also the machine most likely to be available for
+measuring, and it has no display and nobody watching. One command handles it:
+
+```sh
+python3 capture/collect-unattended.py --label NAME --out DIR
+```
+
+It starts Xvfb on `:99`, reusing a display that is already up, starts the
+receiver on a free loopback port with `--once`, launches a **headed** browser at
+`?auto=1` — the same code path a person's click takes, with no CDP, no WebDriver
+and no injected script — and prints the admission decision. Exit 0 is accepted,
+1 rejected, 2 nothing submitted. Measured on a 32-core GPU-less box at roughly
+five seconds per capture.
+
+Headed under a virtual display is not a preference, it is the only shape that
+passes. The receiver rejects any capture whose user agent contains `Headless`,
+so `--headless` cannot produce an admissible capture at all, and rule 6 wants a
+normal browser regardless.
+
+Nothing here depends on a patched binary. The whole path is stock Chrome of the
+release major plus `capture/server/receive.py`, which is plain Python, so this
+runbook is usable today while most of the behaviour described elsewhere on this
+page is still waiting on a build. The patched binary appears only as the
+*subject* of a later conformance run, and the collection mechanism is the same
+either way.
+
+Two host facts need handling, and both are recorded rather than papered over.
+
+**WebGL has to be re-permitted.** Under Xvfb the only GL driver is Mesa
+llvmpipe, which Chrome's software-rendering blocklist disables WebGL and WebGPU
+for, and the implicit SwiftShader fallback is gone — deprecated from Chrome 130
+and progressively removed on Linux and macOS from 139. Measured on that box,
+three runs differing only in flags:
+
+| Flags | Result |
+| --- | --- |
+| none | `getContext('webgl')` returns null, `webgl1` and `webgl2` report `webgl unavailable`, capture rejected |
+| `--enable-unsafe-swiftshader` | 44 of 44 probes measured, renderer `ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)`, accepted |
+| `--use-gl=angle --use-angle=swiftshader` | identical renderer string, also accepted |
+
+So the one flag does the whole job under Xvfb, and the script passes no other
+GL-related switch. Prefer it anyway over the pair that also works, because the
+two are different mechanisms: Chromium's own documentation separates the SwANGLE
+*driver* mode from the WebGL *fallback* opt-in, so
+`--enable-unsafe-swiftshader` permits the software fallback while
+`--use-angle=swiftshader` selects a backend. On a host that does have a GPU the
+documented behaviour of the opt-in is therefore to change nothing, while the
+driver switch would yield a software capture from hardware without saying so —
+the same class of error as the `--disable-gpu` trap in
+[docs/FLAGS.md](FLAGS.md). That last comparison is the switches' documented
+division of labour rather than a measurement, because the box this was taken on
+has no GPU to prove it with. What is measured is the backstop: the script prints
+the renderer it actually measured, so a software capture cannot be mistaken for
+a hardware one.
+
+For more than one box there is an enterprise policy,
+`EnableUnsafeSwiftShader`, added for the managed-VM case.
+
+**The window-management permission has to exist before the run.**
+`screen.details` will not prompt during a capture and nobody is present to click
+Allow, so the grant is written into the fresh profile. One trap for anyone doing
+it by hand: Chrome still stores this under the API's old name,
+`window_placement`, in `Default/Preferences`. Seeding `window_management` is
+silently ignored.
+
+A capture taken this way describes SwiftShader, not the host's GPU, and the
+script prints the renderer it actually measured. That is a usable capture, and
+the corpus policy around it is deliberate:
+`scripts/import-capture.py` admits it only with `--allow-software-renderer`, and
+`scripts/build-anchors.py` refuses to build a hardware anchor from it.
+
+Two operational notes. The box needs a browser of the release major: Google's
+apt repository carries only current stable, but older stable debs remain in the
+pool and `dpkg-deb -x` unpacks one beside the installed browser without
+disturbing it. And a rejected capture's body is never written to disk, so
+diagnose from the admission record alone — it carries `probe_errors`, every
+probe that did not complete with its error. For the browser's own GPU messages,
+pass `-- --enable-logging=stderr` and read the log in the printed run directory.
+
 ### A claim outlives the thing it described
 
 This is the failure mode that cost this project the most, and it is invisible to

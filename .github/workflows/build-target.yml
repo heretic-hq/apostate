@@ -181,7 +181,10 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/test_profile_resolver.py
-          python3 scripts/validate-release-baseline.py --root .
+          # scripts/build.sh has just regenerated MANIFEST.lock in this
+          # workspace, so --release asserts the build really recorded the
+          # patch set it was given rather than an earlier one.
+          python3 scripts/validate-release-baseline.py --root . --release
           bash scripts/smoke-binary.sh "$APOSTATE_TARGET"
       - name: Package artifact and manifest
         shell: bash

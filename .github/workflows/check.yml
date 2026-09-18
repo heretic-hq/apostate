@@ -1,23 +1,24 @@
 name: checks
 
+# Every job here reads this repository only and finishes in seconds, so there
+# is no `paths:` filter and no `if:` guard on any step. Both were removed
+# deliberately.
+#
+# This workflow triggered on `pull_request` alone. Every commit in this
+# repository's history landed by direct push -- the history is linear with no
+# merge commits -- so no pull request ever existed and the workflow had never
+# run once, on any commit. `scripts/validate-release-baseline.py` had been
+# failing at HEAD and `scripts/test_profile_resolver.py` with it, and nothing
+# reported either, because a check that never runs renders exactly like a
+# check that passed. A `paths:` filter is the same failure in miniature: it
+# is a promise that a job's inputs are all under those paths, and the
+# `baseline` job reads build/ while `catalogue` reads corpus/, neither of
+# which was listed. Skipping a two-second job buys nothing worth that.
 on:
+  push:
+    branches:
+      - main
   pull_request:
-    paths:
-      - "config/**"
-      - "ledger/**"
-      - "release/**"
-      - "resources/profiles/**"
-      - "scripts/**"
-      - "python/**"
-      - "npm/**"
-      - "patches/**"
-      # check-schema-wiring.py resolves an x-wiring annotation's evidence
-      # against a file in this repository, and one of them is
-      # docs/LIMITATIONS.md. A docs-only edit can therefore invalidate a
-      # schema annotation, so docs are a trigger rather than a blind spot.
-      - "docs/**"
-      - ".github/release/**"
-      - ".github/workflows/check.yml"
   workflow_dispatch:
 
 permissions:
@@ -32,7 +33,6 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Validate ledger
-        if: ${{ hashFiles('scripts/validate-ledger.py') != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -50,7 +50,6 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Validate pinned baseline
-        if: ${{ hashFiles('scripts/validate-release-baseline.py') != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -69,7 +68,6 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Validate unified-diff hunk headers
-        if: ${{ hashFiles('scripts/validate-patch-headers.py') != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -93,7 +91,6 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Parse and validate schema documents
-        if: ${{ hashFiles('scripts/validate-release-contract.py') != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -139,13 +136,13 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Reconcile declared profile keys against the C++ that reads them
-        if: ${{ hashFiles('scripts/check-schema-wiring.py') != '' }}
         shell: bash
         run: |
           set -euo pipefail
           test -f scripts/check-schema-wiring.py
           test -f config/profile.schema.json
           test -f patches/series
+          test -f ledger/surfaces.jsonl
           # Its own job rather than a step inside "schema validation", because
           # a failure here is a different repair: the schema is well-formed and
           # a key in it is inert. fonts.enumeration_allowlist sat in the schema,
@@ -166,7 +163,6 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Validate catalogue index
-        if: ${{ hashFiles('scripts/profile_resolver.py') != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -175,13 +171,16 @@ jobs:
           test -d resources/profiles/dispersion
           python3 scripts/profile_resolver.py --catalogue
       - name: Run deterministic resolver checks
-        if: ${{ hashFiles('scripts/test_profile_resolver.py') != '' }}
         shell: bash
         run: |
           set -euo pipefail
           test -f scripts/test_profile_resolver.py
           test -f resources/profiles/catalogue.json
           test -d resources/profiles/dispersion
+          # The resolver loads the anchor records the catalogue names, so
+          # corpus/ is an input to this job even though nothing in the job
+          # path mentions it.
+          test -d corpus/anchors
           python3 scripts/test_profile_resolver.py
 
   geoip:
@@ -192,13 +191,48 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Run network-free GeoIP checks
-        if: ${{ hashFiles('scripts/test_geoip.py') != '' }}
         shell: bash
         run: |
           set -euo pipefail
           test -f scripts/geoip.py
           test -f scripts/test_geoip.py
           python3 scripts/test_geoip.py
+
+  tooling:
+    name: operational script tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Run every scripts/test_*.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Two of the sixteen were wired: test_profile_resolver.py and
+          # test_geoip.py. The other fourteen tested the scripts that gate a
+          # release and had never run in CI, which is how the baseline
+          # validator kept a test asserting "out of numeric apply order"
+          # against a series that is deliberately dependency-ordered: the
+          # test was green and the rule it encoded was wrong. Discovering the
+          # set rather than listing it means a new one is wired by existing.
+          # The whole set takes under twenty seconds.
+          shopt -s nullglob
+          files=(scripts/test_*.py)
+          if [ "${#files[@]}" -lt 10 ]; then
+            echo "expected the scripts/ test suite, found ${#files[@]} files" >&2
+            exit 1
+          fi
+          status=0
+          for file in "${files[@]}"; do
+            echo "::group::$file"
+            # Every file is run even after one fails. A suite that stops at
+            # the first failure reports one finding per run, and these had
+            # fourteen runs' worth of drift to report at once.
+            python3 "$file" || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"
 
   python:
     name: Python package tests
@@ -208,7 +242,6 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Run Python package tests
-        if: ${{ hashFiles('python/tests/**/*.py') != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -224,7 +257,6 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Run Node package tests
-        if: ${{ hashFiles('npm/package.json') != '' }}
         shell: bash
         run: |
           set -euo pipefail

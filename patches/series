@@ -117,3 +117,10 @@
 # context is what 0091 and 0093 left behind, and its compose.h hunk sits in the
 # switch block 0085 extended.
 0102-compose-serves-a-hardware-gpu-identity.patch
+
+# 0103 and 0104 are the two halves of serving a claimed GPU cluster that 0102's
+# selection change makes reachable, so both come after it. 0103 needs the whole
+# gl_gl_api_implementation.cc chain ahead of it (0026, 0027, 0032, 0035, 0036,
+# 0070); 0104 needs 0028, whose filter it extends. Neither depends on the other.
+0103-gl-serve-the-claimed-limit-on-a-soft-backend.patch
+0104-webgl-serve-claimed-constant-extensions.patch

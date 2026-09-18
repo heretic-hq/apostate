@@ -443,9 +443,9 @@ class DeterministicResolver:
             timezone_source = "profile-selected" if timezone else "host"
         # A locale-only envelope is not a cheap way to force a locale. The
         # browser's InstallComposedProfile() returns early whenever
-        # --apostate-profile is present, and base/apostate/profile.cc leaves
-        # absent fields absent by design, so an envelope carrying nothing but a
-        # locale means composition never runs and every other axis -- GPU
+        # --apostate-profile carries device content, and base/apostate/profile.cc
+        # leaves absent fields absent by design, so an envelope carrying nothing
+        # but a locale means composition never runs and every other axis -- GPU
         # identity, capability cluster, cores, memory, panel, timezone, fonts,
         # media topology, voices -- silently falls back to the host while the
         # seed is ignored. On the composing path the locale therefore leaves as

@@ -115,6 +115,49 @@ def _first(mapping: Mapping[str, Any], *names: str) -> Any:
     return None
 
 
+#: Apostate-owned country -> locale policy, mirroring ``scripts/geoip.py``'s
+#: ``_COUNTRY_LOCALES`` and the npm package's ``GEOIP_COUNTRY_LOCALES`` so one
+#: provider payload resolves to one locale everywhere. A country the table does
+#: not name stays unresolved: ``en-<COUNTRY>`` for an unnamed country invents a
+#: language rather than deriving one, and an unresolved field is the honest
+#: answer.
+_COUNTRY_LOCALES = {
+    "AR": "es-AR", "AT": "de-AT", "AU": "en-AU", "BE": "nl-BE", "BR": "pt-BR",
+    "CA": "en-CA", "CH": "de-CH", "CL": "es-CL", "CN": "zh-CN", "CO": "es-CO",
+    "CZ": "cs-CZ", "DE": "de-DE", "DK": "da-DK", "ES": "es-ES", "FI": "fi-FI",
+    "FR": "fr-FR", "GB": "en-GB", "GR": "el-GR", "HK": "zh-HK", "HU": "hu-HU",
+    "IE": "en-IE", "IL": "he-IL", "IN": "en-IN", "IT": "it-IT", "JP": "ja-JP",
+    "KR": "ko-KR", "MX": "es-MX", "NL": "nl-NL", "NO": "nb-NO", "NZ": "en-NZ",
+    "PL": "pl-PL", "PT": "pt-PT", "RO": "ro-RO", "RU": "ru-RU", "SA": "ar-SA",
+    "SE": "sv-SE", "SG": "en-SG", "TH": "th-TH", "TR": "tr-TR", "TW": "zh-TW",
+    "UA": "uk-UA", "US": "en-US", "VE": "es-VE", "VN": "vi-VN", "ZA": "en-ZA",
+}
+
+_TIMEZONE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9._+-]*(?:/[A-Za-z0-9._+-]+)+$")
+
+
+def _provider_timezone(value: Any) -> str | None:
+    """Accept only what can drive ``--fingerprint-timezone``.
+
+    Providers answer in three shapes: an IANA identifier, a nested object
+    (``{"id": "Europe/Berlin"}``), and a bare UTC offset (``"+02:00"``, which
+    freeipapi returns). Only an identifier is usable, so anything else is
+    unresolved rather than patched up into something that looks like one. This
+    mirrors ``scripts/geoip.py``'s ``_valid_provider_timezone``.
+    """
+
+    if isinstance(value, Mapping):
+        value = value.get("id") or value.get("name") or value.get("timezone")
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > 128:
+        return None
+    if value.upper() in {"UTC", "GMT"} or _TIMEZONE_PATTERN.fullmatch(value):
+        return value
+    return None
+
+
 def normalize_result(value: Any) -> GeoIPResult:
     if isinstance(value, GeoIPResult):
         return value
@@ -123,7 +166,7 @@ def normalize_result(value: Any) -> GeoIPResult:
         value = to_dict()
     if not isinstance(value, Mapping):
         raise GeoIPError("GeoIP provider returned a non-object result")
-    timezone = _first(value, "timezone", "time_zone", "tz")
+    timezone = _provider_timezone(_first(value, "timezone", "time_zone", "tz"))
     locale = _first(value, "locale", "language", "default_locale")
     languages = _first(value, "languages", "accept_languages")
     if isinstance(languages, str):
@@ -132,12 +175,21 @@ def normalize_result(value: Any) -> GeoIPResult:
         languages = tuple(str(part) for part in languages if part)
     else:
         languages = ()
+    # A two-letter code or nothing, as scripts/geoip.py's _country_code does: a
+    # provider that answers "Germany" under `country` has given a name rather
+    # than a code, and a name maps to nothing.
+    country = _first(value, "country_code", "countryCode", "country")
+    country = country.strip().upper() if isinstance(country, str) else None
+    if country is not None and not re.fullmatch(r"[A-Z]{2}", country):
+        country = None
+    if not isinstance(locale, str) and not languages and country:
+        locale = _COUNTRY_LOCALES.get(country)
     provider_name = value.get("provider") if isinstance(value.get("provider"), str) else None
     version = value.get("provider_version") if isinstance(value.get("provider_version"), str) else None
     return GeoIPResult(
-        country_code=_first(value, "country_code", "countryCode", "country"),
+        country_code=country,
         region=_first(value, "region", "region_code", "regionCode"),
-        timezone=timezone if isinstance(timezone, str) else None,
+        timezone=timezone,
         locale=locale if isinstance(locale, str) else None,
         languages=languages,
         ip=_first(value, "ip", "address", "exit_ip"),

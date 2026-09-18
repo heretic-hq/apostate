@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import importlib
 import io
@@ -32,6 +33,7 @@ from apostate import (  # noqa: E402
     PROFILE_SCHEMA_VERSION,
     BinaryManager,
     ConfigurationError,
+    GeoIPError,
     LaunchError,
     ProfileError,
     UnpublishedArtifactError,
@@ -42,6 +44,7 @@ from apostate import (  # noqa: E402
     launch_async,
     launch_persistent_context,
     load_catalogue,
+    resolve_geoip,
     resolve_profile,
     target_platform,
     translate_options,
@@ -412,9 +415,10 @@ print(catalogue['browser_build'])
 
     def test_locale_travels_as_an_override_never_as_a_partial_envelope(self) -> None:
         # The regression test for a whole class of defect. The browser's
-        # InstallComposedProfile() returns early whenever --apostate-profile is
-        # present and base/apostate/profile.cc leaves absent fields absent, so a
-        # locale-only envelope means composition never runs: eleven of twelve
+        # InstallComposedProfile() returns early whenever --apostate-profile
+        # carries device content and base/apostate/profile.cc leaves absent
+        # fields absent, so a locale-only envelope means composition never runs:
+        # eleven of twelve
         # axes fall back to the host and --fingerprint is silently ignored.
         # geoip defaults on, so that was the shape of almost every launch. The
         # assertion is on the emitted argv, because argv is what the browser
@@ -465,6 +469,86 @@ print(catalogue['browser_build'])
         with self.assertRaisesRegex(ProfileError, "cannot be combined"):
             launch_module._native_args(launch_module._resolve_plan(
                 translate_options(profile={"id": "mine"}, args=["--fingerprint=99"], geoip=False)))
+
+    def test_geoip_failure_sends_no_override_rather_than_raising_or_inventing(self) -> None:
+        # Two behaviours met here. This package used to raise ``GeoIPError``,
+        # which the spec permits -- the prohibition is on inventing, not on
+        # continuing -- and the npm package invented en-US/UTC, which it does
+        # not permit. Both now warn and send no override at all. That is a real
+        # state only because GeoIP drives --fingerprint-locale and
+        # --fingerprint-timezone rather than an --apostate-profile envelope: an
+        # envelope suppressed composition whether or not it carried a locale, so
+        # "send nothing" used to be indistinguishable from "send en-US/UTC".
+        # Sending neither switch now leaves the composed profile's own drawn
+        # pair in place, coherent because the same seed drew it. The npm package
+        # pins the same seven cases in test/index.test.mjs.
+        launch_module = importlib.import_module("apostate.launch")
+
+        def failing(proxy: Any, timeout: Any) -> dict[str, Any]:
+            raise RuntimeError("connect ECONNREFUSED 203.0.113.9:443")
+
+        def timing_out(proxy: Any, timeout: Any) -> dict[str, Any]:
+            raise TimeoutError("the read timed out")
+
+        class _NoLookupMethod:
+            pass
+
+        cases = (
+            ("lookup failure", failing, [], "GeoIP lookup failed"),
+            ("timeout", timing_out, [], "timed out"),
+            ("unavailable provider", _NoLookupMethod(), [], "no lookup method"),
+            # Nothing failed in the next three: the provider answered, without
+            # one of the two fields. The npm package re-invented the pair here
+            # from a second site independent of its failure handler, and this
+            # package discarded the field it did get by raising.
+            ("a result with no timezone", lambda proxy, timeout: {"locale": "de-DE,de"},
+             ["--fingerprint-locale=de-DE,de"], "resolved no timezone"),
+            ("a result with no locale", lambda proxy, timeout: {"timezone": "Europe/Berlin"},
+             ["--fingerprint-timezone=Europe/Berlin"], "resolved no locale"),
+            # freeipapi answers with a UTC offset, which cannot drive the
+            # switch: unresolved, not adjusted into something that looks like an
+            # identifier.
+            ("an offset instead of an identifier",
+             lambda proxy, timeout: {"locale": "de-DE", "timezone": "+02:00"},
+             ["--fingerprint-locale=de-DE"], "resolved no timezone"),
+            # A country code derives its locale from the Apostate-owned table
+            # that scripts/geoip.py and the npm package share, so a German exit
+            # is de-DE rather than an invented en-DE or en-US.
+            ("a country code and a timezone",
+             lambda proxy, timeout: {"country_code": "DE", "timezone": "Europe/Berlin"},
+             ["--fingerprint-locale=de-DE", "--fingerprint-timezone=Europe/Berlin"], None),
+        )
+        for label, provider, expected, warning in cases:
+            with self.subTest(case=label):
+                stream = io.StringIO()
+                with contextlib.redirect_stderr(stream):
+                    plan = launch_module._resolve_plan(
+                        translate_options(fingerprint=4242), geoip_provider=provider)
+                args = launch_module._native_args(plan)
+                self.assertEqual(
+                    [item for item in args
+                     if item.startswith("--fingerprint-locale")
+                     or item.startswith("--fingerprint-timezone")],
+                    expected)
+                self.assertIn("--fingerprint=4242", args)
+                self.assertFalse(any("en-US" in item or "UTC" in item for item in args))
+                warnings = plan.diagnostics["warnings"]
+                if warning is None:
+                    self.assertEqual(warnings, [])
+                    self.assertEqual(stream.getvalue(), "")
+                else:
+                    self.assertTrue(any(warning in entry for entry in warnings), warnings)
+                    self.assertIn(warning, stream.getvalue())
+
+        # A non-positive timeout is a caller bug rather than a network failure,
+        # so it still raises, and a direct resolve_geoip() call keeps raising on
+        # every failure: the launch path is what stopped raising, not the
+        # primitive. Both classes stay exported for the direct callers.
+        with self.assertRaisesRegex(GeoIPError, "greater than zero"):
+            launch_module._resolve_plan(translate_options(), geoip_provider=failing,
+                                        geoip_timeout=0)
+        with self.assertRaisesRegex(GeoIPError, "GeoIP lookup failed"):
+            resolve_geoip(failing)
 
     def test_explicit_inline_profile_validates_and_reaches_the_native_envelope(self) -> None:
         launch_module = importlib.import_module("apostate.launch")

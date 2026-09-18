@@ -17,7 +17,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from .binary import BinaryManager, ensure_binary
 from .config import LaunchConfig, check_fingerprint_switches, translate_options
 from .errors import ConfigurationError, GeoIPError, LaunchError, ProfileError
-from .geoip import GeoIPResult, redact_proxy, resolve_geoip
+from .geoip import GeoIPResult, resolve_geoip
 from .profile_validation import validate_profile
 from .resolver import DeterministicResolver, ProfileResolution
 
@@ -223,6 +223,17 @@ def _resolve_plan(config: LaunchConfig, *, resolver: Any = None, catalogue: Any 
             diagnostics = {"profile_id": str(profile.get("id") or "custom"), "warnings": []}
     else:
         raise ConfigurationError("resolver must be callable or DeterministicResolver")
+    # The lookup runs before a ProfileResolution exists, so a GeoIP warning
+    # cannot travel in ``ProfileResolution.warnings``; it is merged into the
+    # plan's diagnostics here instead. A caller inspecting the return value
+    # reads this list, which is why a stderr line alone is not enough. Every
+    # branch above provides one, including the custom-resolver dict.
+    if geoip_warnings:
+        existing = diagnostics.get("warnings")
+        diagnostics = {
+            **diagnostics,
+            "warnings": (list(existing) if isinstance(existing, list) else []) + geoip_warnings,
+        }
     # This second validation is intentional: custom resolvers are untrusted
     # integration points and no process may start before this check succeeds.
     profile = validate_profile(profile)
@@ -256,8 +267,9 @@ def _native_args(plan: LaunchPlan, *, persistent: bool = False) -> list[str]:
 
     if plan.resolution is not None and plan.resolution.profile_id == "native-composed":
         # Locale and timezone ride 0085's per-field override switches, never a
-        # profile envelope. An envelope -- even one describing only a locale --
-        # makes the browser's InstallComposedProfile() return early, so nothing
+        # profile envelope. An envelope describing a device -- even one
+        # describing only a locale -- makes the browser's
+        # InstallComposedProfile() return early, so nothing
         # is composed, the seed above is silently ignored, and every axis the
         # envelope omits falls back to the host. An override instead narrows the
         # draw inside the composed profile, which is what this path wants.

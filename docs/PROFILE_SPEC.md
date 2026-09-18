@@ -188,18 +188,48 @@ catalogue holds one backend per platform, and naming the platform names the
 backend.
 
 `null` does not mean the host's platform. The default is host-conditional:
-`macos` on a macOS host, `windows` on a Windows host, and `windows` on a Linux
-host. A Linux host claiming Windows is the one default that is not the host's
-own OS, and its cost is the Windows font set — see [docs/FONTS.md](FONTS.md) and
-the cross-OS section of [docs/LIMITATIONS.md](LIMITATIONS.md).
 
-Note for package authors and anyone reading the exported helpers:
-`host_persona()` in the Python package and `hostPersona()` in the Node package
-report the **host's** platform, which is what they are for. Since the binary's
-default claimed persona is host-conditional, the two differ on a Linux host, and
-`host_persona()` is not the default persona. A launcher that wants to know what a
-default launch will claim has to apply the table above rather than calling the
-helper.
+| Host token | Default persona |
+| --- | --- |
+| `macos` | `macos` |
+| `windows` | `windows` |
+| `linux` | `windows` |
+| anything else, including empty | returned unchanged |
+
+A Linux host claiming Windows is the one default that is not the host's own OS,
+and its cost is the Windows font set — see [docs/FONTS.md](FONTS.md) and the
+cross-OS section of [docs/LIMITATIONS.md](LIMITATIONS.md). The last row is
+deliberate rather than a gap: an unrecognised host token is passed through
+unchanged so that the browser fails its own `IsKnownPlatform` check and inherits
+the host, which is the right outcome for a platform with no corpus behind it.
+
+That table has one owner per language, exported so a caller never has to
+restate it:
+
+| | Table | Function |
+| --- | --- | --- |
+| Python | `apostate.DEFAULT_PERSONA_BY_HOST` | `apostate.default_persona_for_host(host_token)` |
+| Node | `DEFAULT_PERSONA_BY_HOST` | `defaultPersonaForHost(hostToken)` |
+
+`host_persona()` in the Python package reports the **host's** platform, which is
+what it is for and what it still does. What changed is the assumption that the
+host's platform and the claimed one are the same: they are not, on a Linux host.
+Call `default_persona_for_host(host_persona())` for the claimed one. The Node
+package keeps its host lookup internal and exposes the same answer through
+`normalizePersona()`, which falls back to the host when given nothing.
+
+The launch path needs neither: it emits `--fingerprint-platform` only when the
+caller actually specified a persona, so a default launch leaves the choice to
+the browser and the compositor is the single source of truth. The resolver path
+has no browser to ask, since it composes locally, so it applies the table
+itself. One exception, and it is correct: under `fingerprint="host"` the
+reported platform is the host's, because host inheritance composes nothing and
+the host is what the page sees.
+
+The package-side behaviour above is tested. The end-to-end consequence — a bare
+launch on a Linux server presenting as Windows — depends on patch `0102`, which
+has not been built, so treat the outcome as unverified even though the launcher
+half is not.
 
 Identity strings (`unmaskedVendor`, `unmaskedRenderer`, WebGPU
 `vendor`/`architecture`) rotate only among measured members of one anchor,
@@ -219,8 +249,8 @@ The schema groups fields as follows:
 | `platform`, `browser` | Client Hints platform, platform version, architecture, bitness, WoW64, form factors, UA string | The UA browser version must match the Chromium binary. Brand fields are assert-only: the brand list is a build invariant and the loader fails closed on a mismatch instead of rewriting it. |
 | `cpu`, `memory`, `audio` | Logical cores, installed memory, audio buffer frames | Bucket values only, and clamped down to host capability, never up. |
 | `screen`, `window` | Panel geometry, DPR, gamut, HDR, work-area insets, window chrome deltas | Impossible display arrangements are rejected. `avail_*` is derived from the panel plus the furniture insets; insets exceeding the panel fail the launch. |
-| `gpu`, `gl_limits`, `gl_extensions`, `gl_precisions` | Renderer/vendor identity, WebGL limits, extensions and shader precision | These are native target inputs. Limits are capped by native capability; unsupported extensions cannot be added. Exact equality requires native behavior validation, not renderer identity alone. |
-| `webgpu` | Adapter vendor, architecture, features, limits | Native target inputs. Features and limits are intersected with the native adapter; unsupported capabilities are not invented. |
+| `gpu`, `gl_limits`, `gl_extensions`, `gl_precisions` | Renderer/vendor identity, WebGL limits, extensions and shader precision | These are native target inputs. Limits are capped by native capability on a backend that enforces what it reports, and served as claimed on one that does not (`0103`); five claimed extensions whose objects carry only constants are served from Blink's own classes (`0104`) and the rest cannot be added. Exact equality requires native behavior validation, not renderer identity alone, and the residuals are in [docs/LIMITATIONS.md](LIMITATIONS.md). |
+| `webgpu` | Adapter vendor, architecture, features, limits | Served from the same measured anchor member the WebGL cluster comes from, so the two surfaces cannot disagree: pinning `windows-d3d11-nvidia` on a Metal host returns `{nvidia, ampere}` and its 36 measured limits, where an unpinned launch on that host returns `{apple, metal-3}`. A member that recorded no adapter has nothing to serve and leaves the surface host-inherited; [docs/LIMITATIONS.md](LIMITATIONS.md) has that case. |
 | `locale`, `theme`, `input` | Timezone, language list, color scheme, pointer/hover | Locale and timezone can be overridden by the launch precedence rules. |
 | `media`, `speech` | Hardware decode codecs, device counts, registered voices | Names do not create codecs, devices, or speech providers. `media.hw_decode_codecs` sets what `MediaCapabilities` reports as `powerEfficient` and deliberately does not touch `supported`, which answers from the decoders this build actually has. Device counts are a floor: inputs are added to reach the count and the host's own devices are never removed. Network voices are a build capability, not a profile value. |
 | `keyboard`, `fonts` | Layout map, generic family mappings, enumeration allowlist | Enumeration only ever removes families; adding one needs the font file on the machine, which the operator installs and the browser assumes is done. See [docs/FONTS.md](FONTS.md). Unmeasured font and keyboard data stays inherited. |

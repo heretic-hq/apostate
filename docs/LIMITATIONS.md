@@ -27,7 +27,9 @@ until you have seen them work.
   platform selecting the capability cluster on every host and the host-dependent
   default persona (`0102`), the claimed WebGL limits being served on a backend
   that enforces nothing (`0103`), and the five claimed extensions being served
-  from Blink's own implementation classes (`0104`)
+  from Blink's own implementation classes (`0104`). Patch `0105`, which stops two
+  Linux Vulkan identities falling through to the host's WebGPU adapter, is also
+  unbuilt
 - The Web Share cancellation message
 - V8's heap ceiling following the profile's memory figure
 - The remote-debugging endpoint refusing what a page sends it
@@ -87,6 +89,12 @@ launch rather than to an opt-in.
 
 `--fingerprint-platform=linux` is the opt-out. It composes the host's own OS on
 a Linux machine and draws the Vulkan cluster.
+
+That is the browser's own default, and the pip and npm packages get the same
+answer rather than a different one: a default `launch()` passes no persona
+switch at all, so the compositor decides. Where a package composes a profile
+locally instead, which has no browser to ask, it applies the same table.
+[docs/PROFILE_SPEC.md](PROFILE_SPEC.md) names the exported helper that owns it.
 
 ### Cross-OS is a risk, not a free move
 
@@ -588,6 +596,52 @@ All of this is patch `0104`, which is in the series, is compile-unverified and i
 in no binary. Read `getSupportedExtensions()` from a page on the host you deploy
 on and compare it against what `--fingerprint-explain` says the profile claimed,
 rather than trusting this page.
+
+## WebGPU and WebGL cannot disagree
+
+This one is a property rather than a limitation, and it is here because the
+obvious worry is reasonable: a browser claiming a GeForce on WebGL while
+`navigator.gpu` names a software rasteriser would be caught by one property
+read.
+
+That cannot happen on a drawn launch. `adapter.info` is profile-driven, measured
+on a live binary: pinning `windows-d3d11-nvidia` on a Metal host returns
+`{vendor: "nvidia", architecture: "ampere"}` where an unpinned launch on the same
+machine returns `{vendor: "apple", architecture: "metal-3"}`.
+
+The reason it holds is worth stating, because the reasoning is what protects it.
+Vendor, architecture and the whole 36-entry limit table come from the same
+measured anchor member the WebGL capability cluster comes from. One member, both
+surfaces. They cannot contradict each other because there is no second source
+for either to disagree with, and no code enforces that — it falls out of the
+selection. So anyone who later adds an independently authored WebGPU table
+breaks a guarantee that currently holds by construction, and this paragraph is
+the warning.
+
+The measured comparison is favourable and is worth having on the record. The
+product this one is measured against serves `{nvidia, lovelace}` beside a
+GeForce RTX 3070 — Lovelace is Ada and the 3070 is Ampere, so its own pair
+contradicts itself. This one serves `ampere` beside an RTX 3070 Ti, with 36
+measured limits rather than the host's.
+
+### The one residual, off the default path
+
+Two of the eleven Linux Vulkan identities — the RTX 3090 and the RTX PRO 4000
+Blackwell — are measured members whose machines returned no WebGPU adapter at
+all. The anchor records that faithfully: its WebGPU cluster is non-uniform, with
+one variant carrying the Lovelace adapter pair and one carrying nulls for both
+`high-performance` and `low-power`.
+
+A profile drawing one of those two therefore has nothing to serve, so
+`navigator.gpu` stays the host's. On a GPU-less host that means
+`{vendor: "google", architecture: "swiftshader"}` beside a GeForce claim, which
+is the contradiction this section otherwise rules out.
+
+It takes `--fingerprint-platform=linux` to reach, since the default persona on a
+Linux host is Windows and the Windows anchors' WebGPU is uniform. Patch `0105`
+is being written to serve *no* adapter for those two members instead of falling
+through to the host's, which reproduces what was measured on those machines
+rather than contradicting it. It is unbuilt.
 
 ## Network quality and battery are profile values
 

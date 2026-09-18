@@ -160,11 +160,17 @@ capability tables are what discriminate, and the anchor is keyed on them.
 
 **Two surfaces are inside an anchor's members but outside the anchor.** The
 WebGPU cluster differs between members of the Linux/Vulkan anchor, because it
-belongs to each host's driver stack rather than to the silicon class, so WebGPU
-identity is not rotatable within an anchor. Canvas 2D differs too, and canvas is
-not a GPU measurement at all. It is fonts and raster, which is why it is
-excluded from the anchor key and recorded separately so the exclusion stays
-checkable.
+belongs to each host's driver stack rather than to the silicon class, so it is
+recorded per member rather than per anchor: that anchor's WebGPU is non-uniform,
+with two variants across four members. Canvas 2D differs too, and canvas is not
+a GPU measurement at all. It is fonts and raster, which is why it is excluded
+from the anchor key and recorded separately so the exclusion stays checkable.
+
+Being outside the anchor key does not make WebGPU independent of the identity.
+A launch serves `adapter.info` and the WebGPU limit table from the same measured
+member it takes the WebGL cluster from, so the two surfaces agree by
+construction. [docs/LIMITATIONS.md](LIMITATIONS.md) has that as a property, with
+the one case where a member has no adapter to serve.
 
 Therefore: **`--fingerprint-platform` selects the GPU cluster.** It changes OS
 identity, client hints, fonts, voices, locale, screen geometry and hardware

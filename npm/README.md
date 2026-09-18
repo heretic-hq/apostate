@@ -117,7 +117,7 @@ const browser = await launch({
 | `fingerprint` | a fresh random seed | Seed for the whole identity. `"host"` (also `"off"`, `"false"`, `"0"`, `"disable"`, `"disabled"`) inherits the real machine and composes nothing. |
 | `fingerprintPlatform` | host's own OS on macOS and Windows; `"windows"` on Linux | `windows`, `macos` or `linux`. Selects the GPU cluster as well as the OS identity. Needs that platform's fonts installed — see below. Cannot be combined with host inheritance. |
 | `locale`, `timezone` | derived from the seed | Override just these. |
-| `geoip` | `true` | Best-effort: derive locale and timezone from the proxy's exit IP. The contract is that a failed lookup never invents a locale — the launch proceeds with the profile's own composed locale and timezone, which will not match the proxy's exit country, so pass `locale` and `timezone` explicitly when geo-matching has to be guaranteed. That behaviour is decided and landing; **this package currently warns and falls back to `en-US`/`UTC` instead**, which is the defect it closes. |
+| `geoip` | `true` | Best-effort: derive locale and timezone from the proxy's exit IP. A failed lookup never invents one — it warns into `browser.apostateDiagnostics.warnings`, sends no override, and the launch keeps the locale and timezone the seed drew, which will not match the proxy's exit country. Pass `locale` and `timezone` explicitly when geo-matching has to be guaranteed. |
 | `proxy` | none | `http://`, `https://`, `socks5://`; credentials are kept out of the command line. |
 | `headless` | `true` | |
 | `userDataDir` | off-the-record | Persist cookies and storage. |

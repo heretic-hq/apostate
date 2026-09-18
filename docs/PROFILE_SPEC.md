@@ -190,32 +190,41 @@ locale and timezone apply, and they are coherent with the rest of the identity
 by construction, since the same seed produced them. So a failed lookup yields a
 launch that succeeds, is internally coherent, and invents nothing.
 
-The behaviour that implements it is decided and landing, not landed. Both
-packages will proceed with no locale or timezone override, record a warning a
-caller can read, and invent nothing. The warning lands in the existing warnings
-list rather than a new channel: `diagnostics.warnings` in Node, and
-`LaunchPlan.diagnostics["warnings"]` in Python, where it is merged after the
-resolver returns because the lookup runs before a `ProfileResolution` exists. A
-stderr line stays too, but the field is what a caller should inspect, since a
-console line is invisible to code reading a return value.
+Both packages implement it identically. On a failure they proceed with no
+locale or timezone override, record a warning a caller can read, and invent
+nothing. The warning lands in the existing warnings list rather than a new
+channel: `diagnostics.warnings` in Node, reachable from a launched browser as
+`browser.apostateDiagnostics.warnings`, and `LaunchPlan.diagnostics["warnings"]`
+in Python, where it is merged after the resolver returns because the lookup runs
+before a `ProfileResolution` exists. A stderr line is written too, but the field
+is what a caller should inspect, since a console line is invisible to code
+reading a return value. Node's `diagnostics.geoip` reports `unresolved` for a
+lookup that ran and failed, where it used to report `explicit`, which was untrue.
 
 One behaviour change worth stating plainly, because it is a move toward
 leniency: a Python launch that previously raised `GeoIPError` on a lookup
-failure will succeed instead. On the launch path Python will no longer raise for
-a lookup failure, a timeout, an unavailable provider, or a malformed or
-incomplete provider result; it warns and sends no override, and a partial result
-still contributes the field it does carry. `resolve_geoip()` called directly
-keeps raising at every site it raises today, and a non-positive `geoip_timeout`
-still raises, because that is a caller bug rather than a network failure.
-`GeoIPError` and `GeoIPUnavailableError` stay exported and stay raised by
-`resolve_geoip()`, so a `try`/`except` around a direct call is still needed and
-one around `launch()` for the failure path is not. Parity is the reason the
-stricter of the two conforming behaviours is not kept.
+failure now succeeds. On the launch path Python no longer raises for a lookup
+failure, a timeout, an unavailable provider, or a malformed or incomplete
+provider result; it warns and sends no override. A caller who relied on the
+exception to abort a launch has to read
+`LaunchPlan.diagnostics["warnings"]` instead. `resolve_geoip()` called directly
+keeps raising at every site it raised before, and a non-positive
+`geoip_timeout` still raises, because that is a caller bug rather than a network
+failure. `GeoIPError` and `GeoIPUnavailableError` stay exported and stay raised
+by `resolve_geoip()`, so a `try`/`except` around a direct call is still needed
+and one around `launch()` for the failure path is not. Parity is the reason the
+stricter of the two conforming behaviours was not kept.
 
-Until that lands, the two packages disagree and neither matches the contract:
-Python raises on the launch path, and Node warns on the console and continues
-with `{locale: "en-US", timezone: "UTC"}`, with a second unconditional fallback
-to the same pair below it. The Node half is the defect the ruling closes.
+Three smaller consequences, each measured through the packages:
+
+- **A partial answer keeps the field it carries.** A provider returning a
+  timezone and no locale yields `--fingerprint-timezone` alone, with no locale
+  override. Python used to discard both.
+- **A country code resolves through the project's own table.** A German exit
+  gives `de-DE`, not the `en-DE` the Node package used to synthesise.
+- **A non-IANA timezone is treated as unresolved.** Some providers answer
+  `+02:00`; that is dropped rather than passed to the switch, and the launch
+  keeps the profile's own timezone while still taking the locale.
 
 **`geoip` is best-effort geo-matching; explicit values are the guarantee.** When
 a lookup fails, the persona keeps its own composed locale and timezone, which
@@ -237,27 +246,34 @@ populating it is what allows preemptive authentication. Skipping it forces a
 unfinished. UDP over SOCKS5 UDP ASSOCIATE, including proxied QUIC/HTTP3, is
 supported natively; WebRTC UDP/STUN/TURN is not offered.
 
-Proxy credentials are the one remaining envelope user, and they inherit the cost
-the locale path just escaped. Credentials have no switch of their own, so they
-travel in an `--apostate-profile` envelope, and the shape the launcher sends is
-`{device_profile: {}, proxy_credentials: {…}}` — an *empty* device profile
-rather than an absent one, which is what suppresses composition. So a launch
-that authenticates to a proxy currently inherits the host on every axis. The
-empty key is not redundant either: `base/apostate/profile.cc` reads
-`proxy_credentials` only inside `FindDict("device_profile")`, so a payload
-without that key loses the credentials altogether.
+Proxy credentials are the one remaining envelope user. Credentials have no
+switch of their own — argv is world-readable in `ps` output — so they travel in
+an `--apostate-profile` envelope, and the shape the launcher sends is
+`{device_profile: {}, proxy_credentials: {…}}`. The empty key is deliberate and
+has to stay: `base/apostate/profile.cc` reads `proxy_credentials` only inside
+`FindDict("device_profile")`, so a wrapper without that key loses the
+credentials silently.
 
-The fix is native and is landing rather than landed: composition will run when
-the payload claims no device — an empty or absent `device_profile`, or a bare
-payload whose only key is `proxy_credentials` — and the composed profile is then
+An empty device profile used to suppress composition all the same, because
+presence rather than content was the test, so a proxy URL with credentials in it
+was quietly equivalent to `--fingerprint=host` — on the configuration most of
+this binary's users run. Patch `0106` makes the test content: a payload claiming
+no device, meaning an empty or absent `device_profile` or a bare payload whose
+only key is `proxy_credentials`, composes normally and the composed profile is
 re-installed with the credentials attached. A payload carrying any device
-content still suppresses composition, so absent-means-absent is untouched. The
-user-visible line is the same one the locale path earned: authenticating to a
-proxy will no longer cost you the composed fingerprint.
+content still suppresses composition, so absent-means-absent is untouched.
+Authenticating to a proxy no longer costs you the composed fingerprint.
 
-Until it lands the Node package warns loudly about it, which is an interim by
-decision rather than a workaround, and a credential-free `--proxy-server`
-endpoint with authentication supplied another way avoids the envelope entirely.
+The package side of that has landed and is tested: the Node refusal that
+rejected credentials beside a `--fingerprint` seed is narrowed to a payload that
+describes a device, so `launch({proxy: "http://user:pass@host", args:
+["--fingerprint=12345"]})` launches instead of being refused, and the warning
+that authenticating cost you the fingerprint is retired rather than reworded.
+
+`0106` itself is in the series and has not been built. So on a binary built
+before it, an authenticated proxy still suppresses composition, and the warning
+that used to say so is gone. If you are running an older artifact, check
+`--fingerprint-explain` rather than trusting the absence of a warning.
 
 `humanize: true` is rejected rather than accepted as a no-op.
 

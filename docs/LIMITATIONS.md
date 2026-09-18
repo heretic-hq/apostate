@@ -28,8 +28,9 @@ until you have seen them work.
   default persona (`0102`), the claimed WebGL limits being served on a backend
   that enforces nothing (`0103`), and the five claimed extensions being served
   from Blink's own implementation classes (`0104`). Patch `0105`, which stops two
-  Linux Vulkan identities falling through to the host's WebGPU adapter, is also
-  unbuilt
+  Linux Vulkan identities falling through to the host's WebGPU adapter, and
+  patch `0106`, which stops a proxy-credentials payload suppressing composition,
+  are also unbuilt
 - The Web Share cancellation message
 - V8's heap ceiling following the profile's memory figure
 - The remote-debugging endpoint refusing what a page sends it

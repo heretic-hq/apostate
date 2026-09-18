@@ -408,12 +408,20 @@ those values will not match the proxy's exit country, so `geoip` is best-effort
 geo-matching and passing `locale` and `timezone` explicitly is the way to
 guarantee it.
 
-That behaviour is decided and landing rather than landed, and today the two
-packages differ: Python raises `GeoIPError` from `launch()` on a failed lookup,
-and Node warns on the console and continues with `en-US` and `UTC`. When the
-change lands, both will warn into the resolution's own warnings list — which a
-caller can read, unlike a console line — and neither will raise from `launch()`
-or invent a locale. `resolve_geoip()` called directly keeps raising.
+Both packages behave identically here and it is exercised. Neither raises from
+`launch()` and neither substitutes a value: they warn into the resolution's own
+warnings list, which a caller can read unlike a console line, and send no
+override. `resolve_geoip()` called directly still raises, and so does a
+non-positive `geoip_timeout`, because that is a caller bug rather than a network
+failure. A Python launch that used to raise `GeoIPError` on a failed lookup now
+succeeds, so a caller who relied on that exception to abort reads the warnings
+instead.
+
+Three details that follow: a partial answer keeps the field it carries, so a
+timezone with no locale sets `--fingerprint-timezone` alone; a country code
+resolves through this project's own table, so a German exit gives `de-DE` rather
+than `en-DE`; and a provider timezone that is not an IANA identifier, such as
+`+02:00`, is treated as unresolved rather than passed to the switch.
 
 Proxy credentials go into Chromium's in-memory `HttpAuthCache`, the same place
 interactively typed credentials go. That cache is per network context, is never

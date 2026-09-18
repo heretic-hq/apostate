@@ -82,13 +82,15 @@ case "$target" in
       fail "no Visual Studio 2022 install could be resolved through vswhere
       install: $vc_toolset (in any 2022 edition, including BuildTools)
       needed by: build/vs_toolchain.py DetectVisualStudioPath; gn cannot generate without it"
-      vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-      if [ -f "$vswhere" ]; then
-        note "vswhere reports these installs:"
+      # Deliberately -all and unfiltered: the point is to show what IS there
+      # when the pinned-range query found nothing, so a 2019-only or 2026-only
+      # image reads as a version mismatch rather than as no toolchain at all.
+      if vswhere="$(windows_vswhere)"; then
+        note "vswhere reports these installs, unfiltered:"
         "$vswhere" -all -products '*' -property installationPath 2>/dev/null |
           tr -d '\r' | while IFS= read -r line; do note "    ${line:-<none>}"; done
       else
-        note "vswhere.exe is not at $vswhere either"
+        note "vswhere.exe is not installed either"
       fi
     else
       note "visual studio: $vs2022_install"

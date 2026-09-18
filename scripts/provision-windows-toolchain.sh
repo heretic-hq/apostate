@@ -152,12 +152,7 @@ Program Files trees. Without it the components must be baked into the image."
   # vswhere reports the installed instance's own channel, so this cannot select
   # a different one by accident; omitted if vswhere has no answer rather than
   # guessed.
-  vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-  channel=""
-  if [ -x "$vswhere" ]; then
-    channel="$("$vswhere" -latest -products '*' -version '[17.0,18.0)' \
-      -property channelId 2>/dev/null | tr -d '\r')"
-  fi
+  channel="$(windows_vs_property channelId || true)"
   say "channel: ${channel:-<unset, omitting --channelId>}"
 
   # Driven from PowerShell rather than straight from bash for two reasons.

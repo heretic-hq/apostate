@@ -83,6 +83,43 @@ print(digest.hexdigest())
 PY
 )"
 
+# The Windows toolchain is the one build input nothing pins. build/args/
+# windows-x64.gn deliberately names no visual_studio_path, because pinning it
+# obliges you to pin visual_studio_version, windows_sdk_version and wdk_path
+# too and forces visual_studio_runtime_dirs empty, so the CRT redistributables
+# never reach the package. The consequence is that the MSVC headers, the SDK,
+# the CRT and ATL all come from whatever the runner image happens to carry,
+# and two builds from the same pins would differ across a runner-image
+# refresh with nothing in the record naming the change.
+#
+# So record what was resolved. This does not make the input pinned; it makes it
+# ATTRIBUTED, which is the honest intermediate state between here and building
+# the image ourselves. A reproducibility comparison that disagrees can now be
+# told from a toolset upgrade instead of being blamed on the patches.
+#
+# Flat scalar keys, not a [section]: scripts/validate-release-baseline.py
+# parses every line before [outputs] and rejects anything that is not a quoted
+# scalar assignment.
+windows_toolchain_lines=()
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    _vs_version="$(windows_vs_property installationVersion || true)"
+    _toolset="$(windows_msvc_toolset_root || true)"
+    # SDK_VERSION out of Chromium's own source rather than our mirror of it.
+    # scripts/configure.sh has already failed the build if the two disagree, so
+    # this records the value that was actually used.
+    _sdk_version="$(sed -n "s/^SDK_VERSION = '\([^']*\)'.*/\1/p" \
+      "$SRC/build/vs_toolchain.py" | head -1)"
+    windows_toolchain_lines=(
+      "visual_studio_version = \"${_vs_version:-unknown}\""
+      "msvc_toolset_version = \"$([ -n "$_toolset" ] && basename "$_toolset" || echo unknown)\""
+      "windows_sdk_version  = \"${_sdk_version:-unknown}\""
+      "vs_components_sha256 = \"$(shasum -a 256 "$REPO_ROOT/build/WINDOWS_VS_COMPONENTS" | cut -d' ' -f1)\""
+    )
+    unset _vs_version _toolset _sdk_version
+    ;;
+esac
+
 # Staged, then moved into place. MANIFEST.lock is the checked-in baseline that
 # scripts/validate-release-baseline.py gates a release on, and redirecting
 # straight into it truncates it the instant the group opens. Any failure
@@ -105,6 +142,11 @@ trap 'rm -f "$manifest_tmp"' EXIT
   echo "build_mode           = \"$build_mode\""
   echo "parent_manifest_sha256 = \"$parent_manifest_sha256\""
   echo "fresh_ancestor_sha256 = \"$fresh_ancestor_sha256\""
+  if [ "${#windows_toolchain_lines[@]}" -gt 0 ]; then
+    echo "# Resolved from the runner's own installation, not from a pin. See"
+    echo "# docs/BUILD.md, \"Provisioning\". Windows targets only."
+    for line in "${windows_toolchain_lines[@]}"; do echo "$line"; done
+  fi
   echo
   echo "[outputs]"
   # The executables and libraries that carry the fingerprint, per target. A

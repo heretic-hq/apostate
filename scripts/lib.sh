@@ -81,37 +81,46 @@ esac
 #
 # vs%YEAR%_install is vs_toolchain.py's own documented override and is checked
 # before the table, so resolving the real path with vswhere and exporting it
-# fixes the lookup without patching Chromium or assuming an edition. -products
-# '*' is required: without it vswhere ignores Build Tools, which is the only
-# edition these images have.
+# fixes the lookup without patching Chromium or assuming an edition.
+#
+# One vswhere path and one version range for every caller. Three scripts asked
+# vswhere for something and each spelled the path itself; a resolution that is
+# not shared is a resolution that can disagree, and a preflight approving one
+# install while the build used another checks every path in the wrong tree.
+#
+# The range is pinned rather than a bare -latest. vs%YEAR%_install is checked
+# BEFORE the table, so on an image that later gains VS 2026 a bare -latest
+# would export an 18.0 path as vs2022_install and GetVisualStudioVersion would
+# answer '2022' for it -- a silently mislabelled toolchain instead of a clean
+# failure. -products '*' is required too: without it vswhere ignores Build
+# Tools, which is the only edition these images have.
+WINDOWS_VS_VERSION_RANGE='[17.0,18.0)'
+windows_vswhere() {
+  local exe="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+  [ -x "$exe" ] || return 1
+  printf '%s' "$exe"
+}
+# windows_vs_property <property> [extra vswhere arguments...]
+windows_vs_property() {
+  local prop="$1" exe
+  shift
+  exe="$(windows_vswhere)" || return 1
+  "$exe" -latest -products '*' -version "$WINDOWS_VS_VERSION_RANGE" "$@" \
+    -property "$prop" 2>/dev/null | tr -d '\r'
+}
+
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     if [ -z "${vs2022_install:-}" ]; then
-      _vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-      if [ -x "$_vswhere" ]; then
-        # Pin the version range. vs%YEAR%_install is checked BEFORE the
-        # table, so a bare -latest on an image that later gains VS 2026 would
-        # export an 18.0 path as vs2022_install and GetVisualStudioVersion
-        # would answer '2022' for it -- a silently mislabelled toolchain
-        # instead of a clean failure. Ask for the C++ x64 toolset first, since
-        # an install without it cannot build anything here, then fall back to
-        # any 2022 install: leaving the variable unset returns to the broken
-        # table, whereas a path missing the toolset fails later naming the
-        # component.
-        _vs_range='[17.0,18.0)'
-        _vs_path="$("$_vswhere" -latest -products '*' -version "$_vs_range" \
-          -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 \
-          -property installationPath 2>/dev/null | tr -d '\r')"
-        if [ -z "$_vs_path" ]; then
-          _vs_path="$("$_vswhere" -latest -products '*' -version "$_vs_range" \
-            -property installationPath 2>/dev/null | tr -d '\r')"
-        fi
-        if [ -n "$_vs_path" ]; then
-          export vs2022_install="$_vs_path"
-        fi
-        unset _vs_path _vs_range
-      fi
-      unset _vswhere
+      # Ask for the C++ x64 toolset first, since an install without it cannot
+      # build anything here, then fall back to any 2022 install: leaving the
+      # variable unset returns to the broken table, whereas a path missing the
+      # toolset fails later naming the component.
+      _vs_path="$(windows_vs_property installationPath \
+        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 || true)"
+      [ -n "$_vs_path" ] || _vs_path="$(windows_vs_property installationPath || true)"
+      [ -z "$_vs_path" ] || export vs2022_install="$_vs_path"
+      unset _vs_path
     fi
     ;;
 esac

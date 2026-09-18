@@ -18,9 +18,10 @@ CI build alone does not establish it.
 | `build/args/windows-x64.gn` | Windows x64 GN settings |
 | `build/MAC_SDK_VERSION` | Exact macOS SDK version, `26.5` |
 | `build/MAC_SDK_BUILD` | SDK `ProductBuildVersion`, `25F70` |
-| `build/WINDOWS_SDK_INSTALLER_URL` | Version-specific 10.0.26100 SDK installer, for the Debuggers feature |
-| `build/WINDOWS_SDK_INSTALLER_VERSION` | Which SDK release that URL serves, `10.0.26100.4654` |
+| `build/WINDOWS_SDK_INSTALLER_URL` | Version-specific 10.0.26100.7705 SDK installer, for the headers, libs and Debuggers |
+| `build/WINDOWS_SDK_INSTALLER_VERSION` | Which SDK release that URL serves, `10.0.26100.7705` |
 | `build/WINDOWS_SDK_INSTALLER_SHA256` | Digest of those installer bytes |
+| `build/WINDOWS_SDK_REQUIREMENTS` | SDK requirements a servicing *revision* decides, which no directory name shows |
 | `build/WINDOWS_SDK_VERSION` | SDK *directory* version the preflight checks, `10.0.26100.0`; mirrors Chromium's own constant |
 | `build/WINDOWS_VS_COMPONENTS` | Visual Studio components the Windows build requires, and the file that proves each |
 | `build/linux/Dockerfile` | Linux base image digest and build environment |
@@ -58,8 +59,8 @@ The build scripts share workspace and tool paths through `scripts/lib.sh`.
 | --- | --- |
 | `scripts/resolve-build-targets.sh` | Resolve the CI target list and hosted runner labels |
 | `scripts/verify-runner.sh` | Check the target against the runner OS and architecture |
-| `scripts/verify-host-tooling.sh` | Report every tool or SDK component the target's build will need and this host lacks |
-| `scripts/provision-windows-toolchain.sh` | Install the Visual Studio components and SDK features the Windows image lacks |
+| `scripts/verify-host-tooling.sh` | Report every tool, component and SDK revision the target's build needs and this host lacks |
+| `scripts/provision-windows-toolchain.sh` | Install the Visual Studio components and the pinned SDK revision the Windows image lacks |
 | `scripts/reclaim-windows-disk.sh` | Remove measured, build-irrelevant software from the Windows runner image |
 | `scripts/bootstrap.sh` | Fetch pinned depot_tools and check host prerequisites |
 | `scripts/fetch-sources.sh` | Fetch and sync the pinned Chromium revision |
@@ -131,10 +132,11 @@ each entry's name and complete patch bytes, in series order with NUL
 separators. Any edit to any listed patch changes that digest, even if the
 series file is unchanged.
 
-Windows builds record four more fields, because `windows-x64` is the only
+Windows builds record six more fields, because `windows-x64` is the only
 target whose toolchain comes from the runner rather than from a pin:
-`visual_studio_version`, `msvc_toolset_version`, `windows_sdk_version` and
-`vs_components_sha256`. They are attribution, not pins — see
+`visual_studio_version`, `msvc_toolset_version`, `windows_sdk_version`,
+`windows_sdk_revision`, `vs_components_sha256` and
+`sdk_requirements_sha256`. They are attribution, not pins — see
 [Provisioning](#provisioning). They sit before `[outputs]`, so they change
 `manifest_sha256` and leave `outputs_sha256` alone.
 
@@ -430,7 +432,70 @@ hand-maintained list of the failures seen so far. Whether a component is
 present is a property of the image, and the cheapest runner answers it
 identically.
 
-Free space is not. Measured: a 2 vCPU Windows runner reported 70.8 GB free while
+#### Revision, not presence
+
+Everything above is a presence question, and there is a second axis that
+presence cannot see. The SDK's directories and its registry keys under
+`HKLM\Software\Microsoft\Windows Kits\Installed Roots` are named after the
+major build — `10.0.26100.0` — and carry no servicing revision. So
+`Include/10.0.26100.0/um` existing is a true statement that answers nothing:
+revision 4654 and revision 7705 are indistinguishable by presence, ship the
+same filenames, and differ in the contents of the headers.
+
+That gap cost a run. With every presence check green, the `windows-x64` gate
+reached **26,642 of 33,797 edges** and failed:
+
+```text
+FAILED: obj/ui/accessibility/platform/platform/uia_client_info_source_win.obj
+../../ui/accessibility/platform/uia_client_info_source_win.cc(30,5):
+  error: unknown type name 'IUIAutomationClientInfo'
+```
+
+`docs/windows_build_instructions.md:54-56` requires SDK **10.0.26100.7705**;
+the image carries 4654. `build/WINDOWS_SDK_REQUIREMENTS` is the revision axis,
+asserted by `scripts/verify-host-tooling.sh` with its own mechanism, because
+the right instrument differs per requirement:
+
+| Requirement | Kind | Instrument | Source |
+| --- | --- | --- | --- |
+| `IUIAutomationClientInfo`, `IUIAutomationClientInfoSource` declared under `Include/<version>/um` | symbol | the identifier must appear in some header there | `ui/accessibility/platform/uia_client_info_source_win.cc:24,30,56,66` uses both with no guard; SDK ≥ 10.0.26100.7705 supplies them |
+| `Debuggers/x64/dbghelp.dll` ≥ `10.0.26100.3323` | version | its `FileVersion`, compared as a dotted version | `docs/windows_build_instructions.md:57-59`, "needed in order to support reading the large-page PDBs that Chrome uses to allow greater-than 4 GiB PDBs" |
+
+Headers carry no version resource, which is why the first is asserted by
+symbol rather than by number. Where a version resource does exist the number
+wins, because a number can be compared and a symbol has to be chosen.
+
+**Everything else revision-sensitive that was looked for, and what it is.**
+
+- `base/win/windows_version.cc:30-32` has
+  `#if !defined(NTDDI_WIN11_GE)` / `#error Windows 10.0.26100.0 SDK or higher
+  required.` — Chromium enforces its own NTDDI floor, at compile time, with a
+  message naming the SDK. It needs no assertion from us, and it is satisfied on
+  4654: the gate compiled that file. It is listed here because it is the same
+  class of requirement and it demonstrates that upstream guards the floor it
+  cares about and does not guard the UIA types at all.
+- `build/config/win/BUILD.gn:294` defines `NTDDI_VERSION=NTDDI_WIN11_GE`, so
+  anything the SDK gates above that level is hidden rather than missing. The
+  UIA interfaces are not NTDDI-gated, which is why 4654 produces
+  "unknown type name" rather than a quieter failure.
+- `ui/accessibility/platform/uia_client_info_source_win.h:21` forward-declares
+  `struct IUIAutomationClientInfoSource;`, so the header compiles against any
+  SDK and only the `.cc` fails. That is why the break was one translation unit
+  26,000 edges in rather than an early, obvious error.
+- Neither the header nor the implementation uses `__has_include` or any NTDDI
+  guard. Verified by search: zero matches. An older SDK is therefore a hard
+  compile error, not a silently disabled feature — which for a fingerprinting
+  project is the better of the two failures.
+- `vs_toolchain.py`'s `SDKIncludesIDCompositionDevice4` checks `dcomp.h` for
+  `IDCompositionDevice4` only when the SDK's major build is ≤ 22621. At
+  26100 it returns true without opening the file, so it is not a revision
+  dependency here.
+
+Adding to the table is the intended response to finding another. A row needs
+the consumer cited and, where one exists, the run that found it.
+
+Free space, unlike component presence, is not a property of the image alone.
+Measured: a 2 vCPU Windows runner reported 70.8 GB free while
 a 32 vCPU Windows runner reported 55 GB, a 14 GB difference on the class that
 actually builds, and in the dangerous direction, because the cheap runner looks
 roomier. Anything sized in bytes has to be measured on the instance class it
@@ -512,13 +577,25 @@ rather than opening a new hole. What is pinned is the request —
 bounds the VS version to `[17.0,18.0)`.
 
 "Already unpinned" is an argument for recording what we got, not for continuing
-not to, so `scripts/build.sh` writes the resolved Visual Studio instance
-version, MSVC toolset version, SDK version and a digest of
-`build/WINDOWS_VS_COMPONENTS` into `build/MANIFEST.lock` on Windows builds.
-That makes the input *attributed* rather than pinned: a reproducibility
-comparison that disagrees can now be traced to a toolset upgrade instead of
-being blamed on the patches. Pinning it properly means building the runner
-image ourselves, which is not done.
+not to, so `scripts/build.sh` writes six fields into `build/MANIFEST.lock` on
+Windows builds: the resolved Visual Studio instance version, the MSVC toolset
+version, the SDK directory version, the SDK servicing revision, and digests of
+`build/WINDOWS_VS_COMPONENTS` and `build/WINDOWS_SDK_REQUIREMENTS`. That makes
+the input *attributed* rather than pinned: a reproducibility comparison that
+disagrees can now be traced to a toolset or SDK upgrade instead of being
+blamed on the patches. Pinning it properly means building the runner image
+ourselves, which is not done.
+
+`windows_sdk_revision` is the one that had to be added rather than deduced.
+This repository's contract is that two builds from the same pins produce
+byte-identical output, and a pin naming a major SDK but not a servicing
+revision does not satisfy it. That is no longer an argument: revisions 4654
+and 7705 both live in a directory called `10.0.26100.0` and differ in whether
+a type Chromium requires exists at all, so the same pins demonstrably compiled
+different headers. The revision is measured from `dbghelp.dll`'s version
+resource, because it is the one SDK file with a version that tracks servicing;
+the headers have none, which is the same fact that forces
+`build/WINDOWS_SDK_REQUIREMENTS` to assert them by symbol.
 
 Which SDK version the build uses is not decided by any pin of ours, and cannot
 drift. `build/vs_toolchain.py` hardcodes `SDK_VERSION = '10.0.26100.0'` and

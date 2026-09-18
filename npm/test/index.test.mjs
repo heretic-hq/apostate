@@ -836,8 +836,8 @@ process.stdout.write(JSON.stringify({
 
 test("locale travels as an override, never as a partial profile envelope", async () => {
   // The regression test for a whole class of defect. The browser's
-  // InstallComposedProfile() returns early whenever --apostate-profile is
-  // present and base/apostate/profile.cc leaves absent fields absent, so a
+  // InstallComposedProfile() returns early whenever --apostate-profile carries
+  // device content and base/apostate/profile.cc leaves absent fields absent, so a
   // locale-only envelope means composition never runs: eleven of twelve axes
   // fall back to the host and --fingerprint is silently ignored. geoip defaults
   // on, so that was the shape of almost every launch. The assertion is on the
@@ -912,6 +912,87 @@ test("locale travels as an override, never as a partial profile envelope", async
     // ParseOrNull reads proxy_credentials only inside FindDict("device_profile"),
     // so a wrapper without the key loses the credentials silently.
     assert.deepEqual(decoded.device_profile, {}, "the empty device_profile key must stay");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a GeoIP failure sends no override rather than inventing en-US and UTC", async () => {
+  // Two independent invention sites used to live in prepareLaunch: the catch
+  // handler substituted { locale: "en-US", timezone: "UTC" }, and a second
+  // block below it forced the same pair whenever either field was still null,
+  // so removing only the handler left the defect alive for a lookup that
+  // succeeded without a timezone. Both are covered here, and every case also
+  // asserts the seed survives: a failed lookup must not cost the composed
+  // fingerprint. The assertion is on the emitted argv, because a resolved
+  // locale now travels as --fingerprint-locale and an omitted one leaves the
+  // composed profile's own drawn pair in place -- which is the state that makes
+  // proceeding without an override correct rather than merely lenient.
+  const root = await mkdtemp(join(tmpdir(), "apostate-node-geoip-failure-"));
+  try {
+    const executable = join(root, "browser");
+    await writeFile(executable, "#!/bin/sh\nexit 0\n");
+    await chmod(executable, 0o755);
+    let seen = null;
+    const fakeDriver = { default: { async launch(options) { seen = options; return { async close() {} }; } } };
+    const base = {
+      executablePath: executable, driver: "puppeteer-core", _driverModule: fakeDriver,
+      fingerprint: 4242,
+    };
+
+    const cases = [
+      ["lookup failure", {
+        geoipResolver: async () => { throw new Error("connect ECONNREFUSED 203.0.113.9:443"); },
+      }, [], "GeoIP lookup failed"],
+      ["timeout", {
+        geoipTimeoutMs: 5,
+        geoipResolver: ({ signal }) => new Promise((_, reject) => {
+          signal.addEventListener("abort", () => {
+            reject(Object.assign(new Error("GeoIP request aborted."), { name: "AbortError" }));
+          }, { once: true });
+        }),
+      }, [], "timed out"],
+      // Nothing failed in the next two: the resolver answered, without one of
+      // the two fields. This is the site the removed hard fallback re-invented
+      // from, independently of the handler above.
+      ["a result with no timezone", { geoipResolver: async () => ({ locale: "de-DE,de" }) },
+        ["--fingerprint-locale=de-DE,de"], "resolved no timezone"],
+      ["a result with no locale", { geoipResolver: async () => ({ timezone: "Europe/Berlin" }) },
+        ["--fingerprint-timezone=Europe/Berlin"], "resolved no locale"],
+      // freeipapi answers `timeZone` with a UTC offset, which cannot drive
+      // --fingerprint-timezone. Unresolved, not adjusted into a lookalike.
+      ["an offset instead of an identifier",
+        { geoipResolver: async () => ({ locale: "de-DE", timeZone: "+02:00" }) },
+        ["--fingerprint-locale=de-DE"], "resolved no timezone"],
+      // A country code derives its locale from the Apostate-owned table that
+      // scripts/geoip.py and the Python package share, so a German exit is
+      // de-DE. The old code built `en-${countryCode}` and served en-DE.
+      ["a country code and a timezone",
+        { geoipResolver: async () => ({ country_code: "DE", timezone: "Europe/Berlin" }) },
+        ["--fingerprint-locale=de-DE", "--fingerprint-timezone=Europe/Berlin"], null],
+    ];
+
+    for (const [label, options, expected, warning] of cases) {
+      seen = null;
+      const browser = await launch({ ...base, ...options });
+      await browser.close();
+      const localization = seen.args.filter((arg) => arg.startsWith("--fingerprint-locale")
+        || arg.startsWith("--fingerprint-timezone"));
+      assert.deepEqual(localization, expected, label);
+      assert.ok(seen.args.includes("--fingerprint=4242"), `${label}: the seed must survive`);
+      assert.equal(seen.args.some((arg) => arg.startsWith("--lang=")),
+        expected.some((arg) => arg.startsWith("--fingerprint-locale")), label);
+      assert.equal(seen.env.TZ, expected.some((arg) => arg.startsWith("--fingerprint-timezone"))
+        ? "Europe/Berlin" : undefined, label);
+      const warnings = browser.apostateDiagnostics.warnings;
+      if (warning === null) assert.deepEqual(warnings, [], label);
+      else assert.ok(warnings.some((entry) => entry.includes(warning)),
+        `${label}: ${JSON.stringify(warnings)}`);
+      assert.equal(warnings.some((entry) => entry.includes("Defaulting to fallback")), false, label);
+      // A lookup that ran and failed is not "explicit": nothing was explicit.
+      assert.equal(browser.apostateDiagnostics.geoip,
+        expected.length === 0 ? "unresolved" : "resolved", label);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -1104,34 +1104,62 @@ async function defaultGeoipLookup(url, proxy, signal) {
   throw lastError || new Error("All default GeoIP endpoints failed.");
 }
 
+// Apostate-owned country -> locale policy, mirroring scripts/geoip.py's
+// _COUNTRY_LOCALES so a payload resolves to the same locale in both packages
+// and in the repository helper. A country the table does not name stays
+// unresolved: `en-<COUNTRY>` for an unnamed country invents a language rather
+// than deriving one, and an unresolved field is the honest answer.
+const GEOIP_COUNTRY_LOCALES = {
+  AR: "es-AR", AT: "de-AT", AU: "en-AU", BE: "nl-BE", BR: "pt-BR", CA: "en-CA",
+  CH: "de-CH", CL: "es-CL", CN: "zh-CN", CO: "es-CO", CZ: "cs-CZ", DE: "de-DE",
+  DK: "da-DK", ES: "es-ES", FI: "fi-FI", FR: "fr-FR", GB: "en-GB", GR: "el-GR",
+  HK: "zh-HK", HU: "hu-HU", IE: "en-IE", IL: "he-IL", IN: "en-IN", IT: "it-IT",
+  JP: "ja-JP", KR: "ko-KR", MX: "es-MX", NL: "nl-NL", NO: "nb-NO", NZ: "en-NZ",
+  PL: "pl-PL", PT: "pt-PT", RO: "ro-RO", RU: "ru-RU", SA: "ar-SA", SE: "sv-SE",
+  SG: "en-SG", TH: "th-TH", TR: "tr-TR", TW: "zh-TW", UA: "uk-UA", US: "en-US",
+  VE: "es-VE", VN: "vi-VN", ZA: "en-ZA",
+};
+
+const GEOIP_TIMEZONE_PATTERN = /^[A-Za-z][A-Za-z0-9._+-]*(?:\/[A-Za-z0-9._+-]+)+$/;
+
+// scripts/geoip.py::_valid_provider_timezone. Providers answer in three shapes:
+// an IANA identifier, a nested object (`{"id": "Europe/Berlin"}`), and a bare
+// UTC offset (`"+02:00"`, which freeipapi returns). Only an identifier can
+// drive --fingerprint-timezone, so anything else is unresolved rather than
+// patched up into something that looks like one.
+function geoipTimezone(value) {
+  const candidate = isObject(value) ? (value.id ?? value.name ?? value.timezone) : value;
+  if (typeof candidate !== "string") return null;
+  const trimmed = candidate.trim();
+  if (!trimmed || trimmed.length > 128) return null;
+  if (trimmed.toUpperCase() === "UTC" || trimmed.toUpperCase() === "GMT") return trimmed;
+  return GEOIP_TIMEZONE_PATTERN.test(trimmed) ? trimmed : null;
+}
+
+function geoipLocale(result) {
+  const direct = result.locale ?? result.language;
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+  const languages = Array.isArray(result.languages) ? result.languages[0] : result.languages;
+  if (typeof languages === "string" && languages.trim()) {
+    const first = languages.split(",")[0].trim();
+    if (first) return first;
+  }
+  const country = result.country_code ?? result.countryCode;
+  if (typeof country === "string" && /^[A-Za-z]{2}$/.test(country.trim())) {
+    return GEOIP_COUNTRY_LOCALES[country.trim().toUpperCase()] ?? null;
+  }
+  return null;
+}
+
+// A successful lookup may omit a field. That field comes back null and stays
+// unresolved; it is never filled with en-US or UTC. A resolver that answers
+// with something structurally wrong throws, and prepareLaunch's handler turns
+// that into the same warning a network failure produces.
 function validateGeoipResult(result) {
   if (!isObject(result)) throw new GeoIPError("GeoIP resolver must return an object.");
-
-  // Safely parse locale/language from multiple possible API structures
-  let locale = result.locale ?? result.language;
-  if (!locale) {
-    const languages = Array.isArray(result.languages)
-      ? result.languages[0]
-      : String(result.languages ?? "").split(",")[0] || null;
-    locale = languages;
-  }
-
-  // Intelligently derive a sensible locale from countryCode if none is explicitly provided
-  if (!locale && (result.countryCode || result.country_code)) {
-    locale = `en-${(result.countryCode || result.country_code).toUpperCase()}`;
-  } else if (!locale) {
-    locale = "en-US"; // Practical fallback
-  }
-
-  // Find timezone, defaulting to UTC rather than crashing
-  const timezone = result.timezone ?? result.time_zone ?? result.timeZone ?? "UTC";
   const ip = result.ip ?? result.query ?? result.ipAddress ?? result.ip_address ?? null;
-
-  if (typeof locale !== "string") throw new GeoIPError("GeoIP locale must be a string.");
-  if (typeof timezone !== "string") throw new GeoIPError("GeoIP timezone must be a string.");
   if (ip !== null && (typeof ip !== "string" || isIP(ip) === 0)) throw new GeoIPError("GeoIP resolver returned an invalid IP address.");
-
-  return { locale, timezone, ip };
+  return { locale: geoipLocale(result), timezone: geoipTimezone(result.timezone ?? result.time_zone ?? result.timeZone), ip };
 }
 
 async function prepareLaunch(options = {}) {
@@ -1139,6 +1167,11 @@ async function prepareLaunch(options = {}) {
   const resolution = resolveProfile(options);
   let profile = resolution.profile;
   const inheritedLocale = profileLocale(profile);
+  // Captured before the lookup: a field the caller set explicitly is not one
+  // GeoIP was asked for, so an unresolved one is not worth reporting.
+  const askedForLocale = canonical.locale === null;
+  const askedForTimezone = canonical.timezone === null;
+  const geoipWarnings = [];
   let geoipResult = null;
 
   if (canonical.geoip && (canonical.locale === null || canonical.timezone === null || (canonical.proxy !== null && !hasSwitch(canonical.args, "--fingerprint-webrtc-ip")))) {
@@ -1153,10 +1186,32 @@ async function prepareLaunch(options = {}) {
         signal: controller.signal,
       }));
     } catch (error) {
-      // PRACTICAL FIX: Revert to fallback instead of crashing the entire browser launch.
-      const reason = error?.name === "AbortError" ? "timed out" : sanitizeErrorMessage(error?.message ?? error, canonical.proxy);
-      console.warn(`\x1b[33m[Apostate] GeoIP lookup warning: ${reason}. Defaulting to fallback locale and timezone.\x1b[0m`);
-      geoipResult = { locale: "en-US", timezone: "UTC", ip: null };
+      // What stood here was "PRACTICAL FIX: Revert to fallback instead of
+      // crashing the entire browser launch", with a second block below reading
+      // "Hard fallback just in case to ensure we never crash". That trade was
+      // deliberate and its concern was real -- raising would fail a launch over
+      // an unreachable lookup -- so it is recorded rather than deleted. It is
+      // no longer a trade, because the third option did not exist when it was
+      // made: the resolved locale used to travel inside an --apostate-profile
+      // envelope, where "send nothing" and "send en-US/UTC" were the same
+      // thing, since an envelope suppresses composition either way. It now
+      // travels as --fingerprint-locale/--fingerprint-timezone, so sending no
+      // override is a real state: the composed profile keeps the locale and
+      // timezone its own seed drew, which are coherent with the rest of that
+      // identity by construction. Inventing en-US/UTC instead overrode a
+      // coherent pair with a persona contradicting the proxy's exit country,
+      // which is the detection this package exists to prevent. The launch still
+      // does not crash. Do not restore the fallback.
+      const reason = error?.name === "AbortError"
+        ? `timed out after ${timeoutMs} ms`
+        : sanitizeErrorMessage(error?.message ?? error, canonical.proxy);
+      geoipWarnings.push(
+        `GeoIP lookup failed for ${redactProxy(canonical.proxy) ?? "the direct network"}: ${reason}. `
+        + "No locale or timezone override is sent and none is invented, so the composed profile "
+        + "keeps its own and it will not match the proxy's exit country. Pass locale and timezone "
+        + "explicitly to guarantee a match.",
+      );
+      console.warn(`\x1b[33m[Apostate] ${geoipWarnings[geoipWarnings.length - 1]}\x1b[0m`);
     } finally {
       clearTimeout(timeout);
     }
@@ -1168,15 +1223,29 @@ async function prepareLaunch(options = {}) {
     ? geoipResult?.ip ?? null
     : null;
 
-  // Hard fallback just in case to ensure we never crash for missing timezone/locale configs
-  if (canonical.geoip && (canonical.locale === null || canonical.timezone === null)) {
-    canonical.locale = canonical.locale ?? "en-US";
-    canonical.timezone = canonical.timezone ?? "UTC";
+  // A lookup that answered without one of the two fields is reported for the
+  // same reason a failed one is, and treated the same way: the field stays
+  // unresolved. This is where the removed hard fallback used to re-invent
+  // en-US/UTC unconditionally, independently of the handler above, so a
+  // resolver returning a locale and no timezone got an invented UTC even
+  // though nothing had failed.
+  if (geoipResult !== null) {
+    const unresolved = [
+      askedForLocale && geoipResult.locale === null ? "locale" : null,
+      askedForTimezone && geoipResult.timezone === null ? "timezone" : null,
+    ].filter((field) => field !== null);
+    if (unresolved.length > 0) {
+      geoipWarnings.push(
+        `the GeoIP lookup resolved no ${unresolved.join(" and no ")}. None is invented, so the `
+        + "composed profile keeps its own; pass it explicitly to guarantee a match.",
+      );
+      console.warn(`\x1b[33m[Apostate] ${geoipWarnings[geoipWarnings.length - 1]}\x1b[0m`);
+    }
   }
 
   // A locale-only envelope is not a cheap way to force a locale. The browser's
-  // InstallComposedProfile() returns early whenever --apostate-profile is
-  // present, and base/apostate/profile.cc leaves absent fields absent by
+  // InstallComposedProfile() returns early whenever --apostate-profile carries
+  // device content, and base/apostate/profile.cc leaves absent fields absent by
   // design, so an envelope carrying nothing but a locale means composition
   // never runs and every other axis -- GPU identity, capability cluster, cores,
   // memory, panel, timezone, fonts, media topology, voices -- silently falls
@@ -1187,27 +1256,25 @@ async function prepareLaunch(options = {}) {
   const composesNatively = resolution.profileId === "native-composed";
   profile = composesNatively ? profile : withLocale(profile, canonical.locale, canonical.timezone);
   canonical.profile = profile;
-  const warnings = [...(resolution.warnings ?? [])];
-  if (composesNatively && launchProxyCredentials(canonical.proxy) !== null) {
-    // Proxy credentials have no switch of their own: PROFILE_SPEC keeps them
-    // off the command line deliberately, so the envelope is their only channel.
-    // That envelope still suppresses composition, and no switch selection here
-    // can fix it -- the loader would have to stop treating a credentials-only
-    // envelope as a composed profile. Report it rather than let it pass.
-    warnings.push(
-      "proxy credentials travel in an --apostate-profile envelope, and an envelope "
-      + "suppresses the browser's composition entirely: this launch will inherit the "
-      + "host on every axis the envelope does not describe. Supply a credential-free "
-      + "proxy endpoint, or an explicit profile whose coherence you own.",
-    );
-    console.warn(`\x1b[33m[Apostate] ${warnings[warnings.length - 1]}\x1b[0m`);
-  }
+  // A warning for the credentials-only envelope stood here, telling the caller
+  // that authenticating to a proxy cost them the composed fingerprint on every
+  // axis. It was sanctioned as an interim while that was true. It no longer is:
+  // the loader stops treating a payload that claims no device as a composed
+  // profile, composes normally and attaches the credentials to the result. A
+  // warning nobody should act on teaches callers to ignore the ones that
+  // matter, so it is retired rather than re-worded. Do not re-add it; if the
+  // credentials path regresses, the regression is in the loader.
+  const warnings = [...(resolution.warnings ?? []), ...geoipWarnings];
   return {
     config: canonical,
     resolution,
     diagnostics: {
       proxy: redactProxy(canonical.proxy),
-      geoip: canonical.geoip ? (geoipResult ? "resolved" : "explicit") : "disabled",
+      // "explicit" means no lookup was needed, so a lookup that ran and failed
+      // cannot borrow that word: it reports "unresolved" instead. Diagnostics
+      // only -- nothing here is page-visible.
+      geoip: !canonical.geoip ? "disabled"
+        : geoipResult ? "resolved" : geoipWarnings.length > 0 ? "unresolved" : "explicit",
       profile_source: resolution.source,
       profile_id: resolution.profileId,
       profile_identity: resolution.identity,
@@ -1265,11 +1332,12 @@ function buildLaunchArguments(config, resolution, { driverOwnsProfile = false } 
 
   if (resolution?.profileId === "native-composed") {
     // Locale and timezone ride 0085's per-field override switches, never a
-    // profile envelope. An envelope -- even one describing only a locale --
-    // makes the browser's InstallComposedProfile() return early, so nothing is
-    // composed, the seed above is silently ignored, and every axis the envelope
-    // omits falls back to the host. An override instead narrows the draw inside
-    // the composed profile, which is what this path wants.
+    // profile envelope. An envelope describing a device -- even one describing
+    // only a locale -- makes the browser's InstallComposedProfile() return
+    // early, so nothing is composed, the seed above is silently ignored, and
+    // every axis the envelope omits falls back to the host. An override instead
+    // narrows the draw inside the composed profile, which is what this path
+    // wants.
     //
     // Host mode does not outrank a per-field override, it REFUSES it: 0085
     // treats a persona, a pinned anchor and a per-field override alike, and
@@ -1287,18 +1355,28 @@ function buildLaunchArguments(config, resolution, { driverOwnsProfile = false } 
 
   const credentials = launchProxyCredentials(config.proxy);
   const devicePayload = nativeProfilePayload(config.profile);
-  if (Object.keys(devicePayload).length > 0 || credentials !== null) {
-    // An envelope and a seed are alternatives, not layers. The browser cannot
-    // report the conflict -- marking an envelope partial would be a new
+  const describesDevice = Object.keys(devicePayload).length > 0;
+  if (describesDevice || credentials !== null) {
+    // A device envelope and a seed are alternatives, not layers. The browser
+    // cannot report the conflict -- marking an envelope partial would be a new
     // page-visible surface, and the absent-means-absent rule is what makes a
     // single-surface envelope useful for testing -- so refuse here rather than
     // let the seed be dropped without a word.
-    if (userSuppliedSeed) {
+    //
+    // Credentials are not a device claim, and this refusal used to fire on them
+    // too. InstallComposedProfile() composes normally for a payload that claims
+    // no device and attaches the credentials to what it composed, so an
+    // authenticated proxy plus a pinned seed is a legal combination -- and the
+    // commonest one this package serves. The empty `device_profile` key below
+    // is deliberate and must stay: base/apostate/profile.cc's ParseOrNull reads
+    // `proxy_credentials` only inside `if (FindDict("device_profile"))`, so a
+    // wrapper without the key loses the credentials silently.
+    if (userSuppliedSeed && describesDevice) {
       throw new ProfileResolutionError(
-        "a profile envelope and a --fingerprint seed cannot be combined: "
-        + "--apostate-profile suppresses the browser's composition entirely, so the "
-        + "seed would be silently ignored and every surface the profile does not "
-        + "describe would stay host-inherited",
+        "an authored profile and a --fingerprint seed cannot be combined: an "
+        + "--apostate-profile payload describing a device suppresses the browser's "
+        + "composition entirely, so the seed would be silently ignored and every "
+        + "surface the profile does not describe would stay host-inherited",
         { profile_id: resolution?.profileId ?? null },
         "APOSTATE_ENVELOPE_SEED_CONFLICT",
       );

@@ -514,12 +514,59 @@ ours on the next.
   the `PreCreateThreadsImpl` resolution, so every child inherits the answer
   rather than deciding again.
 
-  **The environment is the Linux lever and only the Linux lever.** macOS
-  resolves the application locale from `NSBundle`'s `preferredLocalizations` —
-  `LANG`, `LANGUAGE` and `LC_ALL` each leave `Intl` at en-US on the shipped
-  bundle, measured — and Windows falls through to `GetUserDefaultLocaleName`.
-  Those two leak the host's *system* language by routes no environment fix
-  reaches, and they are what `intl.resolved-locale` stays escalated for.
+  **The environment is the Linux lever and only the Linux lever**, so `0114`
+  closed Linux and only Linux. The other two resolve the application locale
+  from somewhere the environment does not reach, and on macOS that was not a
+  regression waiting for a build — it was live in the artifact then shipping.
+  `package-artifact.sh` ships `Chromium.app` wholesale and the locale data is
+  inside it: not the 55 `.lproj` directories in `Contents/Resources`, which
+  hold `InfoPlist.strings` and nothing else, but **220 `locale.pak` files in
+  `Chromium Framework.framework/.../<locale>.lproj/`**, which is where
+  `ResourceBundle::GetLocaleFilePath` looks on Apple. The same full set the
+  Linux build produces and packaging used to discard, present all along.
+
+  Measured on that bundle, system language varied per launch, composed Windows
+  persona — and read the last column with the first two, because the defect is
+  not one leak but a *contradiction*:
+
+  ```text
+  system language   Intl   calendar   month     navigator.languages
+  (host, English)   en-US  gregory    January   en-SG,en
+  fr-FR             fr     gregory    janvier   en-GB,en
+  th-TH             th     buddhist   มกราคม    en-SG,en
+  ja-JP             ja     gregory    1月       en-SG,en
+  de-DE             de     gregory    Januar    en-SG,en
+  ```
+
+  The persona announced English-Singapore language preferences and formatted
+  every date in Thai on a Buddhist calendar. `--fingerprint-locale=de-DE,de`
+  moved `navigator.languages` to de-DE and left `Intl` on the host's Thai, so
+  the contract's strongest locale layer was honoured on one half of the surface
+  and ignored on the other. `--lang` moved neither.
+
+  Patch `0115` resolves the composed locale in `GetApplicationLocaleInternal`,
+  ahead of every platform candidate: ahead of glib on Linux, of `NSBundle`'s
+  `preferredLocalizations` on macOS, and of both `--lang` and the Windows
+  preferred-UI-language list on Windows. One point rather than three, because
+  pre-filling the macOS and Windows override slots would still sit *below*
+  Windows' `pref_locale` — where a `kApplicationLocale` already stored in an
+  existing `--user-data-dir` would outrank a composed persona through a
+  persisted channel. One decision too: `base::apostate::ComposedApplicationLocale()`
+  is what `0114`'s environment write reads as well, so the resolution-side pin
+  and the environment-side pin cannot disagree.
+
+  Windows was described here as falling through to `GetUserDefaultLocaleName`.
+  That is where the ICU fallback comes from and it is not what answers:
+  `content` fills the override from `GetThreadPreferredUILanguageList()` right
+  after `PreBrowserMain`, so the leak is the user's *preferred UI language
+  list*. The fix is the same; the claim was wrong.
+
+  `--lang` is inert under a composed profile on all three platforms as a
+  result. It already was on Linux and macOS and said nothing; on Windows it was
+  the first candidate, so that is a real change. It is *reported* rather than
+  honoured — a UI language that contradicts the persona is the disagreement
+  this surface exists to prevent — and rather than refused, since a launch may
+  pass it for reasons unrelated to the fingerprint.
 
   What else the 440 paks turned on, since the paks were dead weight and are now
   live, and all of it page-readable off one application locale: the calendar and
@@ -547,6 +594,27 @@ ours on the next.
   Before `0114` that printed three failures, `LOCALE windows`, `LOCALE macos`
   and `LOCALE linux`, each `languages=th-TH,th intl=th`. After it, all twelve
   checks pass and each LOCALE line reads `languages=en-US,en intl=en-US`.
+
+  The macOS half of the check needs the host's *system language* foreign rather
+  than its shell, because that is the lever there — and note that
+  `release-smoke.mjs` sets `LANG` and `LANGUAGE` in the child environment,
+  which on macOS moves nothing, so run against a macos-arm64 artifact on an
+  English-language Mac its `LOCALE` lines pass whether or not the leak is
+  fixed. Set the system language for the app instead:
+
+  ```sh
+  defaults write org.chromium.Chromium AppleLanguages -array th-TH
+  node scripts/checks/release-smoke.mjs \
+    <artifact>/Chromium.app/Contents/MacOS/Chromium
+  defaults delete org.chromium.Chromium AppleLanguages
+  ```
+
+  Before `0115` that reports `intl=th` with `calendar: "buddhist"` on every
+  composed persona, and — on any artifact built after `0111` removed the locale
+  draw — `languages=th-TH,th` too, so the `LOCALE` assertion fails. After
+  `0115`, `languages=en-US,en intl=en-US`, while `--fingerprint=host` still
+  reports `intl=th`, which is the arm that must not change: only there is the
+  host the thing being presented.
 
   `ledger/surfaces.jsonl`'s `intl.resolved-locale` row carries every measurement
   above and the one question still open: whether stock on a host whose system

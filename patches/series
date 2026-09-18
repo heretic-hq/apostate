@@ -271,3 +271,38 @@
 # After 0113, which is the last patch to touch the explain report and the
 # compose_unittest.cc tail this appends past. It is independent of 0112.
 0114-composed-locale-never-the-host-shell.patch
+
+# 0115 makes the composed locale decide the application locale on macOS and
+# Windows too. 0114 pinned the process environment, which is the linux lever
+# and only the linux lever: macOS resolves from NSBundle's
+# preferredLocalizations and Windows from the preferred-UI-language list, and
+# neither reads the environment. On macOS that was not waiting for a build --
+# the artifact ships Chromium.app wholesale and its framework has carried all
+# 220 locale.pak files all along, so a composed persona has been serving its
+# host's system language, measured, with navigator.languages disagreeing.
+#
+# It resolves the composed value in l10n_util::GetApplicationLocaleInternal,
+# ahead of every platform candidate, which is one point instead of three
+# platform slots -- and the only one above windows' pref_locale, where a
+# kApplicationLocale stored in an existing --user-data-dir would otherwise
+# outrank a composed persona through a persisted channel.
+#
+# It comes after 0114 and depends on it three ways. It adds
+# ComposedApplicationLocale() beside the locale block 0114 wrote in
+# base/apostate/compose.{h,cc}; it rewrites both of the
+# InstallComposedLocaleEnvironment call sites 0114 left in
+# InstallComposedProfile so that they read that accessor instead of computing
+# the answer inline, which is what keeps the two pins from disagreeing; and its
+# compose_unittest.cc hunk appends after the locale section 0114 added. It also
+# needs 0114's environment write on macOS specifically: macOS is POSIX, so
+# content adopted the operator's locale into the C library, and pinning only
+# the resolution would leave the C library disagreeing with ICU -- the split
+# ledger row intl.resolved-locale warns against.
+#
+# After 0111, whose resolve_locale() lambda it extends with the --lang
+# limitation, and whose ComposeRequest::accept_languages -- recorded there as
+# dead -- is what that limitation finally reads.
+#
+# It is the first patch in the series to touch ui/base/l10n, so nothing else
+# orders it there. Independent of 0112 and 0113.
+0115-composed-locale-outranks-the-platform.patch

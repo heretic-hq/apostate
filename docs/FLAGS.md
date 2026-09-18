@@ -231,13 +231,23 @@ so the report names the layer that decided each one.
 `locale.application` is the application locale the launch presents, and it is
 the row to read first because the other two resolve against it: it decides
 `Intl.DateTimeFormat`, `NumberFormat` and `Collator`, the calendar and hour
-cycle they report, the default `Accept-Language` list, and locale-dependent font
-fallback. `LANGUAGE`, `LC_ALL`, `LC_MESSAGES` and `LANG` are written to it in
-the browser process before the locale is resolved, so the host's own four never
-reach it. `command-line` means `--fingerprint-locale` named it — which is also
-how a GeoIP answer from the Python or Node package arrives —
-and `composed-default` means nothing did, so `en-US` is presented rather than
-the operator's shell. It is never `host-inherited`, except under
+cycle they report, the default `Accept-Language` list, collation order, and
+locale-dependent font fallback — and the rendered width of an
+`<input type=date>`, which is how a page reads it with no `Intl` call at all.
+
+It is pinned twice, because one pin per platform is not enough.
+`l10n_util` resolves it ahead of every platform candidate — ahead of glib's
+`LANGUAGE`/`LC_*`/`LANG` on Linux, of `NSBundle`'s `preferredLocalizations` on
+macOS, and of both `--lang` and the Windows preferred-UI-language list on
+Windows — and `LANGUAGE`, `LC_ALL`, `LC_MESSAGES` and `LANG` are written to it
+in the browser before the first child is forked, so the C library agrees with
+ICU and every child agrees with the browser. Both read the same value, so they
+cannot disagree.
+
+`command-line` means `--fingerprint-locale` named it — which is also how a
+GeoIP answer from the Python or Node package arrives — and `composed-default`
+means nothing did, so `en-US` is presented rather than the operator's shell or
+system language. It is never `host-inherited`, except under
 `--fingerprint=host`, which reports no surfaces at all.
 
 `locale.accept_languages` is `command-line` when a switch named the list, and
@@ -589,7 +599,7 @@ where a row says otherwise.
 | `--proxy-server=URL` | HTTP, HTTPS, SOCKS4 and SOCKS5. UDP over SOCKS5 UDP ASSOCIATE carries proxied QUIC and HTTP/3. Not unchanged: a credential in the URL is accepted, which upstream refuses. [The proxy](#the-proxy) is the detail. |
 | `--use-angle=BACKEND` | Selects the backend the GPU process actually renders through. It no longer decides which capability cluster is drawn — the claimed platform does that — so what it changes is throughput and rendered bytes, not the identity. |
 | `--headless` | Supported, and it does not imply software rendering. On a Mac this binary selects ANGLE/Metal in every default configuration including `--headless=new`. A headless Linux server with no GPU is the primary deployment and needs no further switch. |
-| `--lang=TAG` | Sets the UI language independently of the profile's locale, which is usually not what you want. |
+| `--lang=TAG` | **Inert under a composed profile.** The composed application locale resolves ahead of it on every platform, because a UI language that disagrees with the persona's locale is a contradiction a page reads in one `toLocaleString` call. `--fingerprint-explain` names it in the limitations when it had no effect. Use `--fingerprint-locale` instead: that moves the UI locale, `Intl`, the calendar and the `Accept-Language` list together. Still honoured under `--fingerprint=host`, which composes nothing. |
 | `--remote-debugging-pipe` | Opens no socket. Use this rather than a port: a page in the local or private address space can detect an open debugging port. Playwright uses the pipe by default; Puppeteer defaults to a port. |
 | `--window-size=W,H` | Sets the window, not the viewport. The viewport is smaller by the browser chrome and it settles shortly after load rather than immediately. |
 

@@ -108,3 +108,7 @@
 # 0100 is independent of everything above it: local_dom_window.cc is touched by
 # no other patch in the series.
 0100-blink-no-empty-root-window-rect.patch
+
+# 0101 needs the whole compose.cc chain ahead of it, because DeriveWorkArea is
+# 0081's and the hunk's context is what 0085 and 0091 left behind.
+0101-compose-drops-the-absent-panel-origin.patch

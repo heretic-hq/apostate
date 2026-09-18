@@ -835,6 +835,18 @@ variable for one run. Release builds use the repository variable and publish
 exactly that resolved platform set. A subset release does not need artifacts
 for unselected platforms.
 
+Adding Android would make one dormant interaction live. The software HEVC
+decoder from `0061` and `0109` sets `IsDecoderBuiltInVideoCodec(kHEVC)`, and
+`chrome/services/media_gallery_util/video_thumbnail_parser.cc` branches on
+that flag into a switch with no `kHEVC` case, so an HEVC config would take
+the `default:` arm and yield a null thumbnail instead of the encoded data the
+hardware path expects. Neither patch touches an Android ffmpeg config and
+`media_gallery_util/BUILD.gn` compiles that file only `if (is_android)`, so
+no shipped target reaches it today. The fix is not a `kHEVC` case beside
+`kH264`: `0061` accepts only Main and Main10, so routing HEVC through the
+built-in decoder would return null for every other profile, which is
+precisely the set Android's hardware decoder handles.
+
 ## Keep extensions enabled
 
 The common GN arguments leave `enable_extensions` at Chromium's default.

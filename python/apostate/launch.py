@@ -200,8 +200,35 @@ def _native_args(plan: LaunchPlan, *, persistent: bool = False) -> list[str]:
         if config.fingerprint_platform is not None:
             args.append(f"--fingerprint-platform={config.fingerprint_platform}")
 
+    if plan.resolution is not None and plan.resolution.profile_id == "native-composed":
+        # Locale and timezone ride 0085's per-field override switches, never a
+        # profile envelope. An envelope -- even one describing only a locale --
+        # makes the browser's InstallComposedProfile() return early, so nothing
+        # is composed, the seed above is silently ignored, and every axis the
+        # envelope omits falls back to the host. An override instead narrows the
+        # draw inside the composed profile, which is what this path wants. Host
+        # mode outranks per-field overrides and the binary refuses that
+        # combination outright, so this is deliberately not done for
+        # ``host-inherited``.
+        for switch, value in (("--fingerprint-locale", plan.resolution.locale),
+                              ("--fingerprint-timezone", plan.resolution.timezone)):
+            if value and not _has_switch(config.args, switch):
+                args.append(f"{switch}={value}")
+
     encoded = _profile_payload(plan.profile)
     if encoded:
+        # An envelope and a seed are alternatives, not layers. The browser
+        # cannot report the conflict -- marking an envelope partial would be a
+        # new page-visible surface, and the absent-means-absent rule is what
+        # makes a single-surface envelope useful for testing -- so refuse here
+        # rather than let the seed be dropped without a word.
+        if _has_switch(config.args, "--fingerprint"):
+            raise ProfileError(
+                "a profile envelope and a --fingerprint seed cannot be combined: "
+                "--apostate-profile suppresses the browser's composition entirely, "
+                "so the seed would be silently ignored and every surface the "
+                "profile does not describe would stay host-inherited"
+            )
         args.append("--apostate-profile=" + encoded)
     if config.user_data_dir and not persistent:
         args.append("--user-data-dir=" + config.user_data_dir)

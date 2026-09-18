@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { createServer, request as httpRequest } from "node:http";
 import { chmod, lstat, mkdir, readFile, readdir, readlink, writeFile } from "node:fs/promises";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -723,6 +724,171 @@ test("drives the Puppeteer branch: launch, userDataDir and createBrowserContext"
 
     // The component-update switch is stripped for Puppeteer too.
     assert.ok(seen.ignoreDefaultArgs.includes("--disable-component-update"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// The default claimed persona per host platform token, transcribed from
+// DefaultPersonaForHost() in base/apostate/compose.cc (patch 0102) as given by
+// its author. Declared here and deliberately NOT imported from
+// DEFAULT_PERSONA_BY_HOST: a test that reads the table the implementation uses
+// only proves the implementation agrees with itself.
+//
+// The mapping lives in no file both implementations can read. The dispersion
+// tables under resources/profiles/ key option sets on a platform and so pin the
+// token set, but not the host-to-persona edge, and 0102's author declined to add
+// a data file that only tests would consume. This transcription is therefore the
+// only pin, and the coupling is known and deliberate: if the C++ table moves,
+// this literal must be moved with it, and until it is, the Node and Python
+// mirrors fail here. python/tests/test_package.py carries the same table.
+const COMPOSE_CC_DEFAULT_PERSONA = { macos: "macos", windows: "windows", linux: "windows" };
+// os.platform() value -> host platform token. The other half of the chain: a
+// correct table read from a misdetected host still claims the wrong OS.
+const HOST_PLATFORM_TOKENS = { darwin: "macos", win32: "windows", linux: "linux" };
+
+test("the resolver's default platform mirrors the browser's 0102 default", async () => {
+  // The launch path sends no --fingerprint-platform when the caller named none,
+  // so the browser applies its own host-conditional default. A local resolution
+  // has no browser to ask and must reproduce that default, so this pins the two
+  // implementations of one table against each other.
+  //
+  // Run in a child process per host case: os.platform() is read at module scope,
+  // so the only honest way to exercise a Linux host from macOS is to mock node:os
+  // before the package is imported. Assertions read the built argv and the
+  // resolver's own output, never the source.
+  const distHref = new URL("../dist/index.js", import.meta.url).href;
+  const root = await mkdtemp(join(tmpdir(), "apostate-node-persona-"));
+  try {
+    const probePath = join(root, "probe.mjs");
+    await writeFile(probePath, `
+import { createRequire } from "node:module";
+createRequire(import.meta.url)("node:os").platform = () => process.env.PROBE_HOST;
+const m = await import(${JSON.stringify(distHref)});
+const seen = [];
+const fakeDriver = { default: { async launch(options) { seen.push(options); return { async close() {} }; } } };
+const base = { executablePath: process.execPath, geoip: false, driver: "puppeteer-core", _driverModule: fakeDriver };
+await m.launch({ ...base, fingerprint: 12345 });
+await m.launch({ ...base, fingerprint: 12345, fingerprintPlatform: "linux" });
+await m.launch({ ...base, fingerprint: 1, fingerprintPlatform: "win32" });
+const personaSwitch = (i) => seen[i].args.filter((a) => a.startsWith("--fingerprint-platform"));
+process.stdout.write(JSON.stringify({
+  table: m.DEFAULT_PERSONA_BY_HOST,
+  hostPersona: m.hostPersona(),
+  mirror: m.defaultPersonaForHost(m.hostPersona()),
+  passThrough: ["", "freebsd", "android", "WINDOWS"].map((t) => m.defaultPersonaForHost(t)),
+  bare: m.resolveProfile({}).platform,
+  seeded: m.resolveProfile({ fingerprint: 12345 }).platform,
+  explicitProfile: m.resolveProfile({ profile: { id: "no-platform" } }).platform,
+  explicitPersona: m.resolveProfile({ fingerprint: 1, fingerprintPlatform: "linux" }).platform,
+  hostSeed: m.resolveProfile({ fingerprint: "host" }).platform,
+  argvDefault: personaSwitch(0),
+  argvExplicit: personaSwitch(1),
+  argvAliased: personaSwitch(2),
+}));
+`);
+
+    for (const [osPlatform, hostToken] of Object.entries(HOST_PLATFORM_TOKENS)) {
+      const expected = COMPOSE_CC_DEFAULT_PERSONA[hostToken];
+      const raw = execFileSync(process.execPath, [probePath], {
+        encoding: "utf8",
+        env: { ...process.env, PROBE_HOST: osPlatform },
+      });
+      const seen = JSON.parse(raw);
+
+      assert.deepEqual(seen.table, COMPOSE_CC_DEFAULT_PERSONA,
+        `DEFAULT_PERSONA_BY_HOST no longer matches compose.cc's table`);
+      assert.equal(seen.hostPersona, hostToken,
+        `hostPersona() must report the host, not the persona, on ${osPlatform}`);
+      assert.equal(seen.mirror, expected);
+
+      // Every shape that reaches the default: no selector, a seed, and an
+      // explicit profile that declares no platform of its own.
+      assert.equal(seen.bare, expected, `bare resolve on ${hostToken}`);
+      assert.equal(seen.seeded, expected, `seeded resolve on ${hostToken}`);
+      assert.equal(seen.explicitProfile, expected, `platformless profile on ${hostToken}`);
+      // An explicit persona outranks the table outright, as request.platform
+      // does in Compose().
+      assert.equal(seen.explicitPersona, "linux");
+      // Host inheritance composes nothing, so the page really does see the host
+      // and reporting the host is correct. A deliberate exception, not a miss.
+      assert.equal(seen.hostSeed, hostToken, `host seed must report the host on ${hostToken}`);
+      // An unrecognised or empty token is returned unchanged rather than
+      // defaulted to windows, so the browser's own IsKnownPlatform() check
+      // fails and the launch inherits the host instead of composing for a
+      // platform with no corpus behind it.
+      assert.deepEqual(seen.passThrough, ["", "freebsd", "android", "WINDOWS"]);
+
+      // Built argv, not source: a default launch must hand the browser no
+      // persona switch at all, because that absence is what lets 0102's default
+      // apply. --fingerprint-platform=linux on a Linux host is indistinguishable
+      // inside the browser from the pre-0102 default.
+      assert.deepEqual(seen.argvDefault, [], `no persona switch may be emitted on ${osPlatform}`);
+      assert.deepEqual(seen.argvExplicit, ["--fingerprint-platform=linux"]);
+      // An alias is normalised to a token IsKnownPlatform() accepts rather than
+      // forwarded verbatim for the browser to reject and inherit the host.
+      assert.deepEqual(seen.argvAliased, ["--fingerprint-platform=windows"]);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("locale travels as an override, never as a partial profile envelope", async () => {
+  // The regression test for a whole class of defect. The browser's
+  // InstallComposedProfile() returns early whenever --apostate-profile is
+  // present and base/apostate/profile.cc leaves absent fields absent, so a
+  // locale-only envelope means composition never runs: eleven of twelve axes
+  // fall back to the host and --fingerprint is silently ignored. geoip defaults
+  // on, so that was the shape of almost every launch. The assertion is on the
+  // emitted argv, because argv is what the browser actually reads. The Python
+  // package pins the same nine cases in test_package.py.
+  const root = await mkdtemp(join(tmpdir(), "apostate-node-envelope-"));
+  try {
+    const executable = join(root, "browser");
+    await writeFile(executable, "#!/bin/sh\nexit 0\n");
+    await chmod(executable, 0o755);
+    let seen = null;
+    const fakeDriver = { default: { async launch(options) { seen = options; return { async close() {} }; } } };
+    const base = { executablePath: executable, driver: "puppeteer-core", _driverModule: fakeDriver };
+    const geoipResolver = async () => ({ locale: "en-US,en", timezone: "Europe/London", ip: "1.2.3.4" });
+
+    const cases = [
+      ["nothing requested", { geoip: false }, [], false],
+      ["seed only", { geoip: false, fingerprint: 12345 }, ["--fingerprint=12345"], false],
+      ["explicit locale", { geoip: false, locale: "en-US" }, ["--fingerprint-locale=en-US"], false],
+      ["explicit timezone", { geoip: false, timezone: "Europe/London" },
+        ["--fingerprint-timezone=Europe/London"], false],
+      ["geoip default, the common shape", { geoipResolver },
+        ["--fingerprint-locale=en-US,en", "--fingerprint-timezone=Europe/London"], false],
+      ["geoip default plus a seed", { fingerprint: 12345, geoipResolver },
+        ["--fingerprint=12345", "--fingerprint-locale=en-US,en",
+          "--fingerprint-timezone=Europe/London"], false],
+      // Host mode composes nothing, so an envelope suppresses nothing there and
+      // is the only carrier a locale has. Per-field overrides are refused by the
+      // binary under host mode, so none are sent.
+      ["host seed with a locale",
+        { geoip: false, fingerprint: "host", locale: "en-GB,en" }, ["--fingerprint=host"], true],
+      // A profile the user authored is the one legitimate envelope: they own its
+      // coherence, and bypassing composition is documented rather than accidental.
+      ["user-authored profile",
+        { geoip: false, profile: { id: "mine", platform: { name: "macOS" } } }, [], true],
+    ];
+
+    for (const [label, options, expected, envelope] of cases) {
+      seen = null;
+      const browser = await launch({ ...base, ...options });
+      await browser.close();
+      assert.deepEqual(seen.args.filter((a) => a.startsWith("--fingerprint")), expected, label);
+      assert.equal(seen.args.some((a) => a.startsWith("--apostate-profile=")), envelope, label);
+    }
+
+    // An envelope and a seed are alternatives, not layers, and the browser
+    // cannot report the conflict: it drops the seed without a word.
+    await assert.rejects(
+      launch({ ...base, geoip: false, profile: { id: "mine" }, args: ["--fingerprint=99"] }),
+      (error) => error.code === "APOSTATE_ENVELOPE_SEED_CONFLICT",
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

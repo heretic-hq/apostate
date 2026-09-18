@@ -113,6 +113,13 @@ export class WidevineError extends ApostateError {}
 export declare function stableStringify(value: unknown): string;
 export declare function validateProfile(profile: Record<string, unknown>): Record<string, unknown>;
 export declare function normalizePersona(value?: string | null): string | null;
+export declare const DEFAULT_PERSONA_BY_HOST: Readonly<Record<string, string>>;
+// The host's own platform token, never the platform a launch claims. Pass it
+// through defaultPersonaForHost() to get what a default launch will present.
+export declare function hostPersona(): string | null;
+// Mirrors DefaultPersonaForHost() in base/apostate/compose.cc; an unrecognised
+// token is returned unchanged rather than defaulted.
+export declare function defaultPersonaForHost(hostToken: string | null): string | null;
 export declare function targetForHost(platform?: string, architecture?: string): string;
 export declare function normalizeTarget(target?: string | null): string;
 export declare function resolveProfile(options?: LaunchOptions): Record<string, unknown>;

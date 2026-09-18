@@ -13,6 +13,7 @@ import platform as host_platform
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
 from .errors import ConfigurationError, ProfileError
@@ -88,6 +89,15 @@ def normalize_platform(value: str | None) -> str | None:
 
 
 def host_persona() -> str:
+    """The fingerprint-platform token for the **host** OS.
+
+    This is the host's own platform and never the platform a launch claims.
+    The browser's default claimed persona is host-conditional and the two
+    differ on a Linux host, so a caller that wants to know what a default
+    launch will present must pass this through
+    :func:`default_persona_for_host` rather than use it directly. Mirrors
+    ``HostPlatformToken()`` in ``base/apostate/host_capability.cc``.
+    """
     system = host_platform.system().lower()
     if system == "windows":
         return "windows"
@@ -96,6 +106,48 @@ def host_persona() -> str:
     if system == "linux":
         return "linux"
     raise ConfigurationError(f"unsupported host platform: {system or 'unknown'}")
+
+
+#: The browser's default claimed persona for each host platform token, mirroring
+#: ``DefaultPersonaForHost()`` in ``base/apostate/compose.cc`` (patch 0102).
+#:
+#: This is a deliberate second implementation of a C++ default, and it is scoped
+#: to the one path that cannot avoid one. The launch path does not use it: it
+#: sends no ``--fingerprint-platform`` when the user named no platform, so the
+#: browser applies its own default and the table has a single owner.
+#: :class:`~apostate.resolver.DeterministicResolver` composes and reports a
+#: resolution locally, with no browser process to ask, so it has to know the
+#: same table.
+#:
+#: The mapping exists nowhere but the C++; the dispersion tables under
+#: ``resources/profiles/`` key option sets on a platform and so pin the token
+#: set, but not the host-to-persona edge. That makes this a known coupling:
+#: ``python/tests/test_package.py`` and ``npm/test/index.test.mjs`` transcribe
+#: the table independently and fail if either side moves alone.
+#:
+#: Read-only, matching ``Object.freeze`` on the Node side: it is a transcription
+#: of a C++ contract, not a setting.
+DEFAULT_PERSONA_BY_HOST = MappingProxyType({
+    "macos": "macos",
+    "windows": "windows",
+    # The one default that is not the host's own OS. A Linux host is the
+    # deployment target and a Windows persona is what most launches there
+    # want; the cost is the Windows font set, which the browser reports as a
+    # limitation rather than hiding.
+    "linux": "windows",
+})
+
+
+def default_persona_for_host(host_token: str) -> str:
+    """The platform a default launch claims when the host reports *host_token*.
+
+    An unrecognised or empty token is returned unchanged rather than defaulted
+    to ``windows``. That is what the C++ does: the caller then fails its own
+    ``IsKnownPlatform()`` check, composes nothing and inherits the host.
+    Mapping an unknown host onto a persona here would instead compose profiles
+    for platforms with no corpus behind them.
+    """
+    return DEFAULT_PERSONA_BY_HOST.get(host_token, host_token)
 
 
 def is_host_seed(value: int | str | None) -> bool:
@@ -210,10 +262,25 @@ class LaunchConfig:
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"), default=str)
 
     def resolver_identity(self, *, browser_version: str = CHROMIUM_VERSION,
-                         catalogue_version: int = CATALOGUE_VERSION) -> str:
+                          catalogue_version: int = CATALOGUE_VERSION) -> str:
+        """A cache key for this launch request's resolution.
+
+        Keyed on the request as given plus the host, never on a guess at what
+        the browser will claim. This used to substitute :func:`host_persona`
+        for an unspecified platform, which collapsed "no platform named" and
+        an explicit persona equal to the host into one key. Since 0102 those
+        are two different browsers on a Linux host -- unspecified claims
+        ``windows``, explicit ``linux`` claims ``linux`` -- so that collision
+        would hand one launch's cached resolution to the other. The host stays
+        in the payload as its own field because the same request composes
+        differently per host; keeping it separate leaves the host-to-persona
+        table with a single owner in :func:`default_persona_for_host` instead
+        of a copy here.
+        """
         payload = {
             "fingerprint": self.fingerprint,
-            "fingerprint_platform": self.fingerprint_platform or host_persona(),
+            "fingerprint_platform": self.fingerprint_platform,
+            "host_platform": host_persona(),
             "profile": self.profile,
             "catalogue_version": catalogue_version,
             "browser_version": browser_version,
@@ -284,6 +351,7 @@ def resolve_profile(config: LaunchConfig, resolver: Resolver | None = None) -> d
 
 __all__ = [
     "PACKAGE_VERSION", "CHROMIUM_VERSION", "CATALOGUE_VERSION",
-    "PROFILE_SCHEMA_VERSION", "LaunchConfig", "Resolver", "host_persona",
+    "PROFILE_SCHEMA_VERSION", "DEFAULT_PERSONA_BY_HOST", "LaunchConfig",
+    "Resolver", "default_persona_for_host", "host_persona",
     "normalize_platform", "resolve_profile", "translate_options",
 ]

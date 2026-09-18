@@ -34,6 +34,7 @@ from .config import (
     HOST_INHERITANCE_SEEDS,
     PROFILE_SCHEMA_VERSION,
     LaunchConfig,
+    default_persona_for_host,
     host_persona,
     is_host_seed,
     normalize_platform,
@@ -250,6 +251,11 @@ class ProfileResolution:
     locale_source: str
     timezone_source: str
     identity: str
+    #: The effective locale and timezone this launch will present. On the
+    #: composing path they travel to the browser as 0085 per-field override
+    #: switches rather than inside ``profile``; see ``_native_args``.
+    locale: str | None = None
+    timezone: str | None = None
     warnings: tuple[str, ...] = ()
     profile_schema_version: int = PROFILE_SCHEMA_VERSION
 
@@ -264,6 +270,8 @@ class ProfileResolution:
             "platform": self.platform,
             "locale_source": self.locale_source,
             "timezone_source": self.timezone_source,
+            "locale": self.locale,
+            "timezone": self.timezone,
             "identity": self.identity,
             "warnings": list(self.warnings),
         }
@@ -347,6 +355,10 @@ class DeterministicResolver:
                         "persona cannot be applied at the same time"
                     )
                 profile_id = "host-inherited"
+                # The host's own platform, deliberately not the 0102 default
+                # table: nothing is composed on this path, so the platform the
+                # page sees is the host's by definition. Reporting a persona
+                # here would describe a composition that does not happen.
                 selected_platform = host_persona()
                 warnings.append(
                     "host inheritance requested: no profile layer is composed and every "
@@ -395,7 +407,14 @@ class DeterministicResolver:
             if not selected.get("id"):
                 selected["id"] = profile_id
 
-        platform = selected_platform or config.fingerprint_platform or host_persona()
+        # No browser process is involved in a local resolution, so unlike the
+        # launch path -- which sends no --fingerprint-platform and lets the
+        # binary apply its own default -- this has to reproduce that default
+        # itself. `default_persona_for_host` is the mirror of 0102's
+        # `DefaultPersonaForHost()`; see its note in config.py for why the
+        # duplication is deliberate and how it is pinned.
+        platform = (selected_platform or config.fingerprint_platform
+                    or default_persona_for_host(host_persona()))
 
         profile_locale, profile_timezone = _nested_locale(selected)
         geo_locale = geoip.get("locale") if isinstance(geoip, Mapping) else None
@@ -422,7 +441,20 @@ class DeterministicResolver:
         else:
             timezone = profile_timezone
             timezone_source = "profile-selected" if timezone else "host"
-        if locale or timezone:
+        # A locale-only envelope is not a cheap way to force a locale. The
+        # browser's InstallComposedProfile() returns early whenever
+        # --apostate-profile is present, and base/apostate/profile.cc leaves
+        # absent fields absent by design, so an envelope carrying nothing but a
+        # locale means composition never runs and every other axis -- GPU
+        # identity, capability cluster, cores, memory, panel, timezone, fonts,
+        # media topology, voices -- silently falls back to the host while the
+        # seed is ignored. On the composing path the locale therefore leaves as
+        # 0085's per-field override switches, which narrow the draw inside the
+        # composed profile; ``_native_args`` emits them from the two fields
+        # below. The host-inherited and explicit-profile paths compose nothing
+        # either way, so there an envelope suppresses nothing and is the only
+        # carrier available.
+        if (locale or timezone) and profile_id != "native-composed":
             value = selected.get("locale")
             locale_block = dict(value) if isinstance(value, Mapping) else {}
             if locale:
@@ -442,7 +474,8 @@ class DeterministicResolver:
         return ProfileResolution(
             profile=selected, profile_id=profile_id, catalogue_version=self.catalogue_version,
             browser_version=self.browser_version, platform=platform, locale_source=locale_source,
-            timezone_source=timezone_source, identity=identity, warnings=tuple(warnings),
+            timezone_source=timezone_source, identity=identity, locale=locale or None,
+            timezone=timezone or None, warnings=tuple(warnings),
             profile_schema_version=self.profile_schema_version,
         )
 

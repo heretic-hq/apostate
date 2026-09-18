@@ -23,10 +23,12 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
+import apostate.config as config_module  # noqa: E402
 import apostate.resolver as resolver_module  # noqa: E402
 from apostate import (  # noqa: E402
     CATALOGUE_VERSION,
     CHROMIUM_VERSION,
+    DEFAULT_PERSONA_BY_HOST,
     PROFILE_SCHEMA_VERSION,
     BinaryManager,
     ConfigurationError,
@@ -34,6 +36,8 @@ from apostate import (  # noqa: E402
     ProfileError,
     UnpublishedArtifactError,
     UnsupportedArchiveError,
+    default_persona_for_host,
+    host_persona,
     launch,
     launch_async,
     launch_persistent_context,
@@ -264,6 +268,106 @@ print(catalogue['browser_build'])
         with self.assertRaisesRegex(ProfileError, "retired with catalogue version 1"):
             resolve_profile(profile="apple-metal-m2", fingerprint_platform="macos")
 
+    #: The default claimed persona per host platform token, transcribed from
+    #: ``DefaultPersonaForHost()`` in ``base/apostate/compose.cc`` (patch 0102)
+    #: as given by its author. Declared here and deliberately NOT imported from
+    #: ``apostate.DEFAULT_PERSONA_BY_HOST``: a test that reads the table the
+    #: implementation uses only proves the implementation agrees with itself.
+    #:
+    #: The mapping lives in no file both implementations can read. The
+    #: dispersion tables under ``resources/profiles/`` key option sets on a
+    #: platform and so pin the token set, but not the host-to-persona edge, and
+    #: 0102's author declined to add a data file that only tests would consume.
+    #: This transcription is therefore the only pin, and the coupling is known
+    #: and deliberate: if the C++ table moves, this literal must be moved with
+    #: it, and until it is, the Python and Node mirrors fail here.
+    _COMPOSE_CC_DEFAULT_PERSONA = {
+        "macos": "macos",
+        "windows": "windows",
+        # The one default that is not the host's own OS.
+        "linux": "windows",
+    }
+    #: What ``platform.system()`` reports for each of those host tokens, which
+    #: is the other half of the chain: a correct table read from a misdetected
+    #: host still claims the wrong OS.
+    _HOST_SYSTEM_TOKENS = {"Darwin": "macos", "Windows": "windows", "Linux": "linux"}
+
+    def test_resolver_default_platform_mirrors_the_browser_default(self) -> None:
+        # The launch path sends no --fingerprint-platform when the caller named
+        # none, so the browser applies its own default. A local resolution has
+        # no browser to ask and must reproduce that default; these two
+        # implementations of one table can drift silently, so pin them.
+        self.assertEqual(dict(DEFAULT_PERSONA_BY_HOST), self._COMPOSE_CC_DEFAULT_PERSONA)
+
+        for host_token, expected in self._COMPOSE_CC_DEFAULT_PERSONA.items():
+            with self.subTest(host=host_token):
+                self.assertEqual(default_persona_for_host(host_token), expected)
+                with mock.patch.object(resolver_module, "host_persona", return_value=host_token):
+                    # Every shape that reaches the default: no selector at all,
+                    # a seed, and an explicit profile that declares no platform.
+                    self.assertEqual(resolve_profile().platform, expected)
+                    self.assertEqual(resolve_profile(fingerprint=12345).platform, expected)
+                    self.assertEqual(
+                        resolve_profile(profile={"id": "no-platform"}).platform, expected
+                    )
+                    # An explicit persona still outranks the table outright,
+                    # exactly as request.platform does in Compose().
+                    self.assertEqual(
+                        resolve_profile(fingerprint=1, fingerprint_platform="linux").platform,
+                        "linux",
+                    )
+                    # Host inheritance composes nothing, so the page really does
+                    # see the host and reporting the host is correct. This is a
+                    # deliberate exception to the table, not an oversight.
+                    self.assertEqual(resolve_profile(fingerprint="host").platform, host_token)
+
+        for system, host_token in self._HOST_SYSTEM_TOKENS.items():
+            with self.subTest(system=system):
+                with mock.patch.object(config_module.host_platform, "system", return_value=system):
+                    self.assertEqual(host_persona(), host_token)
+                    self.assertEqual(
+                        resolve_profile(fingerprint=7).platform,
+                        self._COMPOSE_CC_DEFAULT_PERSONA[host_token],
+                    )
+
+        # An unrecognised or empty host token is returned unchanged rather than
+        # defaulted to windows. The C++ does the same so that its own
+        # IsKnownPlatform() check fails and the launch inherits the host; a
+        # mirror that defaulted here would compose profiles for platforms with
+        # no corpus behind them.
+        for unknown in ("", "freebsd", "android", "WINDOWS"):
+            with self.subTest(unknown=unknown):
+                self.assertEqual(default_persona_for_host(unknown), unknown)
+
+    def test_default_launch_leaves_the_platform_switch_to_the_browser(self) -> None:
+        # Inspect the built argv, not the source: the point is what the browser
+        # receives. On a Linux host a default launch must emit no persona switch
+        # at all, because that absence is what lets 0102's host-conditional
+        # default apply. Passing --fingerprint-platform=linux here is
+        # indistinguishable inside the browser from the pre-0102 default.
+        launch_module = importlib.import_module("apostate.launch")
+        with mock.patch.object(config_module.host_platform, "system", return_value="Linux"):
+            args = launch_module._native_args(
+                launch_module._resolve_plan(translate_options(fingerprint=12345, geoip=False))
+            )
+            self.assertEqual([item for item in args if "--fingerprint-platform" in item], [])
+            # An explicit persona is still passed through unchanged, which is
+            # the documented way to opt out of the Windows default on Linux.
+            explicit = launch_module._native_args(
+                launch_module._resolve_plan(
+                    translate_options(fingerprint=12345, fingerprint_platform="linux", geoip=False)
+                )
+            )
+            self.assertIn("--fingerprint-platform=linux", explicit)
+            # And an alias is normalised to a token compose.cc accepts, rather
+            # than forwarded verbatim for IsKnownPlatform() to reject.
+            aliased = launch_module._native_args(
+                launch_module._resolve_plan(
+                    translate_options(fingerprint=1, fingerprint_platform="win32", geoip=False)
+                )
+            )
+            self.assertIn("--fingerprint-platform=windows", aliased)
+
     def test_unknown_fingerprint_switch_is_refused_before_launch(self) -> None:
         # Chromium ignores an unknown switch silently, which would leave the
         # surface host-inherited while the caller believed it was set.
@@ -305,6 +409,62 @@ print(catalogue['browser_build'])
         )
         with self.assertRaises(ProfileError):
             resolve_profile(fingerprint="host", fingerprint_platform="windows")
+
+    def test_locale_travels_as_an_override_never_as_a_partial_envelope(self) -> None:
+        # The regression test for a whole class of defect. The browser's
+        # InstallComposedProfile() returns early whenever --apostate-profile is
+        # present and base/apostate/profile.cc leaves absent fields absent, so a
+        # locale-only envelope means composition never runs: eleven of twelve
+        # axes fall back to the host and --fingerprint is silently ignored.
+        # geoip defaults on, so that was the shape of almost every launch. The
+        # assertion is on the emitted argv, because argv is what the browser
+        # actually reads.
+        launch_module = importlib.import_module("apostate.launch")
+
+        def geoip(proxy: Any, timeout: Any) -> dict[str, Any]:
+            return {"ip": "1.2.3.4", "languages": "en-US,en", "timezone": "Europe/London"}
+
+        cases = (
+            ("nothing requested", {"geoip": False}, [], False),
+            ("seed only", {"fingerprint": 12345, "geoip": False}, ["--fingerprint=12345"], False),
+            ("explicit locale", {"locale": "en-US", "geoip": False},
+             ["--fingerprint-locale=en-US"], False),
+            ("explicit timezone", {"timezone": "Europe/London", "geoip": False},
+             ["--fingerprint-timezone=Europe/London"], False),
+            ("geoip default, the common shape", {},
+             ["--fingerprint-locale=en-US,en", "--fingerprint-timezone=Europe/London"], False),
+            ("geoip default plus a seed", {"fingerprint": 12345},
+             ["--fingerprint=12345", "--fingerprint-locale=en-US,en",
+              "--fingerprint-timezone=Europe/London"], False),
+            # Host mode composes nothing, so an envelope suppresses nothing
+            # there and is the only carrier a locale has. Per-field overrides
+            # are refused by the binary under host mode, so none are sent.
+            ("host seed with a locale",
+             {"fingerprint": "host", "locale": "en-GB,en", "geoip": False},
+             ["--fingerprint=host"], True),
+            # A profile the user authored is the one legitimate envelope: they
+            # own its coherence, and bypassing composition is the documented
+            # consequence rather than an accident.
+            ("user-authored profile",
+             {"profile": {"id": "mine", "platform": {"name": "macOS"}}, "geoip": False},
+             [], True),
+        )
+        for label, options, expected, envelope in cases:
+            with self.subTest(case=label):
+                extra = {} if options.get("geoip") is False else {"geoip_provider": geoip}
+                plan = launch_module._resolve_plan(translate_options(**options), **extra)
+                args = launch_module._native_args(plan)
+                self.assertEqual(
+                    [item for item in args if item.startswith("--fingerprint")], expected)
+                self.assertEqual(
+                    bool([item for item in args if item.startswith("--apostate-profile=")]),
+                    envelope)
+
+        # An envelope and a seed are alternatives, not layers, and the browser
+        # cannot report the conflict: it drops the seed without a word.
+        with self.assertRaisesRegex(ProfileError, "cannot be combined"):
+            launch_module._native_args(launch_module._resolve_plan(
+                translate_options(profile={"id": "mine"}, args=["--fingerprint=99"], geoip=False)))
 
     def test_explicit_inline_profile_validates_and_reaches_the_native_envelope(self) -> None:
         launch_module = importlib.import_module("apostate.launch")

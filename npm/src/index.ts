@@ -438,16 +438,59 @@ export function validateProfile(profile) {
   return cloneJson(profile);
 }
 
-function hostPersona() {
+// The fingerprint-platform token for the HOST OS -- never the platform a launch
+// claims. The browser's default claimed persona is host-conditional and the two
+// differ on a Linux host, so a caller that wants to know what a default launch
+// will present must pass this through defaultPersonaForHost(). Mirrors
+// HostPlatformToken() in base/apostate/host_capability.cc.
+export function hostPersona() {
   if (hostPlatform() === "darwin") return "macos";
   if (hostPlatform() === "win32") return "windows";
   if (hostPlatform() === "linux") return "linux";
   return null;
 }
 
+// The browser's default claimed persona for each host platform token, mirroring
+// DefaultPersonaForHost() in base/apostate/compose.cc (patch 0102).
+//
+// This is a deliberate second implementation of a C++ default, scoped to the one
+// path that cannot avoid one. The launch path does not use it: it sends no
+// --fingerprint-platform when the user named no platform, so the browser applies
+// its own default and the table has a single owner. resolveProfile() composes and
+// reports a resolution locally, with no browser process to ask, so it has to know
+// the same table.
+//
+// The mapping exists nowhere but the C++; the dispersion tables under
+// resources/profiles/ key option sets on a platform and so pin the token set, but
+// not the host-to-persona edge. That makes this a known coupling: test/index.test.mjs
+// and python/tests/test_package.py transcribe the table independently and fail if
+// either side moves alone.
+export const DEFAULT_PERSONA_BY_HOST = Object.freeze({
+  macos: "macos",
+  windows: "windows",
+  // The one default that is not the host's own OS. A Linux host is the deployment
+  // target and a Windows persona is what most launches there want; the cost is the
+  // Windows font set, which the browser reports as a limitation rather than hiding.
+  linux: "windows",
+});
+
+// An unrecognised or empty token is returned unchanged rather than defaulted to
+// "windows". That is what the C++ does: the caller then fails its own
+// IsKnownPlatform() check, composes nothing and inherits the host. Mapping an
+// unknown host onto a persona here would instead compose profiles for platforms
+// with no corpus behind them.
+export function defaultPersonaForHost(hostToken) {
+  return Object.prototype.hasOwnProperty.call(DEFAULT_PERSONA_BY_HOST, hostToken)
+    ? DEFAULT_PERSONA_BY_HOST[hostToken]
+    : hostToken;
+}
+
 export function normalizePersona(value) {
-  if (value === undefined || value === null || value === "") {
-    return hostPersona();
+  // An absent platform stays absent. It used to become hostPersona() here, which
+  // made this normalizer a second home for a default and, after 0102, the wrong
+  // one: the host's platform is not what a default launch claims.
+  if (value === undefined || value === null) {
+    return null;
   }
   const normalized = PERSONA_ALIASES.get(String(value).trim().toLowerCase());
   if (!normalized) {
@@ -485,12 +528,15 @@ function normalizedProfilePlatform(profile, source = "profile") {
   return normalizePersona(name);
 }
 
-function requestedProfilePlatform(profile, requestedPlatform, source) {
+// `requested` arrives already normalized by normalizePersona: a token or null.
+function requestedProfilePlatform(profile, requested, source) {
   const declared = normalizedProfilePlatform(profile, source);
-  if (requestedPlatform === undefined || requestedPlatform === null || requestedPlatform === "") {
-    return declared ?? hostPersona();
+  if (requested === null) {
+    // No browser process is involved in a local resolution, so unlike the launch
+    // path -- which sends no --fingerprint-platform and lets the binary apply its
+    // own default -- this has to reproduce that default itself.
+    return declared ?? defaultPersonaForHost(hostPersona());
   }
-  const requested = normalizePersona(requestedPlatform);
   if (declared !== null && declared !== requested) {
     throw new ProfileResolutionError(`${source} platform ${declared} does not match fingerprint platform ${requested}.`, {
       requested_platform: requested,
@@ -683,6 +729,7 @@ function explicitProfileResult(validated, source, fingerprint, persona) {
     profile: validated,
     source,
     profileId,
+    platform: persona,
     identity: profileIdentity(profileId, fingerprint, persona),
     catalogueVersion: CATALOGUE_VERSION,
     chromiumVersion: CHROMIUM_VERSION,
@@ -692,7 +739,10 @@ function explicitProfileResult(validated, source, fingerprint, persona) {
 
 export function resolveProfile(options = {}) {
   if (!isObject(options)) throw new ProfileResolutionError("Launch options must be an object.");
-  const requestedPlatform = options.fingerprintPlatform ?? options.fingerprint_platform;
+  // Normalized once here, so every path below sees a canonical token or null.
+  // This used to be re-derived per branch, and toCanonicalLaunchConfig kept the
+  // raw string, which is how `win32` reached argv unnormalized.
+  const requestedPlatform = normalizePersona(options.fingerprintPlatform ?? options.fingerprint_platform ?? null);
   const explicitPath = options.profilePath ?? options.profile_file ?? options.profileFile;
   if (explicitPath !== undefined && explicitPath !== null) {
     const profile = readProfileFile(String(explicitPath));
@@ -724,21 +774,23 @@ export function resolveProfile(options = {}) {
   const fingerprint = options.fingerprint;
   const hasFingerprint = fingerprint !== undefined && fingerprint !== null && fingerprint !== "";
   if (hasFingerprint) normalizeSeed(fingerprint);
-  const persona = requestedPlatform === undefined || requestedPlatform === null || requestedPlatform === ""
-    ? null
-    : normalizePersona(requestedPlatform);
   if (hasFingerprint && HOST_INHERITANCE_SEEDS[String(fingerprint).trim().toLowerCase()] === true) {
-    if (persona !== null) {
+    if (requestedPlatform !== null) {
       // The binary refuses this combination too. Under host inheritance nothing
       // is composed, so a persona cannot be honoured, and quietly presenting
       // the operator's real machine when they asked for a Windows desktop is
       // the worst outcome available.
-      throw new ProfileResolutionError(HOST_PERSONA_MESSAGE, { fingerprint_platform: persona }, "APOSTATE_HOST_INHERITANCE_PERSONA");
+      throw new ProfileResolutionError(HOST_PERSONA_MESSAGE, { fingerprint_platform: requestedPlatform }, "APOSTATE_HOST_INHERITANCE_PERSONA");
     }
     return {
       profile: null,
       source: "host-inherited",
       profileId: "host-inherited",
+      // The host's own platform, deliberately not the 0102 default table:
+      // nothing is composed on this path, so the platform the page sees is the
+      // host's by definition. Reporting a persona here would describe a
+      // composition that does not happen.
+      platform: hostPersona(),
       identity: null,
       catalogueVersion: CATALOGUE_VERSION,
       chromiumVersion: CHROMIUM_VERSION,
@@ -752,6 +804,10 @@ export function resolveProfile(options = {}) {
     profile: null,
     source: "native-composed",
     profileId: "native-composed",
+    // Reported, not sent. The launch path emits no --fingerprint-platform when
+    // the user named none, so the browser applies its own default; this has to
+    // reproduce that default to report it truthfully. See defaultPersonaForHost.
+    platform: requestedPlatform ?? defaultPersonaForHost(hostPersona()),
     identity: null,
     catalogueVersion: CATALOGUE_VERSION,
     chromiumVersion: CHROMIUM_VERSION,
@@ -906,8 +962,13 @@ export function toCanonicalLaunchConfig(options = {}) {
   if (locale !== null && typeof locale !== "string") throw new TypeError("locale must be a string.");
   if (timezone !== null && typeof timezone !== "string") throw new TypeError("timezone must be a string.");
   const proxy = normalizeProxy(options.proxy);
-  const fingerprintPlatform = options.fingerprintPlatform ?? options.fingerprint_platform ?? null;
-  if (fingerprintPlatform !== null) normalizePersona(fingerprintPlatform);
+  // Store the canonical token, not the raw option. Python's normalize_platform
+  // has always done this; keeping the raw string here meant an alias such as
+  // `win32` reached argv verbatim, and compose.cc's IsKnownPlatform() rejects
+  // it and inherits the host on every axis -- a silent full deanonymisation
+  // from a spelling the Python package accepts. Null stays null, so the switch
+  // stays absent and the browser applies its own host-conditional default.
+  const fingerprintPlatform = normalizePersona(options.fingerprintPlatform ?? options.fingerprint_platform ?? null);
   return {
     fingerprint: rawFingerprint ?? null,
     fingerprint_platform: fingerprintPlatform,
@@ -1113,8 +1174,34 @@ async function prepareLaunch(options = {}) {
     canonical.timezone = canonical.timezone ?? "UTC";
   }
 
-  profile = withLocale(profile, canonical.locale, canonical.timezone);
+  // A locale-only envelope is not a cheap way to force a locale. The browser's
+  // InstallComposedProfile() returns early whenever --apostate-profile is
+  // present, and base/apostate/profile.cc leaves absent fields absent by
+  // design, so an envelope carrying nothing but a locale means composition
+  // never runs and every other axis -- GPU identity, capability cluster, cores,
+  // memory, panel, timezone, fonts, media topology, voices -- silently falls
+  // back to the host while the seed is ignored. On the composing path the
+  // locale therefore leaves as 0085's per-field override switches, emitted by
+  // buildLaunchArguments. The other paths compose nothing either way, so there
+  // an envelope suppresses nothing and is the only carrier available.
+  const composesNatively = resolution.profileId === "native-composed";
+  profile = composesNatively ? profile : withLocale(profile, canonical.locale, canonical.timezone);
   canonical.profile = profile;
+  const warnings = [...(resolution.warnings ?? [])];
+  if (composesNatively && launchProxyCredentials(canonical.proxy) !== null) {
+    // Proxy credentials have no switch of their own: PROFILE_SPEC keeps them
+    // off the command line deliberately, so the envelope is their only channel.
+    // That envelope still suppresses composition, and no switch selection here
+    // can fix it -- the loader would have to stop treating a credentials-only
+    // envelope as a composed profile. Report it rather than let it pass.
+    warnings.push(
+      "proxy credentials travel in an --apostate-profile envelope, and an envelope "
+      + "suppresses the browser's composition entirely: this launch will inherit the "
+      + "host on every axis the envelope does not describe. Supply a credential-free "
+      + "proxy endpoint, or an explicit profile whose coherence you own.",
+    );
+    console.warn(`\x1b[33m[Apostate] ${warnings[warnings.length - 1]}\x1b[0m`);
+  }
   return {
     config: canonical,
     resolution,
@@ -1124,7 +1211,7 @@ async function prepareLaunch(options = {}) {
       profile_source: resolution.source,
       profile_id: resolution.profileId,
       profile_identity: resolution.identity,
-      warnings: resolution.warnings ?? [],
+      warnings,
       catalogue_version: CATALOGUE_VERSION,
       chromium_version: CHROMIUM_VERSION,
     },
@@ -1166,15 +1253,51 @@ const NATIVE_SELECTION = { "host-inherited": true, "native-composed": true };
 function buildLaunchArguments(config, resolution, { driverOwnsProfile = false } = {}) {
   checkFingerprintSwitches(config.args);
   const args = config.args.filter((arg) => !arg.startsWith("--apostate-profile=") && !arg.startsWith("--proxy-server=") && !arg.startsWith("--user-data-dir="));
-  if (NATIVE_SELECTION[resolution?.profileId] === true && !hasSwitch(args, "--fingerprint")) {
+  // Captured before anything is pushed: from here on `args` also holds the
+  // package's own selectors, so re-asking would see those instead of the user's.
+  const userSuppliedSeed = hasSwitch(args, "--fingerprint");
+  if (NATIVE_SELECTION[resolution?.profileId] === true && !userSuppliedSeed) {
     // The compositor is the browser process's. The package hands it the
     // selectors; it draws a fresh seed itself when none is given.
     if (config.fingerprint !== null && config.fingerprint !== undefined) args.push(`--fingerprint=${config.fingerprint}`);
     if (config.fingerprint_platform !== null && config.fingerprint_platform !== undefined) args.push(`--fingerprint-platform=${config.fingerprint_platform}`);
   }
+
+  if (resolution?.profileId === "native-composed") {
+    // Locale and timezone ride 0085's per-field override switches, never a
+    // profile envelope. An envelope -- even one describing only a locale --
+    // makes the browser's InstallComposedProfile() return early, so nothing is
+    // composed, the seed above is silently ignored, and every axis the envelope
+    // omits falls back to the host. An override instead narrows the draw inside
+    // the composed profile, which is what this path wants. Host mode outranks
+    // per-field overrides and the binary refuses that combination outright, so
+    // this is deliberately not done for `host-inherited`.
+    if (config.locale !== null && !hasSwitch(args, "--fingerprint-locale")) {
+      args.push(`--fingerprint-locale=${config.locale}`);
+    }
+    if (config.timezone !== null && !hasSwitch(args, "--fingerprint-timezone")) {
+      args.push(`--fingerprint-timezone=${config.timezone}`);
+    }
+  }
+
   const credentials = launchProxyCredentials(config.proxy);
   const devicePayload = nativeProfilePayload(config.profile);
   if (Object.keys(devicePayload).length > 0 || credentials !== null) {
+    // An envelope and a seed are alternatives, not layers. The browser cannot
+    // report the conflict -- marking an envelope partial would be a new
+    // page-visible surface, and the absent-means-absent rule is what makes a
+    // single-surface envelope useful for testing -- so refuse here rather than
+    // let the seed be dropped without a word.
+    if (userSuppliedSeed) {
+      throw new ProfileResolutionError(
+        "a profile envelope and a --fingerprint seed cannot be combined: "
+        + "--apostate-profile suppresses the browser's composition entirely, so the "
+        + "seed would be silently ignored and every surface the profile does not "
+        + "describe would stay host-inherited",
+        { profile_id: resolution?.profileId ?? null },
+        "APOSTATE_ENVELOPE_SEED_CONFLICT",
+      );
+    }
     const payload = credentials
       ? { device_profile: devicePayload, proxy_credentials: credentials }
       : devicePayload;

@@ -321,6 +321,14 @@ a synthetic dim scene rather than a real room, and a claimed microphone delivers
 a room-tone noise floor. A site that requires recognisable video of a person
 will not get it.
 
+Audio outputs are the exception inside that paragraph. `media.audiooutput_count`
+is accepted by the schema and composed into every profile, and nothing reads it:
+`enumerateDevices()` reports the host's real speakers, and a profile claiming a
+different number of them changes nothing. Synthesising an output device would
+mean synthesising one a page can actually play through, because a device that
+enumerates and then fails to open is a worse signal than a truthful count, so
+the count stays inert until that is built rather than being half-served.
+
 **Web Share.** Linux has no platform share backend, so under a Windows or macOS
 persona `share()` rejects with `AbortError` and the same message a share the
 user dismissed produces. The residual is timing: no share sheet appears, so the
@@ -420,6 +428,26 @@ Chromium's form-factors client hint has no `Laptop` value, so
 persona. A profile claiming a laptop panel while that header says `Desktop` is a
 contradiction readable from one header. Closing it is a catalogue question rather
 than something a patch can fix, since the vocabulary is Chromium's.
+
+## The window chrome delta is the host's, not the profile's
+
+`outerHeight - innerHeight` is the height of the browser's own frame, tabstrip
+and toolbar, and `outerWidth - innerWidth` its side frame plus any classic
+scrollbar. Both are platform-specific: 87 CSS pixels of height on macOS 26, 121
+on Windows 11, 143 on both Linux reference hosts, and a zero width delta on all
+four. A macOS persona served from a Linux host contradicts itself in that
+subtraction with no screen value patched at all.
+
+`window.outer_inner_delta_width` and `window.outer_inner_delta_height` are
+accepted by the schema and composed into every profile, and nothing reads
+either of them. That is not an oversight in the loader: the delta is the real
+furniture of the window the host draws, so serving it from the profile would
+mean reporting an `outerHeight` the window does not have, which then
+contradicts `screenY` against the claimed available rect. The way to make the
+subtraction true is to size the real window at launch so the host's own chrome
+lands on the claimed delta, and neither the Python nor the Node launcher does
+that yet. Until one of them does, the two fields record the reference
+measurement and change nothing a page can read.
 
 ## Canvas and audio are rendered, not replayed
 

@@ -12,7 +12,12 @@
     },
     "source_capture": {
       "type": "string",
-      "description": "Resolver provenance reference for the source capture or composition. It is stripped before native payload emission."
+      "description": "Resolver provenance reference for the source capture or composition. It is stripped before native payload emission.",
+      "x-wiring": {
+        "reason": "not-a-browser-surface",
+        "why": "Provenance, not a device claim. Both launchers strip it from the payload before the switch is built, so the native loader can never see it and no C++ read could exist.",
+        "evidence": "python/apostate/launch.py:source_capture"
+      }
     },
     "cpu": {
       "type": "object",
@@ -65,11 +70,21 @@
         },
         "wow64": {
           "type": "boolean",
-          "description": "Sec-CH-UA-WoW64. blink::UserAgentMetadata::wow64, populated from IsWoW64() in components/embedder_support/user_agent_utils.cc, so it is true only for a 32-bit browser on 64-bit Windows. A profile claiming true on any other platform contradicts its own platform name. Measured false on all four reference hosts. Evidence class: physical-ground-truth when captured, catalogue-value otherwise."
+          "description": "Sec-CH-UA-WoW64. blink::UserAgentMetadata::wow64, populated from IsWoW64() in components/embedder_support/user_agent_utils.cc, so it is true only for a 32-bit browser on 64-bit Windows. A profile claiming true on any other platform contradicts its own platform name. Measured false on all four reference hosts. Evidence class: physical-ground-truth when captured, catalogue-value otherwise.",
+          "x-wiring": {
+            "reason": "derived-upstream",
+            "why": "Upstream computes this from the running process, and off Windows it is hard-coded false, which is the only value the tables compose. Reading the profile could therefore only agree with what the page is already shown, or let a macOS persona emit ?1 \u2014 a contradiction no real host can produce. The field records the reference measurement.",
+            "evidence": "ledger/surfaces.jsonl:navigator.user-agent-data.wow64"
+          }
         },
         "form_factors": {
           "type": "array",
           "description": "Sec-CH-UA-Form-Factors. blink::UserAgentMetadata::form_factors; the accepted names are the spec list in third_party/blink/public/common/user_agent/user_agent_metadata.h and are validated by UserAgentMetadata::IsValidFormFactor. A desktop build emits [\"Desktop\"] and cannot serve \"Mobile\", so an unservable claim is reduced rather than emitted. Measured [\"Desktop\"] on all four reference hosts. Evidence class: physical-ground-truth when captured, catalogue-value otherwise.",
+          "x-wiring": {
+            "reason": "derived-upstream",
+            "why": "Upstream derives the list from the mobile bit, which platform.mobile already wires, and every os_release option composes [\"Desktop\"] beside mobile false. A loader read could only restate what upstream emits.",
+            "evidence": "ledger/surfaces.jsonl:navigator.user-agent-data.form-factors"
+          },
           "items": {
             "type": "string",
             "enum": [
@@ -97,7 +112,12 @@
         },
         "brands": {
           "type": "array",
-          "description": "Assert-only Sec-CH-UA brand list in major-version form. The brand list is a build invariant, not a profile value: user_agent_utils.cc adds the product brand only under #if !BUILDFLAG(CHROMIUM_BRANDING), so a Chromium build emits two brands where Chrome emits three (docs/FINGERPRINTS.md section 8). The loader compares this list against what the build emits and fails closed on a mismatch; it never rewrites the emitted list, so no new observable is introduced. Evidence class: native-derived.",
+          "description": "Reference record of the Sec-CH-UA brand list in major-version form. The brand list is a build invariant, not a profile value: user_agent_utils.cc adds the product brand only under #if !BUILDFLAG(CHROMIUM_BRANDING), so a Chromium build emits two brands where Chrome emits three (docs/FINGERPRINTS.md section 8), and patch 0008 restores the third rather than composing a list. The native loader does not read this field and does not rewrite the emitted list. Evidence class: native-derived.",
+          "x-wiring": {
+            "reason": "derived-upstream",
+            "why": "Upstream builds the list from the binary's own version, including the GREASE entry and its ordering, and patch 0008 leaves that path alone because this binary really is the Chromium it reports. No dispersion table composes the field. An earlier description here promised that the loader compared the list and failed closed on a mismatch; no C++ ever did that, and this annotation replaces the promise.",
+            "evidence": "ledger/surfaces.jsonl:navigator.user-agent-data.brands"
+          },
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -123,7 +143,12 @@
         },
         "full_version_list": {
           "type": "array",
-          "description": "Assert-only Sec-CH-UA-Full-Version-List. Same build-invariant semantics as brands. The versions are the binary's own, which Apostate does not spoof. Evidence class: native-derived.",
+          "description": "Reference record of Sec-CH-UA-Full-Version-List. Same build-invariant semantics as brands. The versions are the binary's own, which Apostate does not spoof. Evidence class: native-derived.",
+          "x-wiring": {
+            "reason": "derived-upstream",
+            "why": "The same upstream path as brands with the full-version form selected, so it carries the binary's own version and the identical ordering. Not composed by any dispersion table and not read by the loader.",
+            "evidence": "ledger/surfaces.jsonl:navigator.user-agent-data.full-version-list"
+          },
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -149,7 +174,12 @@
         },
         "full_version": {
           "type": "string",
-          "description": "Assert-only Sec-CH-UA-Full-Version and navigator.userAgentData.uaFullVersion. blink::UserAgentMetadata::full_version comes from version_info::GetVersionNumber(), so it must equal the binary's version. Evidence class: native-derived.",
+          "description": "Reference record of Sec-CH-UA-Full-Version and navigator.userAgentData.uaFullVersion. blink::UserAgentMetadata::full_version comes from version_info::GetVersionNumber(), so it must equal the binary's version. Evidence class: native-derived.",
+          "x-wiring": {
+            "reason": "derived-upstream",
+            "why": "version_info::GetVersionNumber() is the binary's own version and the only value that can be emitted without contradicting every feature-detection difference. Nothing composes the field and nothing reads it.",
+            "evidence": "ledger/surfaces.jsonl:navigator.user-agent-data.ua-full-version"
+          },
           "minLength": 1,
           "maxLength": 64
         }
@@ -609,7 +639,12 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 16,
-          "description": "Audio outputs the claimed machine has. Same semantics as audioinput_count. Measured 1 on the macOS, Windows and stock Linux reference hosts. Evidence class: physical-ground-truth when captured, catalogue-value otherwise."
+          "description": "Audio outputs the claimed machine has. Accepted and inert: unlike audioinput_count it is read by no C++, so enumerateDevices() reports the host's real speakers. Measured 1 on the macOS, Windows and stock Linux reference hosts. Evidence class: physical-ground-truth when captured, catalogue-value otherwise.",
+          "x-wiring": {
+            "reason": "declared-not-implemented",
+            "why": "No emitter synthesises an audio output device. Serving the count would mean enumerating a device a page can also open, because a device that enumerates and then fails to open is a worse signal than a truthful count, and that is a patch nobody has written. The field is composed and carried so the reference measurement is not lost; docs/LIMITATIONS.md states that it does nothing.",
+            "evidence": "docs/LIMITATIONS.md:media.audiooutput_count"
+          }
         },
         "devices": {
           "type": "array",
@@ -717,7 +752,12 @@
     "window": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Browser window chrome deltas. outerWidth/outerHeight minus innerWidth/innerHeight is the space the browser's own frame, tabstrip and toolbar occupy; it follows the OS window decoration for the claimed release rather than anything about the page. Measured: 87 CSS pixels of height on macOS 26, 121 on Windows 11, and 143 on both Linux reference hosts, with a zero width delta on all four.",
+      "description": "Browser window chrome deltas. outerWidth/outerHeight minus innerWidth/innerHeight is the space the browser's own frame, tabstrip and toolbar occupy; it follows the OS window decoration for the claimed release rather than anything about the page. Accepted and inert: no C++ reads either field, because the delta is the real furniture of the window the host draws. Measured: 87 CSS pixels of height on macOS 26, 121 on Windows 11, and 143 on both Linux reference hosts, with a zero width delta on all four.",
+      "x-wiring": {
+        "reason": "declared-not-implemented",
+        "why": "The ledger records window.outer-dimensions as inherit and coh.window-chrome-inset-matches-os states that the difference is produced by the platform rather than by any value we can set, so a loader read would have to fabricate outerHeight and break coh.window-within-avail-rect against screenY. The designed realisation is sizing the real OS window at launch, which neither launcher does yet; docs/LIMITATIONS.md states that the fields do nothing.",
+        "evidence": "docs/LIMITATIONS.md"
+      },
       "properties": {
         "outer_inner_delta_width": {
           "type": "integer",

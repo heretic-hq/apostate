@@ -433,7 +433,17 @@ combination does not exist on nuget.org; check the version before repinning."
   # scripts/package-artifact.sh, so nothing new is needed to read one.
   extract="$work/x-$pkg"
   mkdir -p "$extract"
-  7z x -bso0 -bsp0 -y -o"$extract" "$nupkg" > /dev/null ||
+  # -o glues its path to the flag, and that is the one argument shape MSYS2's
+  # conversion rules do not clearly cover. A bare POSIX path argument to a
+  # native child IS converted -- measured on this runner, where `git apply` and
+  # `python3` both received absolute /d/... paths and resolved them -- and so is
+  # the part after an `=`, but `-o/tmp/x` is neither of those and we have no
+  # Windows host to settle it on. If it passes through verbatim, 7z reads /tmp/x
+  # as a Windows path, extracts to C:\tmp\x, and the cp below finds nothing at
+  # $extract. Handing 7z the Windows form makes the answer stop mattering.
+  # $nupkg is a bare argument and needs no help.
+  extract_win="$(cygpath -m "$extract" 2>/dev/null || printf '%s' "$extract")"
+  7z x -bso0 -bsp0 -y -o"$extract_win" "$nupkg" > /dev/null ||
     die "could not extract $nupkg"
 
   case "$dest" in

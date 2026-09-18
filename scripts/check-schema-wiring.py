@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
 """V0 gate: a profile key is declared, read, or a stated exception — never inert.
 
-Five times this project shipped an artifact that described a key nothing read.
-`fonts.enumeration_allowlist` sat in the schema, was composed into every profile,
-and was read by no C++ for its entire life. `fonts.provisioned_directory` was
-read by no C++ at all. Patches 0097 and 0099 were committed and left out of
-`patches/series`, so they were in the repository and in no build. And
-`ledger/surfaces.jsonl`, the artifact that is supposed to derive the schema, named
-its profile fields in a vocabulary of its own: 43 of its 61 distinct
-`profile_field` values matched no declared key, so `ua.brand_version_list` stood
-where the schema says `browser.brands` and nothing could tell the two apart from a
-typo. That is very likely why the first two went unnoticed for years — with the
-two vocabularies disjoint, no tool could reconcile them, and "the schema declares
-a key the ledger never asked for" was unaskable. Each was found by hand, late,
-after the documentation had been promising the feature for weeks. This is the
-automated catch.
+Six times this project shipped an artifact that described something the build
+does not do. `fonts.enumeration_allowlist` sat in the schema, was composed into
+every profile, and was read by no C++ for its entire life.
+`fonts.provisioned_directory` was read by no C++ at all. Patches 0097 and 0099
+were committed and left out of `patches/series`, so they were in the repository
+and in no build. `ledger/surfaces.jsonl`, the artifact that is supposed to
+derive the schema, named its profile fields in a vocabulary of its own: 43 of
+its 61 distinct `profile_field` values matched no declared key, so
+`ua.brand_version_list` stood where the schema says `browser.brands` and nothing
+could tell the two apart from a typo. That is very likely why the first two went
+unnoticed for years — with the two vocabularies disjoint, no tool could
+reconcile them, and "the schema declares a key the ledger never asked for" was
+unaskable. `keyboard.layout_map` was the same defect in the remaining direction:
+declared, read wholesale by base/apostate/profile.cc, served by patch 0021, and
+named by no ledger row at all, so a fully wired surface carried no verification
+tier, no evidence and no coherence edge. And 110 of the 111 coherence edges
+carried a `check` expression that nothing evaluates, while the enforcement that
+does run is hand-written Python in scripts/profile_resolver.py with no link back
+to the edge it enforces. Each was found by hand, late, after the documentation
+had been promising the feature for weeks. This is the automated catch.
 
-Four checks, all of one class — an artifact claiming something the build does
+Six checks, all of one class — an artifact claiming something the build does
 not do:
 
   1. DECLARED BUT NEVER READ  a key in config/profile.schema.json that no
@@ -33,6 +39,16 @@ not do:
                               declared key. The row points at a field no
                               profile can carry, so the surface it describes is
                               inherited from the host however the row reads.
+  5. ENFORCED BY NOTHING      a coherence edge whose `enforced_by` names a site
+                              that does not exist: a resolver function absent,
+                              uncalled or no longer marked for that edge, a
+                              patch not in patches/series, or a V3 probe the
+                              collector does not register. An edge enforced by
+                              nothing at all is COUNTED, not failed.
+  6. DECLARED BUT UNNAMED     a declared key no ledger row names. The schema is
+                              supposed to be derived FROM the ledger, so a key
+                              no row asked for is a surface with no verification
+                              tier, no evidence and no coherence edge.
 
     python3 scripts/check-schema-wiring.py            # report, exit 1 on a finding
     python3 scripts/check-schema-wiring.py --verbose  # plus every resolved read
@@ -176,6 +192,84 @@ and a surface really can be the whole section. Consumption is deliberately not
 required: `browser.brands` and `platform.wow64` are declared, correctly named,
 and annotated `x-wiring` because no C++ reads them. Demanding a read here would
 report a second time what check 1 has already explained.
+
+
+The other direction: a declared key no row names
+------------------------------------------------
+
+Check 4 walks ledger to schema and can only see keys some row names. A key no
+row names is invisible to it, and that is the direction `keyboard.layout_map`
+escaped through: declared, iterated wholesale by the loader, served by a
+sequenced patch, and described by no row. Check 6 walks the same relation the
+other way, so the sentence "each profile_field becomes one property of the
+schema" is enforced from both ends and the pair cannot drift.
+
+A key counts as named when a row names it, an ancestor of it, or a descendant of
+it. All three are one relation seen from different depths: a row naming
+`battery` describes `battery.level` too, and a row naming `screen.avail_top`
+could not describe it without `screen`. Only the shallowest uncovered path of a
+subtree is reported, as in check 1, because a section nobody asked for is one
+finding and not thirty.
+
+Being read by C++ deliberately does NOT satisfy this check, and that is the
+whole point rather than an oversight. `keyboard.layout_map` is read — patch 0021
+iterates it and serves it to `navigator.keyboard.getLayoutMap()` — so a check
+that accepted a read would have passed the exact defect it exists to catch.
+Consumption is what check 1 measures; this check measures whether anything
+recorded the surface, its verification tier, its evidence and its coherence
+edges. A key can be perfectly wired and completely unaccounted for, which is the
+state that lets a surface ship unmeasured.
+
+The exception is an `x-ledger` block on the key's own schema property, the same
+three parts as `x-wiring` and checked the same way, with the same staleness rule:
+an `x-ledger` on a key some row now names is an error. Two reasons, because there
+are two honest ways for a declared key to have no row of its own:
+`not-a-surface` for loader and resolver bookkeeping no detector can read, and
+`row-names-no-field` for a key whose surface DOES have a row that legitimately
+names no `profile_field` — an `inherit` or `escalate` row. That second one is
+verified rather than asserted: the evidence token must be a row id present in
+`ledger/surfaces.jsonl`, and that row's verdict must still be one that names no
+field, so flipping it to `spoof` without naming the key fails here.
+
+
+Why check 5 verifies enforcement sites and not `check` expressions
+------------------------------------------------------------------
+
+`ledger/coherence.jsonl` carries a `check` string on 110 of its 111 edges, and
+the schema calls it an executable predicate over a collected fingerprint. It is
+not executed. Only `scripts/validate-ledger.py` and `scripts/merge-inbox.py`
+read that file, neither of them reads `check`, and the coherence enforcement that
+really runs is `_coherence_check` in `scripts/profile_resolver.py` — about thirty
+hand-written conditions that never consult the ledger. Asserting that the
+expressions resolve would verify the spelling of prose nothing evaluates, which
+is the defect class this file exists to catch rather than a check against it.
+
+So each edge carries `enforced_by`, an array naming the sites that really
+enforce it, and this check resolves every site against the tree:
+
+  * `resolver` — `scripts/profile_resolver.py:<function>`. The function must
+    exist, must be called somewhere in that file (a dead function enforces
+    nothing), and the file must carry a `# coh: <edge id>` marker, because six
+    edges name the same function and deleting one of its conditions would
+    otherwise leave all six still resolving. The marker is checked in reverse
+    too: a `# coh: X` for an unknown edge, or for an edge that does not claim a
+    resolver, is stale and fails.
+  * `patch` — a bare `patches/series` entry, which must be sequenced and on
+    disk. Same rule as check 3: a patch outside the series is in no build.
+  * `v3-probe` — `capture/collector/collector.js:<probe id>`, which must be a
+    probe the collector actually registers.
+
+`enforced_by: []` is the explicit "nothing enforces this yet" form. It is
+counted and printed every run and never failed, because a stated gap is
+legitimate and most of these edges are in it; what is not legitimate is the gap
+having no number attached, which is how 110 unevaluated predicates went
+unnoticed. The field is REQUIRED on every row for the same reason — an edge that
+could omit it would vanish from the count instead of appearing in it.
+
+`undeclared_dependency` is the third direction of the `x-wiring` idea, carried on
+a coherence row: the invariant legitimately names a profile key the schema does
+not declare. Its key must still fail to resolve, so an annotation whose key has
+since been declared is stale and fails.
 """
 
 import json
@@ -188,6 +282,9 @@ SCHEMA = ROOT / "config" / "profile.schema.json"
 PATCH_DIR = ROOT / "patches"
 SERIES = PATCH_DIR / "series"
 LEDGER = ROOT / "ledger" / "surfaces.jsonl"
+COHERENCE = ROOT / "ledger" / "coherence.jsonl"
+RESOLVER = ROOT / "scripts" / "profile_resolver.py"
+COLLECTOR = ROOT / "capture" / "collector" / "collector.js"
 
 CPP_SUFFIXES = (".cc", ".cpp", ".mm", ".h")
 TEST_MARKERS = ("_unittest.", "_test.", "_browsertest.", "_fuzzer.")
@@ -233,6 +330,45 @@ PROFILE_FIELD_EXCEPTION_REASONS = {
     # key exists — which is a finding this gate surfaces rather than hides.
     "undeclared",
 }
+
+X_LEDGER = "x-ledger"
+X_LEDGER_REASONS = {
+    # Loader or resolver bookkeeping: the key identifies or annotates the
+    # profile itself, so no detector can read it and no surface row can exist.
+    # Being read by C++ does not make a key a surface.
+    "not-a-surface",
+    # The surface DOES have a row, and that row's verdict legitimately names no
+    # profile_field — an inherit or escalate row. Verified rather than asserted:
+    # the evidence token must be a row id, and that row must still carry a
+    # verdict that names no field.
+    "row-names-no-field",
+}
+
+# Coherence edges: what really enforces each one. `check` is prose nothing
+# evaluates (see the header), so the field this gate resolves is the site.
+ENFORCED_BY = "enforced_by"
+ENFORCEMENT_KINDS = ("resolver", "patch", "v3-probe")
+UNBUILT_DEPENDENCY = "unbuilt_dependency"
+UNBUILT_DEPENDENCY_REASONS = {
+    # The invariant names a profile key config/profile.schema.json does not
+    # declare, so no profile can carry the value the edge is about.
+    "undeclared",
+    # The key is declared, but no dispersion table varies it, so every composed
+    # profile carries the same value and the edge has nothing to compare.
+    "unconditioned",
+}
+
+# `probe("keyboard.layout", { deterministic: true }, ...)` in the collector.
+PROBE_RE = re.compile(r"\bprobe\(\s*\"([^\"]+)\"")
+# `# coh: coh.screen-avail-inset - a work area no display could have is rejected`
+# beside the condition that enforces it, in the shape `// wiring-exempt:` uses.
+# Matched anywhere in a comment so the marker may sit above the condition or on
+# it, and the code half of the line is what the dead-function guard reads.
+COH_MARKER_RE = re.compile(r"#\s*coh:\s*(?P<id>[A-Za-z0-9][A-Za-z0-9_.\-]*)")
+# `scripts/profile_resolver.py:_coherence_check` -> the function half.
+RESOLVER_SITE_RE = re.compile(r"^scripts/profile_resolver\.py:(?P<fn>[A-Za-z_][A-Za-z0-9_]*)$")
+# `capture/collector/collector.js:keyboard.layout` -> the probe id half.
+PROBE_SITE_RE = re.compile(r"^capture/collector/collector\.js:(?P<probe>\S+)$")
 
 # The token half of an `evidence` reference has to be something a reader can
 # search for. A dotted or dashed identifier is; the wildcard is not, so a row
@@ -292,16 +428,18 @@ HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
 class Declared:
-    __slots__ = ("path", "location", "kind", "required", "children", "named_children", "wiring")
+    __slots__ = ("path", "location", "kind", "required", "children", "named_children",
+                 "wiring", "ledger")
 
-    def __init__(self, path, location, kind, required, wiring):
+    def __init__(self, path, location, kind, required, wiring, ledger):
         self.path = path
         self.location = location
         self.kind = kind  # "object" | "array" | "leaf"
         self.required = required
         self.children = []
         self.named_children = False
-        self.wiring = wiring
+        self.wiring = wiring   # why no C++ reads it (check 1)
+        self.ledger = ledger   # why no ledger row names it (check 6)
 
 
 def schema_kind(node):
@@ -332,7 +470,8 @@ def walk_schema(node, prefix, location, required, out, root, seen_refs):
 
     entry = out.get(prefix)
     if prefix and entry is None:
-        entry = Declared(prefix, location, schema_kind(node), required, node.get(X_WIRING))
+        entry = Declared(prefix, location, schema_kind(node), required,
+                         node.get(X_WIRING), node.get(X_LEDGER))
         out[prefix] = entry
 
     required_children = set(node.get("required", []))
@@ -755,7 +894,7 @@ def wiring_problem(key, wiring):
 
 
 def ledger_rows():
-    """-> ([(lineno, id, [name], exception)], errors).
+    """-> ([(lineno, id, [name], exception, verdict)], errors).
 
     Read line by line rather than through validate-ledger.py: this gate stays
     dependency-free and must still say something useful about a file that gate
@@ -763,7 +902,7 @@ def ledger_rows():
     """
     rows, errors = [], []
     if not LEDGER.is_file():
-        return rows, [f"{LEDGER.relative_to(ROOT)} is missing, so check 4 cannot run"]
+        return rows, [f"{LEDGER.relative_to(ROOT)} is missing, so checks 4 and 6 cannot run"]
     for lineno, line in enumerate(LEDGER.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
@@ -785,7 +924,8 @@ def ledger_rows():
                 f"strings, or null"
             )
             continue
-        rows.append((lineno, row.get("id", "?"), names, row.get(PROFILE_FIELD_EXCEPTION)))
+        rows.append((lineno, row.get("id", "?"), names, row.get(PROFILE_FIELD_EXCEPTION),
+                     row.get("verdict")))
     return rows, errors
 
 
@@ -819,6 +959,204 @@ def profile_field_problem(names, exception):
                 f"{token!r}: it cannot be the evidence for this row")
     return None
 
+
+# ---------------------------------------------------------------------------
+# Check 6: the schema-to-ledger direction
+# ---------------------------------------------------------------------------
+
+
+def ledger_covered(declared, named):
+    """Declared paths some ledger row names, directly or through the tree.
+
+    One relation seen from three depths. A row naming a leaf reaches it through
+    its ancestors, so those are covered; a row naming a section describes
+    everything under it, so those are covered too. Names that are not declared
+    paths at all are check 4's finding and are ignored here, so one typo is not
+    reported twice.
+    """
+    covered = set()
+    for name in named:
+        if name not in declared:
+            continue
+        covered.add(name)
+        path = name
+        while True:
+            path, _ = parent_of(path)
+            if not path:
+                break
+            covered.add(path)
+        for other in declared:
+            if other.startswith(f"{name}.") or other.startswith(f"{name}["):
+                covered.add(other)
+    return covered
+
+
+def ledger_problem(key, annotation, verdicts):
+    """Is this x-ledger annotation usable as evidence, and still true?"""
+    if not isinstance(annotation, dict):
+        return f"{X_LEDGER} must be an object carrying reason, why and evidence"
+    missing = [f for f in ("reason", "why", "evidence") if not annotation.get(f)]
+    if missing:
+        return f"{X_LEDGER} is missing {', '.join(missing)}"
+    if annotation["reason"] not in X_LEDGER_REASONS:
+        return (f"{X_LEDGER}.reason is {annotation['reason']!r}; expected one of "
+                f"{sorted(X_LEDGER_REASONS)}")
+
+    # `path` or `path:token`, the shape the other two annotations use.
+    evidence, _, token = str(annotation["evidence"]).partition(":")
+    target = ROOT / evidence
+    if not target.is_file():
+        return f"{X_LEDGER}.evidence names {evidence}, which is not a file in this repository"
+    token = token or parent_of(key)[1] or key
+    if not TOKEN_RE.fullmatch(token):
+        return (f"{X_LEDGER}.evidence has to spell its token as 'path:token'; {token!r} is "
+                f"not something a reader can search for")
+    if token not in target.read_text(encoding="utf-8", errors="replace"):
+        return (f"{X_LEDGER}.evidence is {evidence}, which does not mention {token!r}: it "
+                f"cannot be the evidence for this key")
+
+    if annotation["reason"] == "row-names-no-field":
+        # The claim is that a row exists and its verdict names no field, so the
+        # token has to be that row's id and the verdict has to still be one that
+        # names nothing. A row flipped to spoof without naming this key is the
+        # staleness no other check could see.
+        if token not in verdicts:
+            return (f"{X_LEDGER}.reason is row-names-no-field, so its evidence token has to be "
+                    f"a row id in ledger/surfaces.jsonl; {token!r} is not one")
+        if verdicts[token] == "spoof":
+            return (f"{X_LEDGER}.reason is row-names-no-field, but {token} is now verdict "
+                    f"'spoof', which the surface schema requires to name a profile_field. "
+                    f"Either that row names this key, or the row is claiming a spoof nothing "
+                    f"can serve.")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Check 5: what enforces each coherence edge
+# ---------------------------------------------------------------------------
+
+
+def coherence_rows():
+    """-> ([(lineno, id, enforced_by, unbuilt)], errors), read line by line."""
+    rows, errors = [], []
+    if not COHERENCE.is_file():
+        return rows, [f"{COHERENCE.relative_to(ROOT)} is missing, so check 5 cannot run"]
+    for lineno, line in enumerate(COHERENCE.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError as exc:
+            errors.append(f"ledger/coherence.jsonl:{lineno} is not valid JSON: {exc}")
+            continue
+        rows.append((lineno, row.get("id", "?"), row.get(ENFORCED_BY, "missing"),
+                     row.get(UNBUILT_DEPENDENCY)))
+    return rows, errors
+
+
+def resolver_facts():
+    """-> ({function}, {called function}, {edge id: [lineno]}) from the resolver."""
+    if not RESOLVER.is_file():
+        return set(), set(), {}
+    text = RESOLVER.read_text(encoding="utf-8", errors="replace")
+    defined = set(re.findall(r"^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", text, re.M))
+    called = set()
+    markers = {}
+    for lineno, line in enumerate(text.splitlines(), 1):
+        # The comment half carries the markers; the code half is the only thing
+        # the dead-function guard may read, so a function named in a comment is
+        # not mistaken for a call to it.
+        code, _, _comment = line.partition("#")
+        match = COH_MARKER_RE.search(line)
+        if match:
+            markers.setdefault(match.group("id"), []).append(lineno)
+        if re.match(r"^\s*def\s", code):
+            continue
+        for name in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", code):
+            called.add(name)
+    return defined, called, markers
+
+
+def registered_probes():
+    """-> {probe id} the collector actually registers."""
+    if not COLLECTOR.is_file():
+        return set()
+    return set(PROBE_RE.findall(COLLECTOR.read_text(encoding="utf-8", errors="replace")))
+
+
+def enforcement_problem(edge, entry, facts, probes, series):
+    """Does this enforced_by entry name a site that exists?"""
+    if not isinstance(entry, dict):
+        return f"{ENFORCED_BY} entries must be objects carrying kind and site"
+    kind, site = entry.get("kind"), entry.get("site")
+    if kind not in ENFORCEMENT_KINDS:
+        return f"{ENFORCED_BY}.kind is {kind!r}; expected one of {list(ENFORCEMENT_KINDS)}"
+    if not isinstance(site, str) or not site.strip():
+        return f"{ENFORCED_BY}.site must be a non-empty string for kind {kind!r}"
+
+    if kind == "resolver":
+        match = RESOLVER_SITE_RE.match(site)
+        if not match:
+            return (f"a resolver site is spelled 'scripts/profile_resolver.py:<function>'; "
+                    f"{site!r} is not")
+        defined, called, markers = facts
+        function = match.group("fn")
+        if function not in defined:
+            return f"scripts/profile_resolver.py defines no {function}()"
+        if function not in called:
+            return (f"scripts/profile_resolver.py never calls {function}(), so it enforces "
+                    f"nothing: a dead function is not a gate")
+        if edge not in markers:
+            return (f"scripts/profile_resolver.py carries no '# coh: {edge}' marker, so "
+                    f"nothing ties {function}() to this edge and deleting the condition "
+                    f"would leave the claim standing")
+        return None
+
+    if kind == "patch":
+        if site not in series:
+            return (f"patches/series does not list {site}, so the patch is in no build "
+                    f"and enforces nothing")
+        if not (PATCH_DIR / site).is_file():
+            return f"patches/{site} is not on disk"
+        return None
+
+    match = PROBE_SITE_RE.match(site)
+    if not match:
+        return (f"a V3 probe site is spelled 'capture/collector/collector.js:<probe id>'; "
+                f"{site!r} is not")
+    probe = match.group("probe")
+    if probe not in probes:
+        return (f"capture/collector/collector.js registers no probe {probe!r}, so no "
+                f"collection records what this edge compares")
+    return None
+
+
+def unbuilt_problem(entry, declared):
+    """Is this unbuilt_dependency entry usable, and still true?"""
+    if not isinstance(entry, dict):
+        return f"{UNBUILT_DEPENDENCY} entries must be objects carrying key, reason and why"
+    missing = [f for f in ("key", "reason", "why") if not entry.get(f)]
+    if missing:
+        return f"{UNBUILT_DEPENDENCY} entry is missing {', '.join(missing)}"
+    key, reason = entry["key"], entry["reason"]
+    if reason not in UNBUILT_DEPENDENCY_REASONS:
+        return (f"{UNBUILT_DEPENDENCY}.reason is {reason!r}; expected one of "
+                f"{sorted(UNBUILT_DEPENDENCY_REASONS)}")
+    if reason == "undeclared":
+        if key in declared:
+            return (f"{UNBUILT_DEPENDENCY} calls {key} undeclared, but "
+                    f"config/profile.schema.json now declares it at {declared[key].location}. "
+                    f"The exception outlived the problem it described.")
+        return None
+    if key not in declared:
+        return (f"{UNBUILT_DEPENDENCY} calls {key} unconditioned, but the schema declares no "
+                f"such key at all, so the reason is 'undeclared'")
+    values = composed_values(key)
+    if len(values) > 1:
+        return (f"{UNBUILT_DEPENDENCY} calls {key} unconditioned, but the dispersion tables "
+                f"now compose {len(values)} different values for it "
+                f"({', '.join(values[:4])}). The axis it was waiting for exists.")
+    return None
 
 # ---------------------------------------------------------------------------
 # Reporting
@@ -970,12 +1308,12 @@ def main() -> int:
         print("  ok   every read names a declared key or carries a stated exception")
 
     rows, ledger_findings = ledger_rows()
-    named = {name for _, _, names, _ in rows for name in names}
+    named = {name for _, _, names, _, _ in rows for name in names}
     print("\nledger profile fields")
     print(f"  {len(rows)} row(s) in ledger/surfaces.jsonl name {len(named)} distinct "
           f"profile field(s)")
 
-    for lineno, surface, names, exception in rows:
+    for lineno, surface, names, exception, _ in rows:
         absent = [name for name in names if name not in declared]
         if exception is None:
             if absent:
@@ -1011,6 +1349,138 @@ def main() -> int:
     if not ledger_findings:
         print("  ok   every profile_field names a declared key or carries a stated exception")
 
+    # ----------------------------------------------------------------- check 6
+    verdicts = {surface: verdict for _, surface, _, _, verdict in rows}
+    covered = ledger_covered(declared, named)
+    orphans = {path for path in declared if path not in covered}
+
+    print("\nschema keys in the ledger")
+    print(f"  {len(covered)} of {len(declared)} declared key(s) are named by a row, directly "
+          f"or through the tree")
+
+    unnamed_findings = []
+    for path in sorted(shallowest(orphans)):
+        entry = declared[path]
+        annotation = entry.ledger
+        if annotation is None:
+            hidden = sum(1 for other in orphans
+                         if other.startswith(f"{path}.") or other.startswith(f"{path}["))
+            extra = f" (and {hidden} key(s) below it)" if hidden else ""
+            unnamed_findings.append(
+                f"DECLARED BUT UNNAMED     {path}{extra}\n"
+                f"        schema {entry.location}\n"
+                f"        ledger/surfaces.jsonl: no row names it, nor an ancestor or a "
+                f"descendant of it. The schema is derived FROM the ledger, so this key is a "
+                f"surface with no verification tier, no evidence and no coherence edge. "
+                f"Being read by C++ does not close this: keyboard.layout_map was read."
+            )
+            continue
+        problem = ledger_problem(path, annotation, verdicts)
+        if problem:
+            unnamed_findings.append(
+                f"BAD EXCEPTION            {path}\n        schema {entry.location}: {problem}"
+            )
+        elif verbose:
+            print(f"  note {path}: exempt ({annotation['reason']}) — {annotation['why']}")
+
+    for path, entry in sorted(declared.items()):
+        if entry.ledger is None or path in orphans:
+            continue
+        namer = sorted(name for name in named
+                       if name == path or path.startswith(f"{name}.")
+                       or path.startswith(f"{name}[") or name.startswith(f"{path}.")
+                       or name.startswith(f"{path}["))
+        unnamed_findings.append(
+            f"STALE EXCEPTION          {path}\n"
+            f"        schema {entry.location} carries {X_LEDGER}, but a ledger row now names "
+            f"{', '.join(namer[:3]) or 'it'}.\n"
+            f"        The exception outlived the problem it described; delete it."
+        )
+
+    for finding in unnamed_findings:
+        print(f"  FAIL {finding}")
+    findings.extend(unnamed_findings)
+    if not unnamed_findings:
+        print("  ok   every declared key is named by a row or carries a stated exception")
+
+    # ----------------------------------------------------------------- check 5
+    edges, coherence_findings = coherence_rows()
+    facts = resolver_facts()
+    probes = registered_probes()
+    series = set(entries)
+    claimed_edges = set()
+    unenforced = []
+
+    for lineno, edge, enforced, unbuilt in edges:
+        if enforced == "missing" or not isinstance(enforced, list):
+            coherence_findings.append(
+                f"NO ENFORCEMENT FIELD     {edge}\n"
+                f"        ledger/coherence.jsonl:{lineno} carries no {ENFORCED_BY} array.\n"
+                f"        The field is required and may be empty: an edge that can omit it "
+                f"vanishes from the count of edges nothing enforces instead of appearing in "
+                f"it, which is how 110 unevaluated predicates went unnoticed."
+            )
+        elif not enforced:
+            unenforced.append(edge)
+        else:
+            for entry in enforced:
+                problem = enforcement_problem(edge, entry, facts, probes, series)
+                if problem:
+                    site = entry.get("site") if isinstance(entry, dict) else entry
+                    coherence_findings.append(
+                        f"ENFORCED BY NOTHING      {edge}\n"
+                        f"        ledger/coherence.jsonl:{lineno} names {site!r}: {problem}"
+                    )
+                elif isinstance(entry, dict) and entry.get("kind") == "resolver":
+                    claimed_edges.add(edge)
+
+        if unbuilt is None:
+            continue
+        if not isinstance(unbuilt, list) or not unbuilt:
+            coherence_findings.append(
+                f"BAD EXCEPTION            {edge}\n"
+                f"        ledger/coherence.jsonl:{lineno}: {UNBUILT_DEPENDENCY} must be a "
+                f"non-empty array when present"
+            )
+            continue
+        for entry in unbuilt:
+            problem = unbuilt_problem(entry, declared)
+            if problem:
+                coherence_findings.append(
+                    f"BAD EXCEPTION            {edge}\n"
+                    f"        ledger/coherence.jsonl:{lineno}: {problem}"
+                )
+
+    # The marker binds a resolver condition to an edge, so it is checked in both
+    # directions: a marker for an edge that does not exist, or that no longer
+    # claims a resolver, is the same defect wearing the opposite sign.
+    edge_ids = {edge for _, edge, _, _ in edges}
+    for edge, linenos in sorted(facts[2].items()):
+        if edge not in edge_ids:
+            coherence_findings.append(
+                f"STALE MARKER             {edge}\n"
+                f"        scripts/profile_resolver.py:{linenos[0]} marks a condition for "
+                f"{edge}, which is not an edge in ledger/coherence.jsonl."
+            )
+        elif edge not in claimed_edges:
+            coherence_findings.append(
+                f"STALE MARKER             {edge}\n"
+                f"        scripts/profile_resolver.py:{linenos[0]} marks a condition for "
+                f"{edge}, but that edge no longer names a resolver site.\n"
+                f"        The marker outlived the claim it supported; delete it."
+            )
+
+    print("\ncoherence enforcement")
+    print(f"  {len(edges)} edge(s) in ledger/coherence.jsonl; {len(unenforced)} enforced by "
+          f"nothing")
+    for finding in coherence_findings:
+        print(f"  FAIL {finding}")
+    findings.extend(coherence_findings)
+    if not coherence_findings:
+        print("  ok   every enforcement site named by an edge exists")
+    if verbose and unenforced:
+        print("  note enforced by nothing: " + ", ".join(sorted(unenforced)))
+
     if verbose:
         print("\nresolved reads")
         for path in sorted(consumed):
@@ -1023,8 +1493,9 @@ def main() -> int:
             lineno, where, patch, _ = dynamic[path][0]
             print(f"  {path:48} dynamic key at {where}:{lineno}")
 
-    print(f"\n{len(declared)} declared key(s), {len(entries)} sequenced patch(es), "
-          f"{len(rows)} ledger row(s), {len(findings)} finding(s)")
+    print(f"\nsix checks over {len(declared)} declared key(s), {len(entries)} sequenced "
+          f"patch(es), {len(rows)} ledger row(s) and {len(edges)} coherence edge(s), of which "
+          f"{len(unenforced)} edge(s) are enforced by nothing: {len(findings)} finding(s)")
     return 1 if findings else 0
 
 

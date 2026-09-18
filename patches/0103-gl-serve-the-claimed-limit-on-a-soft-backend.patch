@@ -76,7 +76,7 @@ included.
 
 Compile-unverified at the time of writing; V1 is the gate this is submitted to.
 
-Ledger: webgl.limits, gpu.angle-backend, headless.gpu-stack.
+Ledger: webgl.parameters, webgl2.parameters, gpu.angle-backend, headless.gpu-stack.
 --- a/ui/gl/gl_gl_api_implementation.cc
 +++ b/ui/gl/gl_gl_api_implementation.cc
 @@ -296,6 +296,40 @@

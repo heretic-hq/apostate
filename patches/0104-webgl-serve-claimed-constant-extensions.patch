@@ -81,7 +81,7 @@ profile list still disables both directions.
 
 Compile-unverified at the time of writing; V1 is the gate this is submitted to.
 
-Ledger: webgl.extensions, gpu.angle-backend.
+Ledger: webgl.supported-extensions, webgl2.supported-extensions, gpu.angle-backend.
 --- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 +++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 @@ -25,7 +25,9 @@

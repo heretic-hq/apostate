@@ -124,3 +124,8 @@
 # 0070); 0104 needs 0028, whose filter it extends. Neither depends on the other.
 0103-gl-serve-the-claimed-limit-on-a-soft-backend.patch
 0104-webgl-serve-claimed-constant-extensions.patch
+
+# 0105 extends 0056's admission predicate and touches 0064's factory call site,
+# so both come ahead of it; it is only reachable because 0102 makes a GPU-less
+# host compose a hardware identity, so that comes ahead of it too.
+0105-webgpu-no-adapter-when-none-was-measured.patch

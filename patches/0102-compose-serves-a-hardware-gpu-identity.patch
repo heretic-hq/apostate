@@ -204,7 +204,7 @@ gpu.angle-backend, headless.gpu-stack.
    const Anchor* anchor = nullptr;
    if (!request.pinned_anchor.empty()) {
      anchor = FindAnchor(request.anchors, request.pinned_anchor);
-@@ -804,64 +847,68 @@
+@@ -804,64 +847,72 @@
        return std::nullopt;
      }
    } else {
@@ -238,6 +238,10 @@ gpu.angle-backend, headless.gpu-stack.
      for (const Anchor& candidate : request.anchors) {
 -      if (request.host.graphics_backend.empty() ||
 -          candidate.backend == request.host.graphics_backend) {
++      // Rule one, and independent of the platform test below on purpose: the
++      // software anchor is not a candidate. Stated as its own rejection rather
++      // than left to fall out of the absent backend filter, so that re-adding
++      // any backend preference here cannot make it drawable again.
 +      if (candidate.backend == kSoftwareBackend) {
 +        continue;
 +      }
@@ -314,7 +318,7 @@ gpu.angle-backend, headless.gpu-stack.
        });
      } else {
        std::vector<uint32_t> weights;
-@@ -878,42 +925,79 @@
+@@ -878,42 +929,79 @@
      resolved["anchor"] = std::string(anchor->id);
    }
  
@@ -384,13 +388,6 @@ gpu.angle-backend, headless.gpu-stack.
 +    // persona decides the cluster and the host's backend is whatever it is, so
 +    // a Windows persona on a Linux host is a D3D11 cluster over Vulkan or over
 +    // the software rasteriser.
-+    //
-+    // Recorded because the backend still decides one thing. An extension name
-+    // is served if the host's GL stack can back it, or if it carries only
-+    // constants and internal formats and the profile claims it, which patch
-+    // 0104 enumerates by name. A method-bearing name the host lacks is not
-+    // served, because a page calls getExtension() and then calls methods on
-+    // the object it receives.
      //
 -    // It still has to be said out loud, because the backend is what decides
 -    // which extensions exist and an extension the host lacks cannot be added.
@@ -398,6 +395,13 @@ gpu.angle-backend, headless.gpu-stack.
 -    // back, so one claimed but unimplemented fails at first use; only removal
 -    // is safe. A pinned cross-backend anchor therefore advertises a shorter
 -    // list than the card it names, and detectors hash that list.
++    // Recorded because the backend still decides one thing. An extension name
++    // is served if the host's GL stack can back it, or if it carries only
++    // constants and internal formats and the profile claims it, which patch
++    // 0104 enumerates by name. A method-bearing name the host lacks is not
++    // served, because a page calls getExtension() and then calls methods on
++    // the object it receives.
++    //
 +    // Note what this does NOT say. It does not say the identity should
 +    // therefore be the host's: the renderer string, the vendor string and the
 +    // numeric limits are all served as the profile composed them.

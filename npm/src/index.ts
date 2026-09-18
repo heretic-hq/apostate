@@ -1269,9 +1269,14 @@ function buildLaunchArguments(config, resolution, { driverOwnsProfile = false } 
     // makes the browser's InstallComposedProfile() return early, so nothing is
     // composed, the seed above is silently ignored, and every axis the envelope
     // omits falls back to the host. An override instead narrows the draw inside
-    // the composed profile, which is what this path wants. Host mode outranks
-    // per-field overrides and the binary refuses that combination outright, so
-    // this is deliberately not done for `host-inherited`.
+    // the composed profile, which is what this path wants.
+    //
+    // Host mode does not outrank a per-field override, it REFUSES it: 0085
+    // treats a persona, a pinned anchor and a per-field override alike, and
+    // combining any of them with a host spelling writes to stderr and exits
+    // non-zero rather than half-applying. So these are deliberately not emitted
+    // for `host-inherited` -- doing so would kill the launch, not merely be
+    // ignored.
     if (config.locale !== null && !hasSwitch(args, "--fingerprint-locale")) {
       args.push(`--fingerprint-locale=${config.locale}`);
     }

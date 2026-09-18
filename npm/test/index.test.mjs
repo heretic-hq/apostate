@@ -883,12 +883,35 @@ test("locale travels as an override, never as a partial profile envelope", async
       assert.equal(seen.args.some((a) => a.startsWith("--apostate-profile=")), envelope, label);
     }
 
-    // An envelope and a seed are alternatives, not layers, and the browser
-    // cannot report the conflict: it drops the seed without a word.
+    // A payload DESCRIBING A DEVICE and a seed are alternatives, not layers, and
+    // the browser cannot report the conflict: it drops the seed without a word.
     await assert.rejects(
       launch({ ...base, geoip: false, profile: { id: "mine" }, args: ["--fingerprint=99"] }),
       (error) => error.code === "APOSTATE_ENVELOPE_SEED_CONFLICT",
     );
+
+    // But credentials are not a device claim, and this refusal used to fire on
+    // them too. An authenticated proxy plus a pinned seed is legal and is the
+    // commonest shape this package serves, so it must launch. Without this case
+    // a revert to "any envelope refuses" leaves every other test green.
+    seen = null;
+    const authenticated = await launch({
+      ...base,
+      geoip: false,
+      proxy: { server: "http://proxy.example:8080", username: "u", password: "p" },
+      args: ["--fingerprint=99"],
+    });
+    await authenticated.close();
+    assert.ok(seen.args.includes("--fingerprint=99"), "the user's seed must survive");
+    const credentialArg = seen.args.find((a) => a.startsWith("--apostate-profile="));
+    assert.ok(credentialArg, "credentials have no switch, so the envelope is still required");
+    const decoded = JSON.parse(
+      Buffer.from(credentialArg.slice("--apostate-profile=".length), "base64").toString("utf8"));
+    assert.deepEqual(decoded.proxy_credentials, { username: "u", password: "p" });
+    // The empty device_profile key is load-bearing, not incidental: 0072's
+    // ParseOrNull reads proxy_credentials only inside FindDict("device_profile"),
+    // so a wrapper without the key loses the credentials silently.
+    assert.deepEqual(decoded.device_profile, {}, "the empty device_profile key must stay");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

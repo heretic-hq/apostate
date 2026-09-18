@@ -8,6 +8,7 @@ import copy
 import importlib
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, NamedTuple
@@ -15,8 +16,8 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 from .binary import BinaryManager, ensure_binary
 from .config import LaunchConfig, check_fingerprint_switches, translate_options
-from .errors import ConfigurationError, LaunchError, ProfileError
-from .geoip import GeoIPResult, resolve_geoip
+from .errors import ConfigurationError, GeoIPError, LaunchError, ProfileError
+from .geoip import GeoIPResult, redact_proxy, resolve_geoip
 from .profile_validation import validate_profile
 from .resolver import DeterministicResolver, ProfileResolution
 
@@ -100,10 +101,12 @@ def _profile_payload(profile: Mapping[str, Any] | None) -> str | None:
         return None
     validated = validate_profile(profile)
     if not validated:
-        # An empty envelope is not "no profile": --apostate-profile outranks
-        # --fingerprint in the launch precedence, so sending base64 "{}" would
-        # silently suppress the browser process's own composition and make this
-        # package carry a second, hidden host-inheritance default.
+        # An empty envelope is not "no profile". It describes no device, so it
+        # can only either suppress composition -- which the shipped loader does
+        # for any envelope at all -- or be a no-op once a no-device payload
+        # composes normally. Neither is worth a switch, and the first would make
+        # this package carry a second, hidden host-inheritance default, so send
+        # nothing and let --fingerprint stand on its own.
         return None
 
     def native_value(value: Any) -> Any:
@@ -142,9 +145,60 @@ class LaunchPlan:
 def _resolve_plan(config: LaunchConfig, *, resolver: Any = None, catalogue: Any = None,
                   geoip_provider: Any = None, geoip_timeout: float = 10.0) -> LaunchPlan:
     network_result: GeoIPResult | None = None
+    geoip_warnings: list[str] = []
     proxy_value = _proxy_url(config.proxy)
     if config.geoip and (config.locale is None or config.timezone is None):
-        network_result = resolve_geoip(geoip_provider, proxy=proxy_value, timeout=geoip_timeout)
+        if geoip_timeout <= 0:
+            # A caller bug rather than a network failure, so this still raises.
+            # Nothing below makes an impossible timeout a state to proceed from.
+            raise GeoIPError("GeoIP timeout must be greater than zero")
+        try:
+            # ``require_*=False`` keeps a partial answer usable: a result that
+            # carries a timezone and no locale contributes the timezone instead
+            # of discarding both. ``resolve_geoip`` called directly still
+            # enforces both fields by default.
+            network_result = resolve_geoip(geoip_provider, proxy=proxy_value,
+                                           timeout=geoip_timeout,
+                                           require_locale=False, require_timezone=False)
+        except GeoIPError as exc:
+            # A lookup failure, a timeout, an unavailable provider and a
+            # malformed result are all reported, and none of them invents a
+            # locale or a timezone. This package used to raise here, which the
+            # spec permits -- the prohibition is on inventing, not on
+            # continuing -- but it is the less usable of the two conforming
+            # answers, and the Node package's answer, substituting en-US/UTC,
+            # was the non-conforming one. Both now proceed with no override at
+            # all. That state only became distinguishable when GeoIP started
+            # driving --fingerprint-locale/--fingerprint-timezone instead of an
+            # --apostate-profile envelope: an envelope suppressed composition
+            # whether or not it carried a locale, so "send nothing" and "send
+            # en-US/UTC" had the same effect. Sending neither switch now leaves
+            # the composed profile's own drawn pair in place, coherent with the
+            # rest of that identity because the same seed drew it. The cost is
+            # reported rather than hidden: it will not match the exit country.
+            geoip_warnings.append(
+                f"{exc}. No locale or timezone override is sent and none is invented, so the "
+                "composed profile keeps its own and it will not match the proxy's exit "
+                "country. Pass locale and timezone explicitly to guarantee a match."
+            )
+        else:
+            unresolved = [
+                name
+                for name, requested, value in (
+                    ("locale", config.locale is None,
+                     network_result.locale or network_result.languages),
+                    ("timezone", config.timezone is None, network_result.timezone),
+                )
+                if requested and not value
+            ]
+            if unresolved:
+                geoip_warnings.append(
+                    f"the GeoIP lookup resolved no {' and no '.join(unresolved)}. None is "
+                    "invented, so the composed profile keeps its own; pass it explicitly to "
+                    "guarantee a match."
+                )
+        for warning in geoip_warnings:
+            print(f"apostate: {warning}", file=sys.stderr)
     network_mapping = _geoip_dict(network_result)
 
     resolution: ProfileResolution | None = None
@@ -221,17 +275,25 @@ def _native_args(plan: LaunchPlan, *, persistent: bool = False) -> list[str]:
 
     encoded = _profile_payload(plan.profile)
     if encoded:
-        # An envelope and a seed are alternatives, not layers. The browser
+        # A device envelope and a seed are alternatives, not layers. The browser
         # cannot report the conflict -- marking an envelope partial would be a
         # new page-visible surface, and the absent-means-absent rule is what
         # makes a single-surface envelope useful for testing -- so refuse here
         # rather than let the seed be dropped without a word.
+        #
+        # Scoped to device content by construction rather than by a check:
+        # ``_profile_payload`` returns None for an empty profile, and unlike the
+        # Node package this one has no proxy-credentials channel, so anything
+        # that reaches here describes a device. That is the payload shape which
+        # suppresses composition permanently; a payload claiming no device does
+        # not, which is what EnvelopeMerge's loader change turns on.
         if _has_switch(config.args, "--fingerprint"):
             raise ProfileError(
-                "a profile envelope and a --fingerprint seed cannot be combined: "
-                "--apostate-profile suppresses the browser's composition entirely, "
-                "so the seed would be silently ignored and every surface the "
-                "profile does not describe would stay host-inherited"
+                "an authored profile and a --fingerprint seed cannot be combined: "
+                "an --apostate-profile payload describing a device suppresses the "
+                "browser's composition entirely, so the seed would be silently "
+                "ignored and every surface the profile does not describe would "
+                "stay host-inherited"
             )
         args.append("--apostate-profile=" + encoded)
     if config.user_data_dir and not persistent:

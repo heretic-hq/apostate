@@ -29,7 +29,7 @@ The initial target and artifact names are:
 | --- | --- | --- |
 | `linux-x64` | `build/args/linux-x64.gn` | `apostate-152.0.7977.83-linux-x64.tar.zst` |
 | `linux-arm64` | `build/args/linux-arm64.gn` | `apostate-152.0.7977.83-linux-arm64.tar.zst` |
-| `macos-arm64` | `build/args/macos-arm64.gn` | `apostate-152.0.7977.83-macos-arm64.tar.zst` |
+| `macos-arm64` | `build/args/macos-arm64.gn` | `apostate-152.0.7977.83-macos-arm64.zip` |
 | `windows-x64` | `build/args/windows-x64.gn` | `apostate-152.0.7977.83-windows-x64.zip` |
 
 Linux targets use the pinned `build/linux/Dockerfile` boundary where the build

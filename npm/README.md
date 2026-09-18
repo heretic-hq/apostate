@@ -267,7 +267,7 @@ Releases also carry GitHub build-provenance attestations. There is no signing
 key to hold or rotate; verification is an optional extra step:
 
 ```sh
-gh attestation verify apostate-152.0.7977.83-macos-arm64.tar.zst --repo heretic-hq/apostate
+gh attestation verify apostate-152.0.7977.83-macos-arm64.zip --repo heretic-hq/apostate
 ```
 
 That needs the archive, so run `npx apostate install --keep-archive` first, or

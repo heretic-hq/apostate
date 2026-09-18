@@ -133,7 +133,10 @@ EOF
 cp "$REPO_ROOT/LICENSE" "$stage/"
 if [ -f "$REPO_ROOT/NOTICE" ]; then cp "$REPO_ROOT/NOTICE" "$stage/"; fi
 [ -f "$REPO_ROOT/build/MANIFEST.lock" ] || die "missing build/MANIFEST.lock; run scripts/build.sh $TARGET"
-cp "$REPO_ROOT/build/MANIFEST.lock" "$stage/build-MANIFEST.lock"
+mkdir -p "$stage/build"
+# Keeps the repository path. Flattened to build-MANIFEST.lock it reads like a
+# mangled path rather than a file, and a reader cannot tell which it is.
+cp "$REPO_ROOT/build/MANIFEST.lock" "$stage/build/MANIFEST.lock"
 mkdir -p "$stage/resources/profiles"
 cp -R "$REPO_ROOT/resources/profiles/." "$stage/resources/profiles/"
 
@@ -143,8 +146,19 @@ case "$archive_name" in
     ( cd "$archive_dir" && tar --zstd -cf "$archive_name" "$stage_name" )
     ;;
   *.zip)
-    command -v 7z >/dev/null || die "7z is required to write $archive_name"
-    ( cd "$archive_dir" && 7z a -tzip "$archive_name" "$stage_name" >/dev/null )
+    # ditto where it exists, which is macOS, and not merely as a preference:
+    # the framework bundle is held together by symlinks, `zip -r` stores them
+    # as regular files containing the target path, and the resulting .app does
+    # not launch. Measured on a fixture with two symlinks: ditto preserved
+    # 2 of 2, `zip -r` preserved 0 of 2. 7z is the Windows path, where the
+    # payload has no symlinks to lose.
+    if command -v ditto >/dev/null 2>&1; then
+      ( cd "$archive_dir" && ditto -c -k --keepParent "$stage_name" "$archive_name" )
+    elif command -v 7z >/dev/null 2>&1; then
+      ( cd "$archive_dir" && 7z a -tzip "$archive_name" "$stage_name" >/dev/null )
+    else
+      die "writing $archive_name needs ditto or 7z"
+    fi
     ;;
 esac
 

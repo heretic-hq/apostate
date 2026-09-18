@@ -116,7 +116,7 @@ const PERSONA_ALIASES = new Map([
 const TARGET_ARTIFACTS = {
   "linux-x64": `apostate-${CHROMIUM_VERSION}-linux-x64.tar.zst`,
   "linux-arm64": `apostate-${CHROMIUM_VERSION}-linux-arm64.tar.zst`,
-  "macos-arm64": `apostate-${CHROMIUM_VERSION}-macos-arm64.tar.zst`,
+  "macos-arm64": `apostate-${CHROMIUM_VERSION}-macos-arm64.zip`,
   "windows-x64": `apostate-${CHROMIUM_VERSION}-windows-x64.zip`,
 };
 

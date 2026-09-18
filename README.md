@@ -363,7 +363,7 @@ but not yet run.
 | --- | --- | --- |
 | `linux-x64` | `apostate-152.0.7977.83-linux-x64.tar.zst` | yes |
 | `linux-arm64` | `apostate-152.0.7977.83-linux-arm64.tar.zst` | yes |
-| `macos-arm64` | `apostate-152.0.7977.83-macos-arm64.tar.zst` | yes |
+| `macos-arm64` | `apostate-152.0.7977.83-macos-arm64.zip` | yes |
 | `windows-x64` | `apostate-152.0.7977.83-windows-x64.zip` | not yet |
 
 All four are the contract. Three have built green on CI; no Windows build has

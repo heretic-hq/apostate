@@ -164,8 +164,49 @@ for (const persona of platforms) {
   note(frames === FRAMES[persona], `AUDIO ${persona}`,
        `baseLatency=${r.baseLatency} at ${r.sampleRate}Hz = ${frames} frames, want ${FRAMES[persona]}`);
 
-  note(!String(r.languages).includes('th'), `LOCALE ${persona}`,
+  // The environment is the Linux lever and ONLY the Linux lever. macOS reads
+  // the app's AppleLanguages user default and Windows the preferred UI
+  // language list, so this assertion is real on Linux and vacuous elsewhere.
+  // The macOS half is covered separately below, because a check that cannot
+  // see a leak must say so rather than print a pass.
+  note(!String(r.languages).includes('th') && !String(r.intlLocale).startsWith('th'),
+       `LOCALE ${persona}`,
        `languages=${r.languages} intl=${r.intlLocale}`);
+}
+
+// macOS resolves its locale from the AppleLanguages user default, which no
+// environment variable reaches, so the loop above cannot observe the macOS
+// leak at all -- on an English-language Mac it passes whether or not the
+// browser is fixed. Reproducing it means writing a real user default, which
+// has effects outside this process, so it is opt-in and always restored.
+// Measured on the 152.0.7977.83 macos-arm64 artifact before patch 0115:
+// AppleLanguages=th-TH gave intl "th" with calendar "buddhist" beside
+// navigator.languages en-SG,en -- the two producers contradicting each other
+// in one call.
+if (process.platform === 'darwin') {
+  if (process.env.APOSTATE_SMOKE_APPLELANGS !== '1') {
+    console.log('skip LOCALE macos-userdefault -- set APOSTATE_SMOKE_APPLELANGS=1 to run;'
+      + ' it writes and restores the AppleLanguages user default');
+  } else {
+    const DOMAIN = 'org.chromium.Chromium';
+    const prior = spawnSync('defaults', ['read', DOMAIN, 'AppleLanguages'], { encoding: 'utf8' });
+    try {
+      spawnSync('defaults', ['write', DOMAIN, 'AppleLanguages', '-array', 'th-TH']);
+      const r = await launch(['--fingerprint-platform=windows'], {});
+      note(!String(r.intlLocale).startsWith('th') && r.languages && !String(r.languages).includes('th'),
+           'LOCALE macos-userdefault',
+           `languages=${r.languages} intl=${r.intlLocale}`);
+    } finally {
+      // Restore rather than delete when the machine had its own value.
+      if (prior.status === 0) {
+        const langs = (prior.stdout.match(/"?([A-Za-z-]+)"?,?\s*$/gm) || [])
+          .map((s) => s.trim().replace(/[",]/g, '')).filter((s) => s && s !== '(' && s !== ')');
+        spawnSync('defaults', ['write', DOMAIN, 'AppleLanguages', '-array', ...langs]);
+      } else {
+        spawnSync('defaults', ['delete', DOMAIN, 'AppleLanguages']);
+      }
+    }
+  }
 }
 
 // IDENTITY: one directory must give one machine; no directory must not.

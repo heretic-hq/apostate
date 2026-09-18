@@ -150,9 +150,13 @@ jobs:
           # whole life; fonts.provisioned_directory was never read at all; 0097
           # and 0099 were committed and left out of patches/series, so they were
           # in the repository and in no build. Every one of those was found by
-          # hand, weeks after the artifacts started promising the feature. This
-          # reads patches/ rather than a Chromium checkout, so it needs nothing
-          # but this repository and runs in well under a second.
+          # hand, weeks after the artifacts started promising the feature.
+          # Checks 1 to 6 read patches/ rather than a Chromium checkout, so they
+          # need nothing but this repository and run in well under a second.
+          # Check 7 resolves the Chromium paths the ledger cites, which needs
+          # .workspace/src; this runner has none, so it prints SKIP and says so
+          # in the summary line rather than passing silently. That check runs
+          # where the checkout exists.
           python3 scripts/check-schema-wiring.py
 
   catalogue:

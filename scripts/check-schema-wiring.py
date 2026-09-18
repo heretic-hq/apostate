@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """V0 gate: a profile key is declared, read, or a stated exception — never inert.
 
-Six times this project shipped an artifact that described something the build
+Seven times this project shipped an artifact that described something the build
 does not do. `fonts.enumeration_allowlist` sat in the schema, was composed into
 every profile, and was read by no C++ for its entire life.
 `fonts.provisioned_directory` was read by no C++ at all. Patches 0097 and 0099
@@ -19,10 +19,17 @@ named by no ledger row at all, so a fully wired surface carried no verification
 tier, no evidence and no coherence edge. And 110 of the 111 coherence edges
 carried a `check` expression that nothing evaluates, while the enforcement that
 does run is hand-written Python in scripts/profile_resolver.py with no link back
-to the edge it enforces. Each was found by hand, late, after the documentation
-had been promising the feature for weeks. This is the automated catch.
+to the edge it enforces. And four ledger rows cited a Chromium source path that
+is not in the pinned checkout — `base/ieee754.cc` for V8's transcendentals,
+which are at `v8/src/base/ieee754.cc`, `skia/font_cache_skia.cc` for a Blink
+file thirty characters deeper, `ui/display/screen_ozone.cc` for a file in
+`ui/aura`, and a directory that does not exist at all. The whole method rests on
+a third party being able to open the evidence, so a path that cannot be opened
+is not weaker evidence but none. Each was found by hand, late, after the
+documentation had been promising the feature for weeks. This is the automated
+catch.
 
-Six checks, all of one class — an artifact claiming something the build does
+Seven checks, all of one class — an artifact claiming something the build does
 not do:
 
   1. DECLARED BUT NEVER READ  a key in config/profile.schema.json that no
@@ -49,12 +56,20 @@ not do:
                               supposed to be derived FROM the ledger, so a key
                               no row asked for is a surface with no verification
                               tier, no evidence and no coherence edge.
+  7. CITED PATH IS ABSENT     a Chromium source path a ledger row cites that
+                              .workspace/src does not have, no sequenced patch
+                              creates, and no unsynced DEPS checkout could
+                              explain. Nobody can open the evidence. Its
+                              sibling finding, CITED AS UPSTREAM, is a path that
+                              resolves only because the series is applied.
 
     python3 scripts/check-schema-wiring.py            # report, exit 1 on a finding
     python3 scripts/check-schema-wiring.py --verbose  # plus every resolved read
 
 Dependency-free, like the other V0 gates: it runs on a bare checkout with no
-install step.
+install step. Checks 1 to 6 read nothing outside this repository. Check 7 reads
+the pinned checkout and shells out to git once per repository it touches, and
+degrades to a printed SKIP rather than a silent pass when either is absent.
 
 
 Why the consumed set comes from patches/, not from .workspace/src
@@ -270,11 +285,66 @@ could omit it would vanish from the count instead of appearing in it.
 a coherence row: the invariant legitimately names a profile key the schema does
 not declare. Its key must still fail to resolve, so an annotation whose key has
 since been declared is stale and fails.
+
+
+Why check 7 reads .workspace/src, and the four ways a path is allowed to be
+absent from it
+---------------------------------------------------------------------------
+
+This is the one check that must read the pinned checkout, because the claim it
+verifies is about that checkout: every `source` in the ledger is a promise that
+somebody else can open the file and see the code the row describes. The header
+above explains why a gate reading `.workspace/src` is a hazard, and the answer
+here is not to avoid the read but to make the verdict independent of the state
+the read finds the tree in. Four absences are legitimate, and each is resolved
+from something in git rather than from the tree:
+
+  * OURS. A path that resolves in this repository is not a Chromium citation at
+    all. `build/args/common.gni` is the fork's own GN args file, and the first
+    hand audit of these citations called it a broken Chromium path because it
+    looked for it only under `.workspace/src`.
+  * FORK-OWNED. `base/apostate/profile.cc` exists in the checkout only while
+    `patches/series` is applied. Resolving it against the tree would pass on a
+    patched checkout and report a broken citation on a pristine one, which is a
+    verdict that depends on state unrelated to the claim — worse than no check,
+    because it teaches everyone to ignore the output. So it resolves against
+    `patches/`, from the `--- /dev/null` hunks that show what the fork creates.
+    Do not "simplify" this into a tree lookup.
+  * UNSYNCED. A DEPS sub-repository nobody synced is an empty directory, and
+    every path inside it is absent for a reason that has nothing to do with the
+    citation. This project has already once asserted a file did not exist on the
+    strength of a grep over one of those. Counted and printed, never failed.
+  * BUILD-GENERATED. A path under `out/` is emitted by a GN action and exists
+    only for the targets a given machine built, so this check never counts it as
+    present even when it happens to be on disk. The row carries
+    `generated_path_exception` naming the GENERATOR INPUT, which is source and
+    can be opened, and it is checked the way the other annotations are: the
+    input must exist and must mention the token, an exception whose path now
+    resolves is stale, and so is one whose row no longer cites the path.
+
+The inverse of the fork-owned rule is a finding of its own. A path present on
+disk, absent from the pinned revision, and created by no sequenced patch is
+being cited as upstream evidence while resolving only because this checkout was
+mutated — so `git ls-tree HEAD` separates "on disk" from "at the pinned
+revision", batched one call per repository, read-only, and skipped with a note
+if git cannot answer. Eight cited paths are fork-owned today and every one of
+them is created by a sequenced patch.
+
+Extraction is the other half, and it is where the first audit went wrong: seven
+of its eleven findings were its own bugs. A googlesource permalink ends in
+something shaped exactly like a repository path, and an extension alternation
+ordered `gn|gni` truncates `build.gni` to `build.gn` and
+`runtime_enabled_features.json5` to `.json`, inventing two files to report as
+missing. A gate that cries wolf at that rate gets ignored, which is worse than
+not running it, so the URL exclusion, the longest-first end-anchored extension
+match and the "first segment names an entry at the checkout root" test are all
+three present and all three load-bearing.
 """
 
 import json
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -285,6 +355,13 @@ LEDGER = ROOT / "ledger" / "surfaces.jsonl"
 COHERENCE = ROOT / "ledger" / "coherence.jsonl"
 RESOLVER = ROOT / "scripts" / "profile_resolver.py"
 COLLECTOR = ROOT / "capture" / "collector" / "collector.js"
+
+# Check 7 reads the pinned mapping checkout, and reads nothing else from it.
+WORKSPACE = ROOT / ".workspace" / "src"
+LEDGER_DIR = ROOT / "ledger"
+# Chromium's build directory. Everything under it is generated, and which of it
+# exists depends on what this machine has built, so it is never source.
+BUILD_ROOT = "out"
 
 CPP_SUFFIXES = (".cc", ".cpp", ".mm", ".h")
 TEST_MARKERS = ("_unittest.", "_test.", "_browsertest.", "_fuzzer.")
@@ -357,6 +434,41 @@ UNBUILT_DEPENDENCY_REASONS = {
     # profile carries the same value and the edge has nothing to compare.
     "unconditioned",
 }
+
+# A ledger row citing a path the build generates. The path cannot be in source,
+# so what the annotation has to produce is the GENERATOR INPUT, which can be.
+GENERATED_PATH_EXCEPTION = "generated_path_exception"
+GENERATED_PATH_REASONS = {
+    # A GN action or template emits the file into the build directory, so it
+    # lives only under out/ and only for targets this machine has built.
+    "build-generated",
+}
+
+# Extensions a ledger citation actually carries, plus the obvious neighbours.
+# Sorted longest-first below, because an alternation ordered `gn|gni` matches
+# `build.gni` as `build.gn` and `runtime_enabled_features.json5` as `.json`, and
+# then reports a file nobody cited as missing. Seven of the eleven findings in
+# the first hand audit of these citations were that bug and the URL one below.
+CITED_SUFFIXES = (
+    "asm", "cc", "cfg", "chromium", "cpp", "css", "dat", "filelist", "gn", "gni",
+    "grd", "gyp", "gypi", "h", "hpp", "html", "idl", "inc", "java", "js", "json",
+    "json5", "md", "mjs", "mm", "mojom", "patch", "proto", "py", "pyl", "rs", "S",
+    "sh", "ts", "txt", "typemap", "xml",
+)
+CITED_PATH_RE = re.compile(
+    r"(?<![\w/.+-])((?:[A-Za-z0-9_.+-]+/)+[A-Za-z0-9_.+-]+\."
+    + "(?:" + "|".join(sorted(CITED_SUFFIXES, key=lambda s: (-len(s), s))) + ")"
+    + r")(?![A-Za-z0-9_])"
+)
+# `https://chromium.googlesource.com/angle/angle/+/<sha>/src/libANGLE/Shader.cpp`
+# ends in something shaped exactly like a repository path. Both the URL span and
+# the `/+/` infix are excluded: a permalink may appear without its scheme, and a
+# scheme may precede a path that has no `/+/` in it.
+URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
+# `  'src/third_party/angle': {` in the pinned DEPS.
+DEPS_KEY_RE = re.compile(r"\s{2}'src/(?P<path>[^']+)'\s*:")
+# A patch hunk that creates a file, which is how the fork declares what it owns.
+PATCH_ADDS_RE = re.compile(r"^--- /dev/null\n\+\+\+ b/(.+)$", re.M)
 
 # `probe("keyboard.layout", { deterministic: true }, ...)` in the collector.
 PROBE_RE = re.compile(r"\bprobe\(\s*\"([^\"]+)\"")
@@ -1158,6 +1270,360 @@ def unbuilt_problem(entry, declared):
                 f"({', '.join(values[:4])}). The axis it was waiting for exists.")
     return None
 
+
+# ---------------------------------------------------------------------------
+# Check 7: a cited Chromium source path exists
+# ---------------------------------------------------------------------------
+
+
+def ledger_lines():
+    """-> [(relative path, lineno, raw line, parsed row or None)] over ledger/*.jsonl.
+
+    All three files, not just surfaces: emitters name the file that emits a
+    value and coherence rows cite source in their evidence, so a wrong path is
+    equally unfalsifiable in any of them. A line that does not parse is carried
+    through as None rather than dropped, because check 4 is where a parse
+    failure is reported and dropping it here would hide the citations on it.
+    """
+    out = []
+    for path in sorted(LEDGER_DIR.glob("*.jsonl")):
+        rel = path.relative_to(ROOT).as_posix()
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                row = None
+            out.append((rel, lineno, line, row))
+    return out
+
+
+def cited_paths(lines, roots):
+    """-> {path: [(file, lineno)]}, every Chromium source path the ledger cites.
+
+    Three things decide whether a token is a citation of Chromium source, and
+    each of them was a false positive in the first hand audit of this file:
+
+      * It must not be inside a URL. `.../angle/angle/+/<sha>/src/libANGLE/
+        Context.cpp` is a googlesource permalink, and its tail looks exactly
+        like a repository path. Both the URL span and the `/+/` infix are
+        excluded, because either one alone leaves the other shape through.
+      * Its extension must match whole. An alternation ordered `gn|gni` truncates
+        `build.gni` to `build.gn` and `runtime_enabled_features.json5` to
+        `.json`, and then reports a file that was never cited as missing. The
+        alternation is sorted longest-first and the match is end-anchored, which
+        are two independent guards against the same bug.
+      * Its first segment must name an entry at the root of the pinned checkout.
+        That is what separates `base/ieee754.cc` — a Chromium path, and wrong —
+        from `win/font_cache_skia_win.cc`, a fragment relative to something the
+        prose named earlier, which this pass cannot and should not resolve.
+    """
+    out = {}
+    for rel, lineno, line, _ in lines:
+        spans = [m.span() for m in URL_RE.finditer(line)]
+        for match in CITED_PATH_RE.finditer(line):
+            if any(start <= match.start() < end for start, end in spans):
+                continue
+            path = match.group(1)
+            if "/+/" in path or "://" in path:
+                continue
+            if path.split("/", 1)[0] not in roots:
+                continue
+            out.setdefault(path, []).append((rel, lineno))
+    return out
+
+
+def series_created():
+    """Paths the sequenced patches CREATE, from patches/ rather than from the tree.
+
+    This is the fork's own source of truth about what it owns, and reading it
+    here rather than the checkout is load-bearing, not a detail to simplify
+    away. `base/apostate/profile.cc` exists in .workspace/src only while the
+    series is applied: a check that resolved it against the tree would pass on a
+    patched checkout and report a broken citation on a pristine one. A gate
+    whose verdict depends on state unrelated to what it is checking is worse
+    than no gate, because it teaches everyone to ignore its output.
+
+    Only created files, not every touched file: a patch that MODIFIES an
+    upstream file is not evidence that the file is ours, and crediting it here
+    would let a citation of a deleted upstream path pass.
+    """
+    created = set()
+    for name in series_entries()[0]:
+        patch = PATCH_DIR / name
+        if not patch.is_file():
+            continue
+        text = patch.read_text(encoding="utf-8", errors="replace")
+        for match in PATCH_ADDS_RE.finditer(text):
+            created.add(match.group(1).strip())
+    return created
+
+
+def deps_checkouts():
+    """-> ([declared directory], {unpopulated directory}) from the pinned DEPS.
+
+    A DEPS sub-repository that was never synced is an empty directory, and every
+    path inside it is absent for a reason that has nothing to do with the
+    citation. Reporting those would be the same cry-wolf failure as the regex
+    bugs: this project has already once concluded a file did not exist from a
+    grep over an unsynced checkout, and stated it as fact.
+    """
+    deps_file = WORKSPACE / "DEPS"
+    if not deps_file.is_file():
+        return [], set()
+    declared, inside = [], False
+    for line in deps_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("deps = {"):
+            inside = True
+            continue
+        if inside and line.startswith("}"):
+            break
+        if inside:
+            match = DEPS_KEY_RE.match(line)
+            if match:
+                declared.append(match.group(1).rstrip("/"))
+    unpopulated = set()
+    for rel in declared:
+        target = WORKSPACE / rel
+        if not target.is_dir() or not any(target.iterdir()):
+            unpopulated.add(rel)
+    return declared, unpopulated
+
+
+def deps_owner(path, declared):
+    """The deepest DEPS-declared directory containing `path`, or None."""
+    best = None
+    for rel in declared:
+        if path == rel or path.startswith(f"{rel}/"):
+            if best is None or len(rel) > len(best):
+                best = rel
+    return best
+
+
+def in_pinned_source(path):
+    """Does the pinned checkout carry this path as SOURCE?
+
+    A path under out/ is build output. Whether it is on disk depends on which
+    targets this machine happened to build, so counting it as present would make
+    the gate answer a different question per machine — exactly what the header
+    says a gate reading .workspace/src must not do. Such a citation is checkable
+    only through its generator input, which is what the exception names.
+    """
+    if path.split("/", 1)[0] == BUILD_ROOT:
+        return False
+    return (WORKSPACE / path).exists()
+
+
+def pinned_revision_paths(paths):
+    """Which of `paths` the pinned revision itself contains, or None if unknowable.
+
+    Read-only, and batched: one `ls-tree` per git repository involved, with the
+    paths as pathspecs. The main checkout and each synced DEPS sub-repository are
+    separate repositories, so a path is asked of the deepest one that owns it.
+    """
+    groups = {}
+    for path in paths:
+        parts = path.split("/")
+        owner = ""
+        for depth in range(len(parts) - 1, 0, -1):
+            if (WORKSPACE.joinpath(*parts[:depth]) / ".git").exists():
+                owner = "/".join(parts[:depth])
+                break
+        groups.setdefault(owner, []).append(path)
+
+    present = set()
+    for owner, owned in groups.items():
+        cwd = WORKSPACE / owner if owner else WORKSPACE
+        rels = [path[len(owner) + 1:] if owner else path for path in owned]
+        try:
+            result = subprocess.run(
+                ["git", "--no-optional-locks", "-C", str(cwd), "ls-tree", "-z",
+                 "--name-only", "--full-name", "HEAD", "--", *rels],
+                capture_output=True, text=True, check=False)
+        except OSError:
+            return None
+        if result.returncode != 0:
+            return None
+        listed = set(result.stdout.split("\0"))
+        present.update(path for path, rel in zip(owned, rels) if rel in listed)
+    return present
+
+
+def generated_exceptions(lines):
+    """-> ({path: (file, lineno, row id, entry)}, findings) for the shape errors."""
+    out, findings = {}, []
+    for rel, lineno, line, row in lines:
+        if not isinstance(row, dict):
+            continue
+        block = row.get(GENERATED_PATH_EXCEPTION)
+        if block is None:
+            continue
+        where = f"{rel}:{lineno} ({row.get('id', '?')})"
+        if not isinstance(block, list) or not block:
+            findings.append(
+                f"BAD EXCEPTION            {row.get('id', '?')}\n"
+                f"        {where}: {GENERATED_PATH_EXCEPTION} must be a non-empty array"
+            )
+            continue
+        for entry in block:
+            if not isinstance(entry, dict) or not entry.get("path"):
+                findings.append(
+                    f"BAD EXCEPTION            {row.get('id', '?')}\n"
+                    f"        {where}: {GENERATED_PATH_EXCEPTION} entries must be objects "
+                    f"carrying path, reason, why and evidence"
+                )
+                continue
+            path = entry["path"]
+            if path not in line:
+                findings.append(
+                    f"STALE EXCEPTION          {path}\n"
+                    f"        {where} excuses it, but the row no longer cites it.\n"
+                    f"        The exception outlived the citation it described; delete it."
+                )
+                continue
+            out[path] = (rel, lineno, row.get("id", "?"), entry)
+    return out, findings
+
+
+def generated_path_problem(entry):
+    """Is this generated_path_exception usable as evidence, and still true?"""
+    missing = [f for f in ("path", "reason", "why", "evidence") if not entry.get(f)]
+    if missing:
+        return f"{GENERATED_PATH_EXCEPTION} is missing {', '.join(missing)}"
+    if entry["reason"] not in GENERATED_PATH_REASONS:
+        return (f"{GENERATED_PATH_EXCEPTION}.reason is {entry['reason']!r}; expected one of "
+                f"{sorted(GENERATED_PATH_REASONS)}")
+
+    # `path` or `path:token`, the shape the other annotations use. The generator
+    # input is Chromium source as often as it is ours, so it resolves against
+    # either tree — but it must resolve, and it must mention the token, because a
+    # generated citation whose generator cannot be opened is not evidence at all.
+    evidence, _, token = str(entry["evidence"]).partition(":")
+    target = ROOT / evidence
+    if not target.is_file():
+        target = WORKSPACE / evidence
+    if not target.is_file():
+        return (f"{GENERATED_PATH_EXCEPTION}.evidence names {evidence}, which is not a file "
+                f"in this repository or in the pinned checkout")
+    token = token or pathlib.PurePosixPath(entry["path"]).name
+    if not TOKEN_RE.fullmatch(token):
+        return (f"{GENERATED_PATH_EXCEPTION}.evidence has to spell its token as "
+                f"'path:token'; {token!r} is not something a reader can search for")
+    if token not in target.read_text(encoding="utf-8", errors="replace"):
+        return (f"{GENERATED_PATH_EXCEPTION}.evidence is {evidence}, which does not mention "
+                f"{token!r}: it cannot be the evidence for this citation")
+    return None
+
+
+def check_citations():
+    """-> (findings, tally). Every Chromium path the ledger cites must resolve.
+
+    Skipped, loudly, without a pinned checkout: CI runs these gates with no
+    36 GB of somebody else's code, and a check that silently passed there would
+    be indistinguishable from one that had nothing to say.
+    """
+    tally = {
+        "skipped": None, "cited": 0, "local": 0, "pinned": 0, "fork": 0,
+        "unsynced": [], "excused": 0, "revision": True, "notes": [],
+    }
+    if not WORKSPACE.is_dir():
+        tally["skipped"] = (f"no pinned checkout at "
+                            f"{WORKSPACE.relative_to(ROOT).as_posix()}")
+        return [], tally
+
+    lines = ledger_lines()
+    roots = {entry.name for entry in WORKSPACE.iterdir()}
+    cited = cited_paths(lines, roots)
+    exceptions, findings = generated_exceptions(lines)
+    declared_deps, unpopulated = deps_checkouts()
+    created = series_created()
+    tally["cited"] = len(cited)
+
+    # A stale annotation is the same defect wearing the opposite sign, so this
+    # runs BEFORE the resolution loop: a path that now resolves has to be
+    # reported as an exception that outlived its cause, not quietly credited as
+    # a path that exists.
+    for path in sorted(exceptions):
+        rel, lineno, row_id, _ = exceptions[path]
+        if (ROOT / path).exists() or in_pinned_source(path):
+            findings.append(
+                f"STALE EXCEPTION          {path}\n"
+                f"        {rel}:{lineno} ({row_id}) excuses it as generated, but the path "
+                f"now resolves.\n"
+                f"        The exception outlived the problem it described; delete it."
+            )
+            del exceptions[path]
+
+    on_disk = [path for path in cited
+               if not (ROOT / path).exists() and in_pinned_source(path)]
+    at_revision = pinned_revision_paths(on_disk)
+    if at_revision is None:
+        tally["revision"] = False
+
+    for path, sites in sorted(cited.items()):
+        where = ", ".join(f"{name}:{line}" for name, line in sites[:3])
+        if (ROOT / path).exists():
+            tally["local"] += 1                      # a path of our own, not Chromium's
+            continue
+        if in_pinned_source(path):
+            if at_revision is None or path in at_revision:
+                tally["pinned"] += 1
+                continue
+            if path in created:
+                tally["fork"] += 1
+                continue
+            findings.append(
+                f"CITED AS UPSTREAM        {path}\n"
+                f"        {where}\n"
+                f"        The path is in .workspace/src and is NOT in the pinned revision, "
+                f"and no sequenced patch creates it. It resolves only because this checkout "
+                f"has been mutated, so the citation would break for anyone else."
+            )
+            continue
+        if path in created:
+            tally["fork"] += 1                       # ours; patches/ is the evidence
+            continue
+        owner = deps_owner(path, declared_deps)
+        if owner in unpopulated:
+            tally["unsynced"].append(path)
+            tally["notes"].append(f"{path}: DEPS checkout {owner} is declared and not "
+                                  f"synced, so absence here is not evidence")
+            continue
+        excuse = exceptions.pop(path, None)
+        if excuse is not None:
+            rel, lineno, row_id, entry = excuse
+            problem = generated_path_problem(entry)
+            if problem:
+                findings.append(
+                    f"BAD EXCEPTION            {path}\n"
+                    f"        {rel}:{lineno} ({row_id}): {problem}"
+                )
+            else:
+                tally["excused"] += 1
+                tally["notes"].append(f"{path}: {entry['reason']}, checkable through "
+                                      f"{entry['evidence']}")
+            continue
+        findings.append(
+            f"CITED PATH IS ABSENT     {path}\n"
+            f"        {where}\n"
+            f"        Not in .workspace/src, not created by a sequenced patch, and not in an "
+            f"unsynced DEPS checkout. The row's evidence cannot be opened by anyone reading "
+            f"it. Fix the path, or carry {GENERATED_PATH_EXCEPTION} if the build generates it."
+        )
+
+    # Whatever is left appears in its row's text but is not a path this check
+    # resolves — a first segment that is not a checkout root, or an extension
+    # outside CITED_SUFFIXES. The annotation excuses nothing either way.
+    for path, (rel, lineno, row_id, _) in sorted(exceptions.items()):
+        findings.append(
+            f"BAD EXCEPTION            {path}\n"
+            f"        {rel}:{lineno} ({row_id}) excuses it, but this check does not read it "
+            f"as a Chromium source citation, so the exception excuses nothing.\n"
+            f"        Spell the path as the row cites it, relative to the source root."
+        )
+    return findings, tally
+
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
@@ -1481,6 +1947,31 @@ def main() -> int:
     if verbose and unenforced:
         print("  note enforced by nothing: " + ", ".join(sorted(unenforced)))
 
+    # ----------------------------------------------------------------- check 7
+    citation_findings, tally = check_citations()
+
+    print("\nledger source citations")
+    if tally["skipped"]:
+        print(f"  SKIP {tally['skipped']}, so the citations in ledger/*.jsonl were not "
+              f"resolved. Nothing here passed; nothing was checked.")
+    else:
+        print(f"  {tally['cited']} distinct Chromium source path(s) cited across "
+              f"ledger/*.jsonl: {tally['pinned']} in the pinned checkout, {tally['fork']} "
+              f"created by a sequenced patch, {tally['local']} of our own, "
+              f"{tally['excused']} build-generated, {len(tally['unsynced'])} in an unsynced "
+              f"DEPS checkout")
+        if not tally["revision"]:
+            print("  note git could not read the pinned revision, so 'present on disk' was "
+                  "not separated from 'present at the pinned revision'")
+    for finding in citation_findings:
+        print(f"  FAIL {finding}")
+    findings.extend(citation_findings)
+    if not tally["skipped"] and not citation_findings:
+        print("  ok   every cited path exists, or is ours, or carries a stated exception")
+    if verbose:
+        for note in tally["notes"]:
+            print(f"  note {note}")
+
     if verbose:
         print("\nresolved reads")
         for path in sorted(consumed):
@@ -1493,9 +1984,12 @@ def main() -> int:
             lineno, where, patch, _ = dynamic[path][0]
             print(f"  {path:48} dynamic key at {where}:{lineno}")
 
-    print(f"\nsix checks over {len(declared)} declared key(s), {len(entries)} sequenced "
-          f"patch(es), {len(rows)} ledger row(s) and {len(edges)} coherence edge(s), of which "
-          f"{len(unenforced)} edge(s) are enforced by nothing: {len(findings)} finding(s)")
+    citations = (f"the citation check skipped ({tally['skipped']})" if tally["skipped"]
+                 else f"{tally['cited']} cited source path(s)")
+    print(f"\nseven checks over {len(declared)} declared key(s), {len(entries)} sequenced "
+          f"patch(es), {len(rows)} ledger row(s), {len(edges)} coherence edge(s), of which "
+          f"{len(unenforced)} edge(s) are enforced by nothing, and {citations}: "
+          f"{len(findings)} finding(s)")
     return 1 if findings else 0
 
 

@@ -178,6 +178,43 @@
         }
       }
     },
+    "generated_path_exception": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Paths this row cites that a source checkout cannot contain, because the build generates them. Carried on the row rather than in an allowlist inside a checker, so whoever edits the citation sees it, and checked by scripts/check-schema-wiring.py in both directions the way profile_field_exception is: a bad annotation fails, and so does one that outlived its problem once the path is in the source tree or the row stops citing it. Present only where the path is RIGHT and cannot be hosted in source, never to excuse a path that is merely wrong - that is a defect to fix, not to annotate.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "reason",
+          "why",
+          "evidence"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The cited path, spelled exactly as this row spells it and relative to the Chromium source root. It MUST still appear in this row and MUST NOT resolve in the pinned checkout's source tree; either one failing makes the annotation stale."
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "build-generated"
+            ],
+            "description": "build-generated: a GN action or template emits the file into the build directory, so it exists only under out/ and only for the targets a given machine has built. The artifact a third party can check is the generator input, which 'evidence' must name."
+          },
+          "why": {
+            "type": "string",
+            "minLength": 40
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The generator input, as a path or 'path:token'. The path must exist in this repository or in the pinned checkout and must mention the token, so a citation nobody can open still resolves to source somebody can."
+          }
+        }
+      }
+    },
     "verification_tier": {
       "type": "string",
       "enum": [

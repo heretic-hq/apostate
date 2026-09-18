@@ -181,7 +181,7 @@
 
 # 0112 serves the anchor's GL capability limits the serving table never named
 # and the clamp direction discarded, and stops --fingerprint-explain claiming
-# they were served when they were not. It touches two files.
+# they were served when they were not. It touches four files.
 #
 # ui/gl/gl_gl_api_implementation.cc carries most of it, and that file's own
 # history is the ordering: 0026 created kApostateGlLimits and the
@@ -191,6 +191,12 @@
 # sites it rewrites. 0103 is the binding constraint there. It also reads the
 # driver's unsubstituted GL_RENDERER through GLApiBase, which 0007 established
 # as the substitution point, so 0007 comes ahead of it too.
+#
+# ui/gl/gl_gl_api_implementation.h is touched for the same reason: the three
+# robust ANGLE query variants have to be declared as overrides before they
+# can be defined, and those are what GLES2DecoderPassthroughImpl, the default
+# decoder, actually calls. No other patch in the series touches that header,
+# so it orders nothing.
 #
 # base/apostate/compose.cc carries the explain change: it rewrites the
 # cross-backend limitation text 0102 wrote, and counts gl_limits on the

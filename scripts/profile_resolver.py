@@ -304,6 +304,9 @@ def draw(root: bytes, label: str, index: int) -> int:
 
 def weighted_pick(root: bytes, label: str, options: Sequence[Mapping[str, Any]]) -> int:
     """Cumulative-weight index. No modulo, no rejection, no floating point."""
+    # coh: coh.per-seed-entropy-across-axes - every draw is a pure function of the
+    # seed root, so one seed is constant across launches and two seeds are
+    # independent. There is no clock, no PID and no process state in this path.
     if not options:
         raise ResolverError(f"axis {label} has no servable options")
     total = sum(int(option["weight"]) for option in options)
@@ -653,6 +656,10 @@ def _servable(axis: str, servability: str, options: Sequence[Mapping[str, Any]],
         requires = option.get("requires") or {}
         keep = True
         if servability == "clamp-down":
+            # coh: coh.claim-within-host-capacity - an option is offered only when
+            # its requirement is at or below the host's real capacity, so a
+            # composed profile can never claim more cores or more memory than the
+            # machine can serve. Capacity only ever goes down.
             if "min_logical_cores" in requires and host.get("logical_cores") is not None:
                 keep = keep and requires["min_logical_cores"] <= host["logical_cores"]
             if "min_total_bytes" in requires and host.get("total_bytes") is not None:
@@ -703,6 +710,15 @@ def _merge(base: Mapping[str, Any], overlay: Mapping[str, Any],
 
 
 def _option_set(axis: str, table: Mapping[str, Any], parents: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    # A child axis only ever draws from the option set keyed on its resolved
+    # parent, which is what turns one chip into one machine instead of three
+    # independent draws. The edges that rest on that conditioning:
+    #
+    # coh: coh.hardware-product-configuration    - cpu and memory on gpu_identity
+    # coh: coh.gpu-panel-media-product-pairing   - panel and media_topology on machine_class
+    # coh: coh.dpr-times-screen-is-real-panel    - panel carries width, height and dpr as one value
+    # coh: coh.device-counts-vs-claimed-machine  - media_topology on machine_class
+    # coh: coh.battery-shape-vs-claimed-chassis  - battery on machine_class
     wanted = {name: parents[name] for name in table["conditioned_on"]}
     matches = [entry for entry in table["option_sets"] if entry["key"] == wanted]
     if len(matches) != 1:
@@ -734,6 +750,13 @@ def _choose_anchor(catalogue: Mapping[str, Any], host: Mapping[str, Any],
         if len(matches) != 1:
             raise ResolverError(f"unknown anchor {requested!r}")
         return matches[0], warnings
+    # An anchor is offered only when the host's graphics stack can actually serve
+    # its backend, so the renderer string, the limit tables and the measured
+    # throughput all describe a stack the binary is really running.
+    #
+    # coh: coh.angle-backend-vs-gpu-claim      - the limit and precision tables follow the backend
+    # coh: coh.gpu-claim-vs-measured-throughput - a software host is offered only the SwiftShader anchor
+    # coh: coh.headless-display-vs-gpu-claim   - the renderer string comes from a servable stack
     servable = [a for a in anchors
                 if host.get("backend") is None or a["backend"] == host["backend"]]
     if host.get("platform") is not None:
@@ -853,6 +876,10 @@ def _anchor_capability_layer(record: Mapping[str, Any], renderer: str | None) ->
 def _member_webgpu(record: Mapping[str, Any], cluster: Mapping[str, Any],
                    renderer: str | None) -> dict[str, Any] | None:
     """The resolved member's WebGPU adapter, or None when it reported none."""
+    # coh: coh.gpu-webgl-webgpu - the WebGPU section is taken from the same anchor
+    # member whose unmaskedRenderer the profile presents, and is omitted rather
+    # than borrowed from a sibling when that member reported no adapter. A mixture
+    # of two members is a device that does not exist.
     if renderer is None:
         return None
     capture = None
@@ -908,8 +935,14 @@ def _derive_work_area(profile: dict[str, Any]) -> None:
             # leave the geometry host-inherited.
             profile.pop("screen")
         return
+    # coh: coh.screen-avail-inset - a work area no display could have is rejected
+    # here. Only the geometric half: nothing checks the insets against the OS the
+    # profile claims, which is the half the edge still carries.
     if left + right >= width or top + bottom >= height:
         raise ResolverError("furniture insets exceed the panel: that work area cannot exist")
+    # coh: coh.screen-avail-inset-vs-claimed-os - the arithmetic identity holds by
+    # construction below: avail_height is height minus the two insets and the
+    # insets are popped, so no profile can carry a contradictory pair.
     screen["avail_left"] = left
     screen["avail_top"] = top
     screen["avail_width"] = width - left - right
@@ -917,6 +950,8 @@ def _derive_work_area(profile: dict[str, Any]) -> None:
 
 
 def _coherence_check(profile: Mapping[str, Any], platform: str, browser_build: str) -> None:
+    # coh: coh.display-hdr-cluster - color_depth is Chromium's HDR flag rather
+    # than a bit depth, so it cannot disagree with hdr or with the gamut.
     screen = profile.get("screen") or {}
     if screen.get("hdr") is True and screen.get("color_gamut") == "srgb":
         raise ResolverError("HDR display cannot use sRGB gamut")
@@ -925,6 +960,9 @@ def _coherence_check(profile: Mapping[str, Any], platform: str, browser_build: s
     input_section = profile.get("input") or {}
     if input_section.get("pointer_type") == "none" and input_section.get("hover") is True:
         raise ResolverError("pointer_type=none with hover=true is incoherent")
+    # coh: coh.device-id-vs-device-list - the per-kind counts must derive from the
+    # one device list, which is the clause of that edge composition can decide.
+    # coh: coh.device-counts-vs-claimed-machine - same condition, counts half.
     media = profile.get("media") or {}
     devices = media.get("devices")
     if isinstance(devices, list):

@@ -33,15 +33,17 @@ a list captured from a browser.
 An empty list in the profile disables the filter entirely, so a profile that
 does not describe its extensions does not silently lose all of them.
 
-Note this closes the removable half of the gap. Adding a name the host lacks
-cannot be done, for the reason above, and that is a host capability question in
-the same class as the render limits raised in patch 0027.
+Note this closes the removable half of the gap. The addition half is opened
+later, by patch 0104, and only for names that carry constants and no methods:
+the objection above is sound about a method-bearing extension and too strong
+about the rest, because Blink holds a complete implementation class for each and
+the only thing refusing is the driver-support lookup in its Supported().
 
 This paragraph originally sized that residual as "two extensions the reference
 has on WebGL1 and five on WebGL2 — KHR_parallel_shader_compile,
 WEBGL_blend_func_extended and friends". That figure came from a Linux
-SwiftShader build host and does not describe a launch where the anchor's backend
-is the host's, which is the only kind the anchor draw produces. Re-measured
+SwiftShader build host and does not describe a backend-matched launch.
+Re-measured
 through the shipped 152.0.7977.83 macOS binary on an Apple M4 Max running real
 ANGLE/Metal, comparing getSupportedExtensions against each anchor's captured
 lists, and confirmed live by pinning each anchor and counting what the page
@@ -55,11 +57,16 @@ received:
   linux-vulkan-nvidia-adf287b8f0ee   claims 34/29, delivers 34/28.
 
 The one missing name in all three cross-backend cases is OVR_multiview2, on
-WebGL2. KHR_parallel_shader_compile is present on this host. So the residual is
-one name wide, it is zero on a backend-matched anchor, and the anchor axis's
-existing backend filter is therefore already the extension-servability gate —
-which is why no separate selection-time gate was added. Patch 0093 records a
-limitation for the one way past that filter, --fingerprint-anchor.
+WebGL2. KHR_parallel_shader_compile is present on this host. So the residual on
+a Metal host is one name wide and zero on a backend-matched anchor.
+
+What this paragraph went on to conclude -- that the anchor axis's backend filter
+is therefore already the extension-servability gate, so no separate gate was
+needed -- was true of the anchor draw as it stood and is not true any more.
+Patch 0102 removes that filter: the claimed OS selects the anchor family and the
+host's backend does not filter at all, so a cross-backend launch is the ordinary
+case on a Linux host rather than only what --fingerprint-anchor produces. The
+gate that remains is this function, which is where it should have been.
 
 Ledger: webgl.extensions.
 diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc

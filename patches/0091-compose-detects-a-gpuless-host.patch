@@ -63,13 +63,23 @@ says so, and returns nothing -- which means host inheritance for the whole
 profile. I judged that a catalogue gap rather than a code one and left it alone.
 Patch 0093, immediately after this one in the series, shows that half of it was
 a code gap after all, and keeps every non-GPU axis instead of discarding the
-profile. The remaining half is still data: a swiftshader-backend anchor is
+profile. The remaining half looked like data: a swiftshader-backend anchor is
 constructible from T0 evidence already in the tree, since
 resources/fingerprints/raw/stock-linux-20260907T150627Z.json is a stock
 Chromium 152 Linux capture through SwiftShader with the full parameter tables,
-extension lists and precision values. With that anchor present this change
-selects it, and a GPU-less host gets a composed software identity rather than
-an inherited one.
+extension lists and precision values.
+
+That anchor was then built, and this paragraph used to end "with that anchor
+present this change selects it, and a GPU-less host gets a composed software
+identity rather than an inherited one" -- as though that were the goal reached.
+WITHDRAWN. It was the defect. Selecting it handed a page
+"ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)),
+SwiftShader driver)" on the deployment target's commonest configuration, with no
+per-seed entropy at all because that anchor has one member. Patch 0102 excludes
+it from the drawn candidate set on every host and makes the claimed OS select
+the cluster instead. What this patch contributes after 0102 is the backend FACT
+and its basis string, which the explain report prints and which
+--fingerprint=host still acts on; what it no longer does is decide the identity.
 
 The report now says which inference was made rather than asserting the platform
 default, because after this change the platform default is no longer the only

@@ -39,10 +39,31 @@ searches the limit now finds what it was told:
   MAX_VIEWPORT_DIMS     32767
   32768x32768                    correctly refused
 
+That last line is wrong and the line above it is only half right, re-measured
+through the shipped 152.0.7977.83 artifact with a probe that allocates and then
+attaches the result to a framebuffer, asks checkFramebufferStatus, clears to
+green and reads a pixel back. SwiftShader refuses nothing: texStorage2D at
+32768 and at 65536 both return no GL error, and a 3D texture eight times the
+reported MAX_3D_TEXTURE_SIZE is accepted too. What fails is the framebuffer --
+GL_FRAMEBUFFER_UNSUPPORTED -- and the readback, which comes back black. It fails
+that way at 16384 as well, the value this patch raised the report TO, while 8192
+is framebuffer-complete and reads back green. The same probe on ANGLE/Metal is
+complete and green at 16384 and errors with GL_INVALID_VALUE at 32768, so on
+hardware the reported number really is the usable one.
+
+So this patch raised the reported ceiling above the usable one. That is recorded
+rather than reverted, because the alternative is reporting 8192 beside a
+discrete-GPU renderer string, which is a lookup-table contradiction and far
+cheaper to detect than an allocation probe -- see patch 0103, which takes the
+same trade deliberately and with the measurement in front of it. The competitor
+failure below is still the right reference point for why the raise was made; it
+is the claim that nothing is left to catch that was too strong.
+
 This is the failure a competitor was caught by: a spoofed
 MAX_VERTEX_UNIFORM_VECTORS of 4095 against a real Mesa limit of 1024, recovered
 by a twelve-step binary search compiling `uniform vec4 u[N]`. Raising the real
-limit cannot be caught that way because there is nothing to catch.
+limit moves that search out of the uniform-vector class, which is what this
+patch achieves; it does not make the dimension class unfalsifiable.
 
 Rendering is unchanged, which had to be checked: raising dimensions can silently
 overflow fixed-point coordinate math, and Span packs its endpoints into unsigned

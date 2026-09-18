@@ -51,22 +51,29 @@ What a detector saw before, and sees now. Before: a renderer string naming a
 GeForce RTX 4070 Ti SUPER in front of SwiftShader's limit table and SwiftShader's
 extension list; or, after 0091 and before this patch, the host verbatim on every
 surface. Now: the GPU surfaces report the host's real SwiftShader identity and
-everything else is composed. That is the better fingerprint rather than a
-concession. SwiftShader strings are identical across hosts, so they carry no
-host-specific entropy, and they are what every headless Chrome reports, which is
-an enormous population to be one of. A discrete-GPU renderer string above a
-software rasteriser's own capability tables matches no machine that has ever
-existed, and resources/surfaces.json already calls that an absolute
-contradiction.
+everything else is composed.
+
+This paragraph went on to argue that the inherited software identity was "the
+better fingerprint rather than a concession", on the grounds that SwiftShader
+strings carry no host-specific entropy and that every headless Chrome reports
+them. WITHDRAWN by patch 0102, and the error is worth naming because it is not a
+detail. The population argument is backwards: the renderer string is read by
+every detector on every page load, so being one of the headless-Chrome
+population is being identified AS headless Chrome, which is the thing an
+anti-detect fork exists to avoid. The contradiction it was avoiding -- a
+discrete-GPU string above a software rasteriser's capability table -- is real,
+but it is only reachable by a benchmark or an allocation probe, and 0102's
+measurements show the reference product takes exactly that trade and passes the
+suites that matter. 0103 and 0104 then close most of the table and list gap that
+made the contradiction visible at all.
 
 0081's comment that a half-composed fingerprint is more dangerous than none is
 not being overruled, and the distinction is worth writing down so the two are not
 read as contradictory. That claim holds when the omitted half would contradict
-the half that ships. Here the omitted part is exactly the cluster that cannot be
-served, every surface kept is independent of it, and all the GPU surfaces then
-come from one source -- the host -- so nothing is left to disagree with itself. A
-Windows persona over a software rasteriser is a Windows VM, and there are
-millions of those.
+the half that ships. In this patch's own terms the omitted part was exactly the
+cluster that could not be served and every surface kept was independent of it.
+After 0102 the cluster IS served, from the claimed platform's anchor, so the
+question this paragraph settled no longer arises on a drawn launch.
 
 This also states one thing out loud that was silent. --fingerprint-anchor skips
 the backend filter deliberately, because a pin is an explicit request and
@@ -84,16 +91,25 @@ windows-d3d11-intel-79dfeb5b4f99 delivered 35 WebGL1 and 31 WebGL2 extensions
 against a claimed 35 and 32; linux-vulkan-nvidia-adf287b8f0ee delivered 34 and 28
 against 34 and 29; the missing name is OVR_multiview2 in both cases. The
 backend-matched anchor, macos-metal-apple-850a91233555, delivered 39 and 36
-against a claimed 39 and 36, with nothing missing and nothing extra. The existing
-backend filter is therefore already the extension-servability gate, the whole
-un-addable gap is one name wide, and no separate gate is added. Patch 0028's
+against a claimed 39 and 36, with nothing missing and nothing extra. Patch 0028's
 "two extensions on WebGL1 and five on WebGL2" was measured against a SwiftShader
 build host and does not describe a backend-matched launch.
 
-What remains true afterwards: there is no swiftshader anchor in the compiled
-catalogue, so on a GPU-less host the GPU cluster stays the host's own until one is
-measured. Limits and extensions there are SwiftShader's real values, which is
-honest and internally consistent, but it is not a claimed device.
+Two conclusions drawn from those numbers no longer hold. "The existing backend
+filter is therefore already the extension-servability gate, and no separate gate
+is added" was true while the draw filtered on the host's backend; patch 0102
+removes that filter, so the gate is the one in
+WebGLRenderingContextBase::ExtensionSupportedAndAllowed and 0104 is where the
+addition direction opens. And "an extension the host lacks cannot be added" is
+true only of a method-bearing extension: Blink carries a complete implementation
+class for each of the names in the gap, so 0104 serves the five that expose
+constants and no methods and states why the other four stay absent.
+
+What remained true when this patch shipped -- that a GPU-less host keeps the
+host's own GPU cluster until a swiftshader anchor is measured -- is no longer the
+behaviour. The anchor was built, and 0102 then excluded it from the drawn
+candidate set on every host, because a self-identifying software-rasteriser
+string is the one value the product must never volunteer.
 
 Ledger: gpuinfo.gl-renderer, webgl.extensions, webgl.limits, headless.gpu-stack.
 

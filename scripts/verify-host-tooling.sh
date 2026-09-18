@@ -268,6 +268,24 @@ case "$target" in
       directory names cannot show it" ;;
               esac
               ;;
+            libsymbol)
+              # The half a compile cannot see. A header declaring
+              # EXTERN_C const CLSID X compiles against any revision; only the
+              # link needs the library that defines X, and the series gate
+              # never links.
+              windows_sdk_lib_has_symbol "$sdk_root/$path" "$expected"
+              case "$?" in
+                0) note "present  $expected, defined in $path" ;;
+                2) fail "no library at $sdk_root/$path, so $expected cannot be checked
+      install: Windows 11 SDK ${want_revision:-10.0.26100.7705}
+      needed by: build/WINDOWS_SDK_REQUIREMENTS" ;;
+                *) fail "$expected is not defined by $sdk_root/$path
+      install: Windows 11 SDK ${want_revision:-10.0.26100.7705}; this library is an OLDER servicing revision
+      needed by: build/WINDOWS_SDK_REQUIREMENTS. The header that declares this
+      symbol may well be current -- a compile would succeed and the LINK would
+      fail, which the compile-only gate cannot catch" ;;
+              esac
+              ;;
             version)
               got_version="$(windows_file_version "$sdk_root/$path" || true)"
               if [ -z "$got_version" ]; then

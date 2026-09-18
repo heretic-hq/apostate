@@ -126,6 +126,7 @@ case "$(uname -s)" in
       "windows_sdk_revision = \"${_sdk_revision:-unknown}\""
       "vs_components_sha256 = \"$(shasum -a 256 "$REPO_ROOT/build/WINDOWS_VS_COMPONENTS" | cut -d' ' -f1)\""
       "sdk_requirements_sha256 = \"$(shasum -a 256 "$REPO_ROOT/build/WINDOWS_SDK_REQUIREMENTS" | cut -d' ' -f1)\""
+      "sdk_packages_sha256 = \"$(shasum -a 256 "$REPO_ROOT/build/WINDOWS_SDK_PACKAGES" | cut -d' ' -f1)\""
     )
     unset _vs_version _toolset _sdk_version _sdk_revision
     ;;

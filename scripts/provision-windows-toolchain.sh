@@ -322,16 +322,20 @@ fi
 # skipped this install entirely and never touched the headers.
 #
 # So the predicate is now build/WINDOWS_SDK_REQUIREMENTS -- the revision table
-# -- and the features requested include the desktop C++ headers and libraries,
-# not just the debuggers. Option ids are Microsoft's, taken from
-# microsoft/WindowsAppSDK build/scripts/Install-WindowsSdkISO.ps1:11, which
-# requests OptionId.DesktopCPPx64, OptionId.DesktopCPPx86 and
-# OptionId.WindowsDesktopDebuggers among others. Never Microsoft's
-# "/features +", which installs everything on the target with the least disk.
+# -- and the payload comes from two places rather than one, because they are
+# different jobs with different costs:
 #
-# The installer is pinned by URL AND by SHA-256, because a pinned URL only
-# promises a name. build/WINDOWS_SDK_INSTALLER_URL is the version-specific link
-# for one release from Microsoft's own download table, not a "latest SDK" link.
+#   The headers and the x64 libraries are overlaid from Microsoft's own NuGet
+#   payload packages, pinned by digest in build/WINDOWS_SDK_PACKAGES. Seconds,
+#   and the bytes that land are the bytes we named.
+#
+#   The Debugging Tools come from the pinned winsdksetup.exe, which does that
+#   one feature in about 40 seconds, and only when dbghelp.dll is missing.
+#
+# Asking winsdksetup.exe for the headers instead is what the first attempt did,
+# and it does not finish: 25 minutes, package 004 of many, exit 124. The
+# reasoning and the numbers are in build/WINDOWS_SDK_PACKAGES. The installer is
+# still pinned by URL and by SHA-256, because a pinned URL only promises a name.
 #
 # Which Include/Lib DIRECTORY the build uses is not decided here and cannot
 # drift: build/vs_toolchain.py hardcodes SDK_VERSION = '10.0.26100.0' and
@@ -366,6 +370,10 @@ while IFS=' ' read -r kind path expected; do
       windows_sdk_has_symbol "$sdk_root/$path" "$expected" ||
         sdk_gaps+=("$expected is not declared under $path")
       ;;
+    libsymbol)
+      windows_sdk_lib_has_symbol "$sdk_root/$path" "$expected" ||
+        sdk_gaps+=("$expected is not defined by $path")
+      ;;
     version)
       got="$(windows_file_version "$sdk_root/$path" || true)"
       if [ -z "$got" ]; then
@@ -393,73 +401,140 @@ url="$(pin WINDOWS_SDK_INSTALLER_URL)"
 version="$(pin WINDOWS_SDK_INSTALLER_VERSION)"
 want_sha="$(pin WINDOWS_SDK_INSTALLER_SHA256)"
 
-installer_exe="$work/winsdksetup.exe"
+sdk_version="$(windows_sdk_version)"
 
-say "downloading pinned Windows SDK $version installer"
-curl --fail --location --silent --show-error --retry 3 --output "$installer_exe" "$url" ||
-  die "could not download the pinned SDK installer from $url"
-[ -s "$installer_exe" ] || die "downloaded installer is empty"
+# --- the headers and libraries, from the pinned NuGet payload packages -------
+#
+# Not from winsdksetup.exe. Measured on blacksmith-2vcpu-windows-2025: asking it
+# for OptionId.DesktopCPPx64, OptionId.DesktopCPPx86 and the debuggers ran the
+# full 25-minute bound and had reached only package 004 before being killed,
+# exit 124. Slow rather than stuck, but a quarter of the gate's budget before
+# the first compile, on every run, is not a price worth paying for a file copy.
+# build/WINDOWS_SDK_PACKAGES has the numbers and the provenance argument.
+overlaid=0
+while IFS=' ' read -r pkg sha dest; do
+  [ -n "$pkg" ] || continue
+  nupkg="$work/$pkg.$version.nupkg"
+  pkg_url="https://api.nuget.org/v3-flatcontainer/$pkg/$version/$pkg.$version.nupkg"
+  say "downloading $pkg $version"
+  curl --fail --location --silent --show-error --retry 3 --output "$nupkg" "$pkg_url" ||
+    die "could not download $pkg_url
+build/WINDOWS_SDK_PACKAGES names this package and
+build/WINDOWS_SDK_INSTALLER_VERSION names the version. A 404 means that
+combination does not exist on nuget.org; check the version before repinning."
+  got_pkg_sha="$(sha256sum "$nupkg" | cut -d' ' -f1)"
+  [ "$got_pkg_sha" = "$sha" ] ||
+    die "$pkg digest does not match build/WINDOWS_SDK_PACKAGES
+  expected $sha
+  got      $got_pkg_sha"
+  say "$pkg sha256 $got_pkg_sha ($(( $(wc -c < "$nupkg") / 1048576 )) MB)"
 
-got_sha="$(sha256sum "$installer_exe" | cut -d' ' -f1)"
-say "installer sha256 $got_sha"
-[ "$got_sha" = "$want_sha" ] ||
-  die "installer digest does not match build/WINDOWS_SDK_INSTALLER_SHA256
+  # A .nupkg is a zip. 7z is already required on this target for
+  # scripts/package-artifact.sh, so nothing new is needed to read one.
+  extract="$work/x-$pkg"
+  mkdir -p "$extract"
+  7z x -bso0 -bsp0 -y -o"$extract" "$nupkg" > /dev/null ||
+    die "could not extract $nupkg"
+
+  case "$dest" in
+    include)
+      src="$extract/c/Include/$sdk_version"
+      [ -d "$src" ] ||
+        die "$pkg has no c/Include/$sdk_version; the package layout changed or
+build/WINDOWS_SDK_VERSION no longer matches the packages' directory name."
+      say "overlaying headers into $sdk_root/Include/$sdk_version"
+      mkdir -p "$sdk_root/Include/$sdk_version"
+      cp -rf "$src/." "$sdk_root/Include/$sdk_version/" ||
+        die "could not overlay headers; the SDK tree may not be writable"
+      ;;
+    lib-x64)
+      for part in um ucrt; do
+        src="$extract/c/$part/x64"
+        [ -d "$src" ] || die "$pkg has no c/$part/x64"
+        say "overlaying $part x64 libraries into $sdk_root/Lib/$sdk_version/$part/x64"
+        mkdir -p "$sdk_root/Lib/$sdk_version/$part/x64"
+        cp -rf "$src/." "$sdk_root/Lib/$sdk_version/$part/x64/" ||
+          die "could not overlay $part x64 libraries"
+      done
+      ;;
+    *) die "build/WINDOWS_SDK_PACKAGES has an unknown destination '$dest'" ;;
+  esac
+  overlaid=$((overlaid + 1))
+done < <(windows_sdk_packages)
+say "overlaid $overlaid pinned SDK package(s) at $version"
+
+# --- the Debugging Tools, from the pinned installer --------------------------
+#
+# These are not in the NuGet payload packages, and winsdksetup.exe installs this
+# one feature in about 40 seconds, so it stays. Only requested when it is
+# actually missing, which keeps the common case free.
+if [ ! -f "$dbghelp" ]; then
+  installer_exe="$work/winsdksetup.exe"
+
+  say "downloading pinned Windows SDK $version installer"
+  curl --fail --location --silent --show-error --retry 3 --output "$installer_exe" "$url" ||
+    die "could not download the pinned SDK installer from $url"
+  [ -s "$installer_exe" ] || die "downloaded installer is empty"
+
+  got_sha="$(sha256sum "$installer_exe" | cut -d' ' -f1)"
+  say "installer sha256 $got_sha"
+  [ "$got_sha" = "$want_sha" ] ||
+    die "installer digest does not match build/WINDOWS_SDK_INSTALLER_SHA256
   expected $want_sha
   got      $got_sha
 The pinned URL served different bytes. Verify the release before repinning."
 
-# A DEADLINE ENFORCED BY THE LAYER ABOVE THE THING BEING MEASURED IS THE WRONG
-# INSTRUMENT, BECAUSE IT DESTROYS EXACTLY THE EVIDENCE YOU NEEDED. That is the
-# general rule; here is the instance that taught it. The first run of this phase
-# ran winsdksetup.exe for 43m43s, the 45-minute job timeout killed the step, the
-# run was reported as "cancelled", and the installer's output went with it --
-# leaving no way to tell a slow install from a stuck one, which is the only
-# question that mattered. The rule applies to every timeout in this repository
-# that is owned by a workflow rather than by the script it bounds.
-#
-# So: a deadline this script owns, the installer's own /log, and the tail
-# printed whether it succeeds, fails or runs out of time.
-APOSTATE_SDK_INSTALL_TIMEOUT="${APOSTATE_SDK_INSTALL_TIMEOUT:-25m}"
-sdk_log="$work/winsdk-install.log"
-say "installing SDK $version: desktop C++ headers and libraries, and the debuggers"
-say "bounded at $APOSTATE_SDK_INSTALL_TIMEOUT; log to $sdk_log"
-started="$(date -u +%s)"
-# MSYS rewrites arguments that look like paths, so /features would arrive as a
-# Windows path and the installer would reject it.
-set +e
-MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-  timeout --signal=TERM --kill-after=60 "$APOSTATE_SDK_INSTALL_TIMEOUT" \
-  "$installer_exe" /features \
-    OptionId.DesktopCPPx64 \
-    OptionId.DesktopCPPx86 \
-    OptionId.WindowsDesktopDebuggers \
-    /quiet /norestart /log "$(cygpath -w "$sdk_log" 2>/dev/null || printf '%s' "$sdk_log")"
-sdk_rc=$?
-set -e
-elapsed="$(( $(date -u +%s) - started ))"
-say "winsdksetup.exe exited $sdk_rc after ${elapsed}s"
+  # A DEADLINE ENFORCED BY THE LAYER ABOVE THE THING BEING MEASURED IS THE WRONG
+  # INSTRUMENT, BECAUSE IT DESTROYS EXACTLY THE EVIDENCE YOU NEEDED. That is the
+  # general rule; here is the instance that taught it. An earlier version of this
+  # phase ran winsdksetup.exe for 43m43s, the 45-minute job timeout killed the
+  # step, the run was reported as "cancelled", and the installer's output went
+  # with it -- leaving no way to tell a slow install from a stuck one, which was
+  # the only question that mattered. The rule applies to every timeout in this
+  # repository that is owned by a workflow rather than by the script it bounds.
+  #
+  # So: a deadline this script owns, the installer's own /log, and the tail
+  # printed whether it succeeds, fails or runs out of time.
+  APOSTATE_SDK_INSTALL_TIMEOUT="${APOSTATE_SDK_INSTALL_TIMEOUT:-10m}"
+  sdk_log="$work/winsdk-install.log"
+  say "installing OptionId.WindowsDesktopDebuggers, bounded at $APOSTATE_SDK_INSTALL_TIMEOUT"
+  started="$(date -u +%s)"
+  # MSYS rewrites arguments that look like paths, so /features would arrive as a
+  # Windows path and the installer would reject it.
+  set +e
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+    timeout --signal=TERM --kill-after=60 "$APOSTATE_SDK_INSTALL_TIMEOUT" \
+    "$installer_exe" /features OptionId.WindowsDesktopDebuggers \
+      /quiet /norestart /log "$(cygpath -w "$sdk_log" 2>/dev/null || printf '%s' "$sdk_log")"
+  sdk_rc=$?
+  set -e
+  elapsed="$(( $(date -u +%s) - started ))"
+  say "winsdksetup.exe exited $sdk_rc after ${elapsed}s"
 
-# Whatever happened, show what the installer said. winsdksetup writes several
-# files beside the path given to /log, so take them all.
-for log in "$sdk_log" "$sdk_log".*; do
-  [ -f "$log" ] || continue
-  printf -- '----- %s (last 40 lines) -----\n' "$(basename "$log")"
-  tail -40 "$log" | tr -d '\r'
-done
+  # Whatever happened, show what the installer said. winsdksetup writes several
+  # files beside the path given to /log, so take them all.
+  for log in "$sdk_log" "$sdk_log".*; do
+    [ -f "$log" ] || continue
+    printf -- '----- %s (last 40 lines) -----\n' "$(basename "$log")"
+    tail -40 "$log" | tr -d '\r' || true
+  done
 
-# 3010 is ERROR_SUCCESS_REBOOT_REQUIRED: installed, reboot pending. The files
-# are in place, and the requirement re-check below is the real success signal.
-case "$sdk_rc" in
-  0) ;;
-  3010) say "installer reported a pending reboot (3010); files are in place" ;;
-  124|137) die "winsdksetup.exe did not finish within $APOSTATE_SDK_INSTALL_TIMEOUT.
-Its log tail is above. Raise APOSTATE_SDK_INSTALL_TIMEOUT if the install is
-merely slow on this runner class; if it is stuck, the pinned SDK revision has
-to be baked into the runner image instead of installed per job." ;;
-  *) die "winsdksetup.exe exited $sdk_rc; its log tail is above" ;;
-esac
+  # 3010 is ERROR_SUCCESS_REBOOT_REQUIRED: installed, reboot pending. The files
+  # are in place, and the requirement re-check below is the real success signal.
+  case "$sdk_rc" in
+    0) ;;
+    3010) say "installer reported a pending reboot (3010); files are in place" ;;
+    124|137) die "winsdksetup.exe did not finish within $APOSTATE_SDK_INSTALL_TIMEOUT.
+Its log tail is above. The Debuggers feature alone has measured about 40
+seconds, so a timeout here means something changed rather than that the bound
+is too tight." ;;
+    *) die "winsdksetup.exe exited $sdk_rc; its log tail is above" ;;
+  esac
+else
+  say "debugging tools already present; not running the SDK installer"
+fi
 
-say "SDK version directories after install"
+say "SDK version directories after provisioning"
 list_versions
 
 # Re-test the same requirements, not a proxy for them. An installer that
@@ -473,6 +548,10 @@ while IFS=' ' read -r kind path expected; do
     symbol)
       windows_sdk_has_symbol "$sdk_root/$path" "$expected" ||
         remaining+=("$expected is still not declared under $path")
+      ;;
+    libsymbol)
+      windows_sdk_lib_has_symbol "$sdk_root/$path" "$expected" ||
+        remaining+=("$expected is still not defined by $path")
       ;;
     version)
       got="$(windows_file_version "$sdk_root/$path" || true)"
@@ -488,11 +567,14 @@ while IFS=' ' read -r kind path expected; do
 done < <(windows_sdk_requirements)
 
 if [ "${#remaining[@]}" -gt 0 ]; then
-  printf 'error: winsdksetup.exe exited %s but the SDK still does not satisfy:\n' "$sdk_rc" >&2
+  printf 'error: provisioning finished but the SDK still does not satisfy:\n' >&2
   for gap in "${remaining[@]}"; do printf '  - %s\n' "$gap" >&2; done
-  printf 'The pinned installer is %s. Either the requested features do not carry\n' "$version" >&2
-  printf 'these files, or this image pins an older SDK some other way. Check\n' >&2
-  printf 'build/WINDOWS_SDK_REQUIREMENTS against the installer'"'"'s /list output.\n' >&2
+  printf 'The pinned revision is %s. A missing symbol here means either that\n' "$version" >&2
+  printf 'build/WINDOWS_SDK_PACKAGES overlaid the wrong tree, or that the symbol is\n' >&2
+  printf 'not in this SDK revision at all and the row in\n' >&2
+  printf 'build/WINDOWS_SDK_REQUIREMENTS should not be there. Confirm against the\n' >&2
+  printf 'NuGet package before assuming the runner is at fault -- that check runs\n' >&2
+  printf 'from any host and takes half a minute.\n' >&2
   exit 1
 fi
 say "the Windows SDK satisfies every pinned requirement at revision $version"

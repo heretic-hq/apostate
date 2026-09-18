@@ -18,7 +18,8 @@ CI build alone does not establish it.
 | `build/args/windows-x64.gn` | Windows x64 GN settings |
 | `build/MAC_SDK_VERSION` | Exact macOS SDK version, `26.5` |
 | `build/MAC_SDK_BUILD` | SDK `ProductBuildVersion`, `25F70` |
-| `build/WINDOWS_SDK_INSTALLER_URL` | Version-specific 10.0.26100.7705 SDK installer, for the headers, libs and Debuggers |
+| `build/WINDOWS_SDK_INSTALLER_URL` | Version-specific 10.0.26100.7705 SDK installer, for the Debugging Tools feature |
+| `build/WINDOWS_SDK_PACKAGES` | The SDK's headers and x64 libraries as digest-pinned NuGet payload packages |
 | `build/WINDOWS_SDK_INSTALLER_VERSION` | Which SDK release that URL serves, `10.0.26100.7705` |
 | `build/WINDOWS_SDK_INSTALLER_SHA256` | Digest of those installer bytes |
 | `build/WINDOWS_SDK_REQUIREMENTS` | SDK requirements a servicing *revision* decides, which no directory name shows |
@@ -132,11 +133,11 @@ each entry's name and complete patch bytes, in series order with NUL
 separators. Any edit to any listed patch changes that digest, even if the
 series file is unchanged.
 
-Windows builds record six more fields, because `windows-x64` is the only
+Windows builds record seven more fields, because `windows-x64` is the only
 target whose toolchain comes from the runner rather than from a pin:
 `visual_studio_version`, `msvc_toolset_version`, `windows_sdk_version`,
-`windows_sdk_revision`, `vs_components_sha256` and
-`sdk_requirements_sha256`. They are attribution, not pins — see
+`windows_sdk_revision`, `vs_components_sha256`, `sdk_requirements_sha256` and
+`sdk_packages_sha256`. They are attribution, not pins — see
 [Provisioning](#provisioning). They sit before `[outputs]`, so they change
 `manifest_sha256` and leave `outputs_sha256` alone.
 
@@ -459,11 +460,32 @@ the right instrument differs per requirement:
 | Requirement | Kind | Instrument | Source |
 | --- | --- | --- | --- |
 | `IUIAutomationClientInfo`, `IUIAutomationClientInfoSource` declared under `Include/<version>/um` | symbol | the identifier must appear in some header there | `ui/accessibility/platform/uia_client_info_source_win.cc:24,30,56,66` uses both with no guard; SDK ≥ 10.0.26100.7705 supplies them |
+| `CLSID_CUIAutomationClientInfoSource` defined in `Lib/<version>/um/x64/uuid.lib` | libsymbol | a fixed-string search over the archive's bytes | the header only *declares* it `EXTERN_C const CLSID`; `uia_client_info_source_win.cc:144` passes it to `CoCreateInstance`, so an old library compiles clean and fails at link |
 | `Debuggers/x64/dbghelp.dll` ≥ `10.0.26100.3323` | version | its `FileVersion`, compared as a dotted version | `docs/windows_build_instructions.md:57-59`, "needed in order to support reading the large-page PDBs that Chrome uses to allow greater-than 4 GiB PDBs" |
 
 Headers carry no version resource, which is why the first is asserted by
 symbol rather than by number. Where a version resource does exist the number
 wins, because a number can be compared and a symbol has to be chosen.
+
+The library row is the one worth dwelling on, because without it this section
+would have shipped a check that passed for the wrong reason. A header can
+declare `EXTERN_C const CLSID X` while the library that *defines* `X` is an
+older revision: the compile succeeds and the link does not. The series compile
+gate never links. So a headers-only check would have turned the gate **green**
+and left the four-target build to fail afterwards, at four times the price,
+with the preflight still reporting the SDK as satisfactory. Asserting the
+header without the library is a check that does not reach the thing that
+breaks — the same shape as the earlier mistakes in this section, arrived at
+from a different direction. When a header declares what a library defines,
+both need a row.
+
+Verified against Microsoft's own bytes rather than reasoned about: the
+`Microsoft.Windows.SDK.CPP.x64` package at `10.0.26100.4188` carries an
+8410 KB `Uuid.Lib` without that CLSID and the one at `10.0.26100.7705` carries
+an 8726 KB `Uuid.Lib` with it. The filename is matched case-insensitively,
+because Windows filesystems are and a copy keeps whichever name was already
+there — `uuid.lib` and `Uuid.Lib` are one file, and a check that spells only
+one of them fails on a tree that is entirely correct.
 
 **Everything else revision-sensitive that was looked for, and what it is.**
 
@@ -520,12 +542,47 @@ build, the gate and the probe all run it. It is idempotent in both phases:
 with everything present it does nothing and exits 0, so an image that gains a
 component later stops paying for it automatically.
 
-The SDK's Debugging Tools feature comes from the pinned `winsdksetup.exe`.
-`build/WINDOWS_SDK_INSTALLER_URL` is the version-specific 10.0.26100 link
-rather than a "latest SDK" link, `build/WINDOWS_SDK_INSTALLER_VERSION` records
-which release that serves, and `build/WINDOWS_SDK_INSTALLER_SHA256` is checked
-before the installer runs, because a pinned URL only promises a name. Only
-`OptionId.WindowsDesktopDebuggers` is requested.
+The SDK's **headers and x64 libraries** are overlaid from Microsoft's own NuGet
+payload packages, `Microsoft.Windows.SDK.CPP` and
+`Microsoft.Windows.SDK.CPP.x64`, listed with a SHA-256 each in
+`build/WINDOWS_SDK_PACKAGES`. The version comes from
+`build/WINDOWS_SDK_INSTALLER_VERSION`, so headers, libraries and Debugging
+Tools are one revision by construction with no second version to keep in step,
+and the URL is derived from the id and version rather than pinned separately.
+A `.nupkg` is a zip, and `7z` is already required on this target for
+packaging, so reading one needs nothing new.
+
+This replaced `winsdksetup.exe` for the headers, and the reason is measured.
+Asked for `OptionId.DesktopCPPx64`, `OptionId.DesktopCPPx86` and
+`OptionId.WindowsDesktopDebuggers` on `blacksmith-2vcpu-windows-2025`, the
+installer ran the full 25-minute bound and had reached only package 004 of
+many before being killed — exit 124, slow rather than stuck, but a quarter of
+the gate's 180-minute budget spent before the first compile on every run. The
+overlay does the same job in **12 seconds including the 213 MB download**,
+measured end to end against a tree seeded with a real older revision's
+headers.
+
+It is also *better* provenance, not a compromise for speed.
+`winsdksetup.exe` is a 1.4 MB bootstrapper: its bytes can be pinned, and it
+then downloads whatever the service hands it. The packages are the payload
+itself, pinned by digest, so what lands on the runner is what the repository
+names. That is the difference between an unpinned network dependency and a
+pinned artifact, which is what this repository requires of every other input.
+
+The **Debugging Tools** still come from the pinned `winsdksetup.exe`, because
+they are not in those packages and that one feature installs in about 40
+seconds. `build/WINDOWS_SDK_INSTALLER_URL` is the version-specific link rather
+than a "latest SDK" link, and `build/WINDOWS_SDK_INSTALLER_SHA256` is checked
+before it runs, because a pinned URL only promises a name. Only
+`OptionId.WindowsDesktopDebuggers` is requested, and only when `dbghelp.dll` is
+actually missing.
+
+One mixed-revision consequence, named rather than hidden:
+`Lib/<version>/um/x86` stays at whatever revision the image carries, because
+the x86 libraries are not overlaid. Nothing links x86 here — there is no
+`windows-x86` target, and the only reason an x86 toolchain is configured at all
+is that `build/toolchain/win/BUILD.gn` instantiates `win_toolchains("x86")`
+beside `x64`, whose setup only requires those directories to exist.
 
 The Visual Studio components come from the VS installer's `modify --add`. The
 installer is located rather than hardcoded — derived from the resolved install
@@ -561,12 +618,17 @@ an undocumented one was demonstrated against a stub installer rather than
 against a real reboot-required install, so that half is proven code and
 reasoned premise, not a measurement — which is why the re-check exists.
 
-One honest limit. The component payload is fetched from Microsoft at whatever
-servicing version the installed Build Tools is on, and there is no digest we
-can pin, unlike the SDK installer. That is a per-job network dependency inside
-every Windows build — small, 9 MB and 23 seconds measured, but real. The VS
-package cache on the image is 44 MB, so the payload does come off the network
-rather than out of a local cache.
+One honest limit, and it is now confined to the Visual Studio component. The
+ATL payload is fetched from Microsoft at whatever servicing version the
+installed Build Tools is on, and there is no digest we can pin — a per-job
+network dependency, small at 9 MB and 23 seconds measured, but real. The VS
+package cache on the image is 44 MB, so it does come off the network rather
+than out of a local cache.
+
+The Windows SDK used to share that limit and no longer does. Moving its
+headers and libraries to digest-pinned NuGet packages turned the largest
+unpinned input on this target into a pinned artifact, which is the same
+treatment every other build input gets. The VS component is what is left.
 
 It does not widen the reproducibility boundary as much as it first appears:
 `build/args/windows-x64.gn` deliberately pins no toolchain path, so the entire
@@ -577,10 +639,11 @@ rather than opening a new hole. What is pinned is the request —
 bounds the VS version to `[17.0,18.0)`.
 
 "Already unpinned" is an argument for recording what we got, not for continuing
-not to, so `scripts/build.sh` writes six fields into `build/MANIFEST.lock` on
+not to, so `scripts/build.sh` writes seven fields into `build/MANIFEST.lock` on
 Windows builds: the resolved Visual Studio instance version, the MSVC toolset
 version, the SDK directory version, the SDK servicing revision, and digests of
-`build/WINDOWS_VS_COMPONENTS` and `build/WINDOWS_SDK_REQUIREMENTS`. That makes
+`build/WINDOWS_VS_COMPONENTS`, `build/WINDOWS_SDK_REQUIREMENTS` and
+`build/WINDOWS_SDK_PACKAGES`. That makes
 the input *attributed* rather than pinned: a reproducibility comparison that
 disagrees can now be traced to a toolset or SDK upgrade instead of being
 blamed on the patches. Pinning it properly means building the runner image

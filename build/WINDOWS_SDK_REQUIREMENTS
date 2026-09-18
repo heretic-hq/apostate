@@ -15,6 +15,12 @@
 #       where the revision is legible only from the headers' contents, which is
 #       the normal case: headers carry no version resource.
 #
+#   libsymbol <library>  <identifier>
+#       The library must define the identifier. A .lib carries its symbol names
+#       as plain strings, so this needs no toolchain. Required wherever a header
+#       DECLARES something a library DEFINES, because those two can come from
+#       different revisions and the compile will not notice.
+#
 #   version <file>  <minimum>
 #       The file's FileVersion must be >= the minimum, compared as a dotted
 #       version. Used where a real version resource exists.
@@ -49,6 +55,18 @@
 #   these rows name the `um` DIRECTORY: a row pinned to um/UIAutomationClient.h,
 #   the header the interface names, would have failed on a correct SDK.
 #
+#   The UIA requirement is header AND library, and the library half is the one
+#   that would have cost the most. um/UIAutomationCore.h only DECLARES
+#   "EXTERN_C const CLSID CLSID_CUIAutomationClientInfoSource"; the definition
+#   lives in a library, found in the pinned package's c/um/x64/Uuid.Lib, and
+#   uia_client_info_source_win.cc:144 passes that CLSID to CoCreateInstance. So
+#   an overlay or an install that refreshed only the headers would COMPILE
+#   clean and fail at LINK -- and the series compile gate never links, so the
+#   gate would have gone green and the four-target build would have failed
+#   afterwards at four times the price. That is the defect class this whole
+#   sequence has been about: a check that passes because it does not reach the
+#   thing that breaks. Hence the libsymbol row.
+#
 # EXPERIMENTAL_IDCompositionDevice6 WAS listed here and should not have been.
 #   It is used unconditionally by ui/gl/direct_composition_support.cc:788,
 #   ui/gl/dc_layer_tree.cc:147 and ui/gl/dc_layer_tree.h:486, and searching the
@@ -80,7 +98,9 @@
 # because a number that can be compared beats a symbol that has to be chosen.
 # Confirm the symbol IS in the pinned SDK before adding it -- the NuGet package
 # above makes that a 30-second check from any host -- because an assertion that
-# fails on a correct toolchain is worse than no assertion at all.
+# fails on a correct toolchain is worse than no assertion at all. And if a
+# header DECLARES what a library DEFINES, add both rows: only the compile
+# notices the header, and only the link notices the library.
 #
 # The list cannot be completed by reading. An unconditional use of a too-new
 # interface is a compile error in whichever translation unit uses it, so the
@@ -89,4 +109,5 @@
 
 symbol	Include/<version>/um	IUIAutomationClientInfoSource
 symbol	Include/<version>/um	IUIAutomationClientInfo
+libsymbol	Lib/<version>/um/x64/uuid.lib	CLSID_CUIAutomationClientInfoSource
 version	Debuggers/x64/dbghelp.dll	10.0.26100.3323

@@ -1,0 +1,55 @@
+# The pinned Windows SDK's headers and x64 libraries, as Microsoft's own NuGet
+# packages, with the digest of each.
+#
+# Three whitespace-separated columns. Lines starting with # are comments.
+#
+#   <nuget-package-id>  <sha256-of-the-nupkg>  <destination>
+#
+# The version comes from build/WINDOWS_SDK_INSTALLER_VERSION, so the headers,
+# the libraries and the Debugging Tools are all one revision by construction and
+# there is no second version to keep in step. The URL is derived from the id and
+# the version: nuget.org's flat container is
+# https://api.nuget.org/v3-flatcontainer/<id>/<version>/<id>.<version>.nupkg
+#
+# <destination> says where the package's payload is overlaid, relative to the
+# SDK root, with <version> replaced by build/WINDOWS_SDK_VERSION:
+#
+#   include   c/Include/<version>/  ->  <SDK>/Include/<version>/
+#   lib-x64   c/um/x64/ and c/ucrt/x64/  ->  <SDK>/Lib/<version>/{um,ucrt}/x64/
+#
+# WHY NOT THE SDK INSTALLER
+#
+# Because it does not finish. Measured on blacksmith-2vcpu-windows-2025:
+# winsdksetup.exe asked for OptionId.DesktopCPPx64, OptionId.DesktopCPPx86 and
+# OptionId.WindowsDesktopDebuggers ran the full 25-minute bound and had reached
+# only package 004, exit 124. It was making progress -- slow, not stuck -- but a
+# quarter of the gate's 180-minute budget spent before the first compile, every
+# run, is not a cost worth paying for a file copy. For contrast on the same
+# runner: the ATL component through the VS installer takes 26 seconds, and the
+# Debuggers feature alone through this same winsdksetup takes about 40, which is
+# why the Debuggers still come from it.
+#
+# The packages are also better provenance than the installer, not worse.
+# winsdksetup.exe is a 1.4 MB bootstrapper: we can pin its bytes, and then it
+# downloads whatever the service gives it. These are the payload itself, pinned
+# by digest, so what lands on the runner is what this file names.
+#
+# WHAT IS AND IS NOT COVERED
+#
+# The x86 libraries are deliberately not overlaid, so <SDK>/Lib/<version>/um/x86
+# stays at whatever revision the image carries. Nothing links x86 here: no
+# windows-x86 target exists, and the only reason an x86 toolchain is configured
+# at all is that build/toolchain/win/BUILD.gn instantiates win_toolchains("x86")
+# alongside x64, whose setup only requires the directories to EXIST. A mixed
+# revision is worth naming rather than hiding, and this is where it is named.
+#
+# The libraries are overlaid and not only the headers, because the headers alone
+# would compile and then fail at link. um/UIAutomationCore.h declares
+# EXTERN_C const CLSID CLSID_CUIAutomationClientInfoSource, which is DEFINED in
+# a library -- found in this package's c/um/x64/Uuid.Lib -- and
+# ui/accessibility/platform/uia_client_info_source_win.cc:144 passes it to
+# CoCreateInstance. The series compile gate never links, so the gate would not
+# have caught that and a nightly build would have.
+
+microsoft.windows.sdk.cpp	ff455660bee071a744715a9665666fa29c07681579d3d815959a9eec5a556424	include
+microsoft.windows.sdk.cpp.x64	ad6ce90ff94010699d29548b3c2b1e52c89eb81143e2199155d9a5c38001b52b	lib-x64

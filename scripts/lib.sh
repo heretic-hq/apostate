@@ -188,6 +188,16 @@ windows_sdk_requirements() {
     awk 'NF == 3 { print }'
 }
 
+# The pinned SDK payload packages, as "<nuget-id> <sha256> <destination>"
+# triples. See build/WINDOWS_SDK_PACKAGES for why the headers and libraries come
+# from these rather than from winsdksetup.exe.
+windows_sdk_packages() {
+  local file="$REPO_ROOT/build/WINDOWS_SDK_PACKAGES"
+  [ -f "$file" ] || die "missing build/WINDOWS_SDK_PACKAGES"
+  sed -e 's/#.*//' -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//' "$file" |
+    awk 'NF == 3 { print }'
+}
+
 # Is <identifier> declared by any header under <directory>? Headers carry no
 # version resource, so their contents are the only evidence of which servicing
 # revision they came from. -r over one SDK subdirectory rather than a named
@@ -200,6 +210,41 @@ windows_sdk_has_symbol() {
   # on the critical path of every Windows job, and the common case is a match.
   # -q stops at the first one instead of listing them all.
   grep -rqF --include='*.h' -- "$symbol" "$dir" 2>/dev/null
+}
+
+# Resolve a path whose last component may differ in case. Windows filesystems
+# are case-insensitive, so the SDK's uuid.lib and a package's Uuid.Lib are the
+# same file and a copy keeps whichever name was already there. A check that
+# spells one of them fails on a tree that is entirely correct.
+windows_resolve_nocase() {
+  local path="$1" dir base candidate
+  if [ -e "$path" ]; then printf '%s' "$path"; return 0; fi
+  dir="$(dirname "$path")"; base="$(basename "$path")"
+  [ -d "$dir" ] || return 1
+  for candidate in "$dir"/*; do
+    [ -e "$candidate" ] || continue
+    if [ "$(printf '%s' "$(basename "$candidate")" | tr '[:upper:]' '[:lower:]')" = \
+         "$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')" ]; then
+      printf '%s' "$candidate"; return 0
+    fi
+  done
+  return 1
+}
+
+# Does <library> define <symbol>? A .lib is an archive that carries its symbol
+# names as plain strings, so a fixed-string search over the bytes answers it
+# without a toolchain.
+#
+# This kind of row exists because of a failure that would have gone GREEN. A
+# header can declare EXTERN_C const CLSID X while the library that DEFINES X is
+# an older revision: the compile succeeds, the link does not, and the series
+# gate never links. So the gate would have passed and the four-target build
+# would have failed afterwards at four times the price. Asserting the header
+# without the library is a check that does not reach the thing that breaks.
+windows_sdk_lib_has_symbol() {
+  local path="$1" symbol="$2" resolved
+  resolved="$(windows_resolve_nocase "$path")" || return 2
+  grep -qaF -- "$symbol" "$resolved" 2>/dev/null
 }
 
 # A file's FileVersion, as a bare dotted quad. Windows stamps a trailing

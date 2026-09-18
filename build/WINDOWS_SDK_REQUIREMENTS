@@ -1,0 +1,53 @@
+# Windows SDK requirements that a servicing REVISION decides, not the version.
+#
+# The SDK's directories and registry keys are named after the major build --
+# "10.0.26100.0" -- and carry no servicing revision at all. So
+# Include/10.0.26100.0/um existing is a true statement that answers nothing:
+# revision 4654 and revision 7705 are indistinguishable by presence. That is
+# how the sixth Windows defect got through a preflight that checks every
+# prerequisite directory. This file is the revision axis, asserted separately.
+#
+# Three whitespace-separated columns. Lines starting with # are comments.
+# "<version>" in a path is replaced with build/WINDOWS_SDK_VERSION.
+#
+#   symbol  <directory>  <identifier>
+#       The identifier must appear in some .h file under that directory. Used
+#       where the revision is legible only from the headers' contents, which is
+#       the normal case: headers carry no version resource.
+#
+#   version <file>  <minimum>
+#       The file's FileVersion must be >= the minimum, compared as a dotted
+#       version. Used where a real version resource exists.
+#
+# SOURCES
+#
+# .workspace/src/docs/windows_build_instructions.md:54-56 requires
+#   "[Windows 11 SDK] version 10.0.26100.7705", and build/WINDOWS_SDK_INSTALLER_*
+#   pins that exact release. Chromium names a revision, not a floor, and the
+#   pin travels with build/CHROMIUM_VERSION.
+#
+# .workspace/src/docs/windows_build_instructions.md:57-59 requires
+#   "(Windows 11) SDK Debugging Tools 10.0.26100.3323 or higher. This version of
+#   the Debugging tools is needed in order to support reading the large-page
+#   PDBs that Chrome uses to allow greater-than 4 GiB PDBs." That one IS a
+#   floor, and dbghelp.dll carries a version resource, so it is checked
+#   numerically rather than by symbol.
+#
+# IUIAutomationClientInfoSource and IUIAutomationClientInfo are used
+#   unconditionally by ui/accessibility/platform/uia_client_info_source_win.cc
+#   (lines 24, 30, 56, 66) with no preprocessor guard and no __has_include, so
+#   an older 26100 revision is a hard compile error rather than a silently
+#   disabled feature. Measured: the windows-x64 gate reached 26,642 of 33,797
+#   edges on SDK 10.0.26100.4654 and failed with
+#   "error: unknown type name 'IUIAutomationClientInfo'".
+#
+# ADDING A ROW
+#
+# A row belongs here when a build input's adequacy depends on an SDK servicing
+# revision and presence cannot tell you. Cite the consumer and, if it exists,
+# the run that found it. Prefer a `version` row when a version resource exists,
+# because a number that can be compared beats a symbol that has to be chosen.
+
+symbol	Include/<version>/um	IUIAutomationClientInfoSource
+symbol	Include/<version>/um	IUIAutomationClientInfo
+version	Debuggers/x64/dbghelp.dll	10.0.26100.3323

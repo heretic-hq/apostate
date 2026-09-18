@@ -159,6 +159,63 @@ windows_vs_component_probes() {
     awk 'NF == 2 { print }'
 }
 
+# The pinned SDK version that names the Include/Lib directories. Mirrors the
+# constant build/vs_toolchain.py hardcodes; scripts/configure.sh fails the
+# build if the two disagree.
+windows_sdk_version() {
+  local file="$REPO_ROOT/build/WINDOWS_SDK_VERSION"
+  [ -f "$file" ] || die "missing build/WINDOWS_SDK_VERSION"
+  tr -d '[:space:]' < "$file"
+}
+
+# The SDK root. WINDOWSSDKDIR when the environment names one, otherwise the
+# default build/vs_toolchain.py itself falls back to.
+windows_sdk_root() {
+  printf '%s' "${WINDOWSSDKDIR:-/c/Program Files (x86)/Windows Kits/10}"
+}
+
+# The revision requirements, as "<kind> <path> <expected>" triples with
+# <version> already substituted. See build/WINDOWS_SDK_REQUIREMENTS for why a
+# revision needs its own table: the SDK's directories and registry keys are
+# named after the major build and carry no revision, so presence cannot
+# distinguish 4654 from 7705.
+windows_sdk_requirements() {
+  local file="$REPO_ROOT/build/WINDOWS_SDK_REQUIREMENTS" version
+  [ -f "$file" ] || die "missing build/WINDOWS_SDK_REQUIREMENTS"
+  version="$(windows_sdk_version)"
+  sed -e 's/#.*//' -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//' \
+      -e "s|<version>|$version|g" "$file" |
+    awk 'NF == 3 { print }'
+}
+
+# Is <identifier> declared by any header under <directory>? Headers carry no
+# version resource, so their contents are the only evidence of which servicing
+# revision they came from. -r over one SDK subdirectory rather than a named
+# file: Microsoft moves declarations between the UIAutomation* headers, and a
+# check pinned to the wrong filename would fail on a good SDK.
+windows_sdk_has_symbol() {
+  local dir="$1" symbol="$2"
+  [ -d "$dir" ] || return 2
+  grep -rlF --include='*.h' -- "$symbol" "$dir" >/dev/null 2>&1
+}
+
+# A file's FileVersion, as a bare dotted quad. Windows stamps a trailing
+# "(WinBuild.160101.0800)" onto it, which is not part of the version.
+windows_file_version() {
+  local path="$1" out
+  [ -f "$path" ] || return 1
+  out="$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' powershell -NoProfile \
+    -Command "(Get-Item -LiteralPath '$(cygpath -w "$path" 2>/dev/null || printf '%s' "$path")').VersionInfo.FileVersion" \
+    2>/dev/null | tr -d '\r' | awk '{print $1; exit}')"
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
+# Is $1 >= $2, comparing as dotted versions?
+version_at_least() {
+  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | tail -1)" = "$1" ] || [ "$1" = "$2" ]
+}
+
 # Prefer the build tools the checkout pins through DEPS over depot_tools'
 # wrappers. Their versions are then fixed by CHROMIUM_VERSION rather than
 # floating with whatever depot_tools revision happens to be present, which is

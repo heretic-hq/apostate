@@ -1,0 +1,437 @@
+Subject: ffmpeg: the software HEVC decoder on every shipped target, not just linux-x64
+
+Patch 0061 built the software HEVC decoder and wired the three decision points
+that consult it, but enabled it in exactly one ffmpeg target configuration.
+Verified at this revision: Chrome/linux/x64 is the only one of the 44
+configuration directories whose config_components.h carries
+CONFIG_HEVC_DECODER 1 and CONFIG_HEVC_PARSER 1. linux-arm64 and windows-x64
+still ship 0, so on those two the binary contradicts its own persona.
+
+Measured on a real GPU-less Linux x64 server running stock Chrome, which is
+what the fork has to answer as:
+
+  canPlayType('video/mp4; codecs="hev1.1.6.L93.B0"')  ""
+  MediaSource.isTypeSupported(hev1)                   false
+  mediaCapabilities.decodingInfo(hev1 1080p30)        supported:false
+
+H.264 answers 'probably', true and supported:true on the same host. Both
+admitted 152.0.7977.83 reference captures record the opposite for HEVC --
+corpus/blocks/gpu/m4-max-chrome-ddcd5fb54ca1.json and
+corpus/blocks/gpu/windows-chrome-20260910T140813Z-d04eff68ce21.json both have
+canPlayType 'probably', isTypeSupported true and decodingInfo supported,
+smooth and powerEfficient all true. Three page-visible answers, each one
+function call, each disagreeing with the claimed operating system on the host
+about 90% of deployments actually run.
+
+WHAT 0061 ALREADY DOES, AND WHAT IT LEAVES PER-TARGET. Its mechanism is
+platform-independent and already compiled everywhere: supported_types.cc
+returns true for HEVC Main and Main10 when IsDecoderBuiltInVideoCodec says a
+built-in decoder exists, that function asks avcodec_find_decoder(AV_CODEC_ID_
+HEVC), ffmpeg_common.cc widens the codec allow list to "h264,hevc" on the same
+condition, and ffmpeg_video_decoder.cc accepts the codec and rejects profiles
+above Main10. Every one of those is a runtime query, so each answers correctly
+the moment a target's own configuration registers the decoder. Nothing in this
+patch touches that code. What 0061 leaves per-target is the ffmpeg
+configuration itself, the two registration tables, and the GN source list.
+
+Nothing here touches allcodecs.c or parsers.c either, and it does not need to:
+they are in the universal source list at ffmpeg_generated.gni:90 and :147 and
+compile on all four targets already. What differs per target is only which
+configuration directory's codec_list.c the include path at
+third_party/ffmpeg/BUILD.gn:14 resolves to. So the registration 0061 added was
+never dead code -- it compiled everywhere and registered HEVC on one target.
+
+THE SWITCH SET, DERIVED BY DIFF RATHER THAN BY HAND. Five macros distinguish
+0061's patched linux/x64 configuration from the pristine one, and nothing else
+does: CONFIG_BSWAPDSP, CONFIG_HEVCPARSE and CONFIG_HEVC_SEI in config.h and
+config.asm, CONFIG_HEVC_DECODER and CONFIG_HEVC_PARSER in config_components.h
+and config_components.asm, each 0 -> 1. The same five, and only those five, are
+flipped here for Chrome/linux/arm64 and Chrome/win/x64, and the FFMPEG_
+CONFIGURATION comment gains the same two configure flags at the same anchor the
+generator uses. The two registration tables were byte-identical across all four
+targets before this patch and are byte-identical after it.
+
+The arm64 configuration has no config.asm or config_components.asm, because
+nothing assembles nasm there; only the two headers exist and only they are
+patched. windows-x64 reads Chrome/win/x64, not Chrome/win-msvc/x64:
+ffmpeg_options.gni:63 sets os_config = current_os and overrides it for Windows
+only under is_win && !is_clang, and build/args/windows-x64.gn:5 sets
+is_clang = true.
+
+THE ARM64 ASM QUESTION. 0061 pulls in an x86 asm wrapper for bswapdsp. There is
+no arm64 equivalent and none is added: bswapdsp.c:42-45 dispatches only
+#if ARCH_RISCV / #elif ARCH_X86 && HAVE_X86ASM, so on aarch64 the C
+implementation in that file is what runs and there is nothing to assemble.
+
+What arm64 does need is its own HEVC SIMD, and it needs it unconditionally.
+hevc/dsp.c:262 calls ff_hevc_dsp_init_aarch64 and hevc/pred.c:82 calls
+ff_hevc_pred_init_aarch64 inside plain #if ARCH_AARCH64, with no HAVE_NEON
+guard, so both symbols must link the moment HEVC is compiled for that
+architecture. libavcodec/aarch64/Makefile:79-87 lists nine objects for
+CONFIG_HEVC_DECODER, three of them under aarch64/h26x -- epel_neon.S,
+qpel_neon.S and sao_neon.S -- which a search for "hevc" in that directory does
+not find. Omitting them leaves 355 undefined ff_hevc_put_hevc_* and
+ff_hevc_sao_edge_filter_* symbols; with them the only unresolved HEVC symbol is
+ff_hevc_profiles, which libavcodec/profiles.c already supplies to every target
+from ffmpeg_generated.gni:149.
+
+THE GN CONDITION. 0061's stanza mixes the arch-independent HEVC core with
+x86-only asm, so its predicate cannot be widened along the OS axis without also
+widening it along the arch axis and handing libavcodec/x86/hevc/*.asm to arm64.
+Instead this follows the shape the rest of the generated file already has -- one
+block per disjoint source set with a disjunctive condition, as at lines 302,
+345, 378, 413 and 468 -- keyed on os_config exactly as 0061 is: an
+arch-independent block for the two new targets, an x86 block, an aarch64 block.
+0061's stanza is left alone and stays disjoint from all three, so no target
+receives a source name twice. os_config "linux-noasm" is excluded from every
+one of them, which keeps the MSAN configuration free of these asm-dependent
+objects for the same reason 0061 excluded it.
+
+build_ffmpeg.py, the generator of record, is widened to the same three targets.
+Leaving it at linux/x64 would mean a regeneration silently produced
+configurations that contradict the ones in the tree.
+
+MACOS IS DELIBERATELY NOT INCLUDED. It does not have the defect.
+video_toolbox_video_decoder.cc:514-535 declares HEVCPROFILE_MIN through
+HEVCPROFILE_MAX supported on any macOS host, gated only on the
+kPlatformHEVCDecoderSupport feature -- enabled by default at
+media_switches.cc:418 -- and the disable_accelerated_hevc_decode workaround. It
+probes no hardware, and its own comment says why: "because we allow the OS
+software decoder we report the minimum possible HEVC encode size". So
+VideoToolbox answers for HEVC on every Apple host with or without a usable
+media engine, the supplemental profile cache is populated, and the three
+surfaces already answer as the captures do. Adding a second software decoder
+there would be weight with no observable effect.
+
+A HOST WITH HARDWARE HEVC KEEPS USING IT. This adds no decoder to the selection
+list: DefaultDecoderFactory::CreateVideoDecoders already pushes
+FFmpegVideoDecoder unconditionally at default_decoder_factory.cc:159-162, after
+the external GPU-backed factory at :138-148, and selection takes the first
+entry that initialises. Only its answer to IsCodecSupported(kHEVC) changes, and
+that answer is consulted only if selection reaches it. In the three places
+where a hardware decoder consults IsDecoderBuiltInVideoCodec -- d3d11_video_
+decoder.cc:383, video_toolbox_video_decoder.cc:151 and mojo_video_decoder.cc:
+164 -- the predicate is read as "is there a software fallback", and each is
+evaluated only after the hardware path has already reported that it does not
+support the config. Hardware that reports support never reaches the branch.
+The software decoder is a floor, not a replacement.
+
+At the ffmpeg level codec_list[] and parser_list[] gain exactly one HEVC entry
+each on targets that had none, so avcodec_find_decoder(AV_CODEC_ID_HEVC) has a
+single unambiguous match and nothing is registered twice.
+
+NO NEW OBSERVABLE. No command-line switch, no feature flag, no console message,
+no histogram. The 0108 trap -- re-enabling a fallback also re-enabling a
+deprecation warning into every page's console -- has no counterpart here: the
+media stack has no AddConsoleMessage at all, and the only logging the HEVC path
+adds is MEDIA_LOG on decode failure, which is the same path H.264 has always
+used and is not reached by a capability query. canPlayType, isTypeSupported and
+decodingInfo call the supported-types tables and log nothing.
+
+diff --git a/media/ffmpeg/scripts/build_ffmpeg.py b/media/ffmpeg/scripts/build_ffmpeg.py
+--- a/media/ffmpeg/scripts/build_ffmpeg.py
++++ b/media/ffmpeg/scripts/build_ffmpeg.py
+@@ -995,7 +995,14 @@
+         '--enable-parser=aac,h264',
+     ])
+ 
+-    if target_os == 'linux' and target_arch == 'x64':
++    # Every target whose checked-in config carries the software HEVC decoder.
++    # Keep this in step with the per-target stanzas in ffmpeg_generated.gni: a
++    # regeneration that omitted a target here would silently produce a config
++    # that contradicts the one in the tree. 'linux-noasm' is deliberately absent
++    # because it builds without assembly, and 'mac' because VideoToolbox already
++    # answers for HEVC on every Apple host.
++    if (target_os, target_arch) in (('linux', 'x64'), ('linux', 'arm64'),
++                                    ('win', 'x64')):
+         configure_flags['Chrome'].extend([
+             '--enable-decoder=hevc', '--enable-parser=hevc',
+         ])
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/config.h b/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/config.h
+--- a/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/config.h
++++ b/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/config.h
+@@ -1,7 +1,7 @@
+ /* Automatically generated by configure - do not modify! */
+ #ifndef FFMPEG_CONFIG_H
+ #define FFMPEG_CONFIG_H
+-/* #define FFMPEG_CONFIGURATION "--disable-everything --disable-all --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages --disable-static --enable-avcodec --enable-avformat --enable-avutil --enable-static --enable-libopus --disable-debug --disable-bzlib --disable-error-resilience --disable-iconv --disable-network --disable-schannel --disable-sdl2 --disable-symver --disable-xlib --disable-zlib --disable-securetransport --disable-faan --disable-alsa --disable-iamf --disable-checkasm --disable-autodetect --enable-decoder='vorbis,libopus,flac' --enable-decoder='pcm_u8,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,mp3' --enable-decoder='pcm_s16be,pcm_s24be,pcm_mulaw,pcm_alaw' --enable-demuxer='ogg,matroska,wav,flac,mp3,mov' --enable-parser='opus,vorbis,flac,mpegaudio,vp9' --extra-cflags=-I/usr/local/google/home/ezemtsov/projects/chrome/src/third_party/opus/src/include --disable-linux-perf --x86asmexe=nasm --optflags='\"-O2\"' --enable-cross-compile --cross-prefix=/usr/bin/aarch64-linux-gnu- --extra-cflags='--target=aarch64-linux-gnu' --extra-ldflags='--target=aarch64-linux-gnu' --target-os=linux --sysroot=/usr/local/google/home/ezemtsov/projects/chrome/src/build/linux/debian_bullseye_arm64-sysroot --disable-dotprod --disable-i8mm --arch=aarch64 --enable-armv8 --extra-cflags='-march=armv8-a' --enable-pic --cc=clang --cxx=clang++ --ld=clang --extra-ldflags='-fuse-ld=lld' --enable-decoder='aac,h264' --enable-demuxer=aac --enable-parser='aac,h264'" -- elide long configuration string from binary */
++/* #define FFMPEG_CONFIGURATION "--disable-everything --disable-all --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages --disable-static --enable-avcodec --enable-avformat --enable-avutil --enable-static --enable-libopus --disable-debug --disable-bzlib --disable-error-resilience --disable-iconv --disable-network --disable-schannel --disable-sdl2 --disable-symver --disable-xlib --disable-zlib --disable-securetransport --disable-faan --disable-alsa --disable-iamf --disable-checkasm --disable-autodetect --enable-decoder='vorbis,libopus,flac' --enable-decoder='pcm_u8,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,mp3' --enable-decoder='pcm_s16be,pcm_s24be,pcm_mulaw,pcm_alaw' --enable-demuxer='ogg,matroska,wav,flac,mp3,mov' --enable-parser='opus,vorbis,flac,mpegaudio,vp9' --extra-cflags=-I/usr/local/google/home/ezemtsov/projects/chrome/src/third_party/opus/src/include --disable-linux-perf --x86asmexe=nasm --optflags='\"-O2\"' --enable-cross-compile --cross-prefix=/usr/bin/aarch64-linux-gnu- --extra-cflags='--target=aarch64-linux-gnu' --extra-ldflags='--target=aarch64-linux-gnu' --target-os=linux --sysroot=/usr/local/google/home/ezemtsov/projects/chrome/src/build/linux/debian_bullseye_arm64-sysroot --disable-dotprod --disable-i8mm --arch=aarch64 --enable-armv8 --extra-cflags='-march=armv8-a' --enable-pic --cc=clang --cxx=clang++ --ld=clang --extra-ldflags='-fuse-ld=lld' --enable-decoder='aac,h264' --enable-demuxer=aac --enable-parser='aac,h264' --enable-decoder=hevc --enable-parser=hevc" -- elide long configuration string from binary */
+ #define FFMPEG_LICENSE "LGPL version 2.1 or later"
+ #define CONFIG_THIS_YEAR 2026
+ #define FFMPEG_DATADIR "/usr/local/share/ffmpeg"
+@@ -735,7 +735,7 @@
+ #define CONFIG_AUDIO_FRAME_QUEUE 0
+ #define CONFIG_AUDIODSP 0
+ #define CONFIG_BLOCKDSP 0
+-#define CONFIG_BSWAPDSP 0
++#define CONFIG_BSWAPDSP 1
+ #define CONFIG_CABAC 1
+ #define CONFIG_CBS 0
+ #define CONFIG_CBS_APV 0
+@@ -778,8 +778,8 @@
+ #define CONFIG_H264PRED 1
+ #define CONFIG_H264QPEL 1
+ #define CONFIG_H264_SEI 1
+-#define CONFIG_HEVCPARSE 0
+-#define CONFIG_HEVC_SEI 0
++#define CONFIG_HEVCPARSE 1
++#define CONFIG_HEVC_SEI 1
+ #define CONFIG_HPELDSP 0
+ #define CONFIG_HUFFMAN 0
+ #define CONFIG_HUFFYUVDSP 0
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/config_components.h b/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/config_components.h
+--- a/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/config_components.h
++++ b/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/config_components.h
+@@ -144,7 +144,7 @@
+ #define CONFIG_H264_QSV_DECODER 0
+ #define CONFIG_H264_RKMPP_DECODER 0
+ #define CONFIG_HAP_DECODER 0
+-#define CONFIG_HEVC_DECODER 0
++#define CONFIG_HEVC_DECODER 1
+ #define CONFIG_HEVC_QSV_DECODER 0
+ #define CONFIG_HEVC_RKMPP_DECODER 0
+ #define CONFIG_HEVC_V4L2M2M_DECODER 0
+@@ -1050,7 +1050,7 @@
+ #define CONFIG_H261_PARSER 0
+ #define CONFIG_H263_PARSER 0
+ #define CONFIG_H264_PARSER 1
+-#define CONFIG_HEVC_PARSER 0
++#define CONFIG_HEVC_PARSER 1
+ #define CONFIG_HDR_PARSER 0
+ #define CONFIG_IPU_PARSER 0
+ #define CONFIG_JPEG2000_PARSER 0
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/libavcodec/codec_list.c b/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/libavcodec/codec_list.c
+--- a/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/libavcodec/codec_list.c
++++ b/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/libavcodec/codec_list.c
+@@ -1,5 +1,6 @@
+ static const FFCodec * const codec_list[] = {
+     &ff_h264_decoder,
++    &ff_hevc_decoder,
+     &ff_aac_decoder,
+     &ff_flac_decoder,
+     &ff_mp3_decoder,
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/libavcodec/parser_list.c b/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/libavcodec/parser_list.c
+--- a/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/libavcodec/parser_list.c
++++ b/third_party/ffmpeg/chromium/config/Chrome/linux/arm64/libavcodec/parser_list.c
+@@ -2,6 +2,7 @@
+     &ff_aac_parser,
+     &ff_flac_parser,
+     &ff_h264_parser,
++    &ff_hevc_parser,
+     &ff_mpegaudio_parser,
+     &ff_opus_parser,
+     &ff_vorbis_parser,
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/win/x64/config.asm b/third_party/ffmpeg/chromium/config/Chrome/win/x64/config.asm
+--- a/third_party/ffmpeg/chromium/config/Chrome/win/x64/config.asm
++++ b/third_party/ffmpeg/chromium/config/Chrome/win/x64/config.asm
+@@ -720,7 +720,7 @@
+ %define CONFIG_AUDIO_FRAME_QUEUE 0
+ %define CONFIG_AUDIODSP 0
+ %define CONFIG_BLOCKDSP 0
+-%define CONFIG_BSWAPDSP 0
++%define CONFIG_BSWAPDSP 1
+ %define CONFIG_CABAC 1
+ %define CONFIG_CBS 0
+ %define CONFIG_CBS_APV 0
+@@ -763,8 +763,8 @@
+ %define CONFIG_H264PRED 1
+ %define CONFIG_H264QPEL 1
+ %define CONFIG_H264_SEI 1
+-%define CONFIG_HEVCPARSE 0
+-%define CONFIG_HEVC_SEI 0
++%define CONFIG_HEVCPARSE 1
++%define CONFIG_HEVC_SEI 1
+ %define CONFIG_HPELDSP 0
+ %define CONFIG_HUFFMAN 0
+ %define CONFIG_HUFFYUVDSP 0
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/win/x64/config.h b/third_party/ffmpeg/chromium/config/Chrome/win/x64/config.h
+--- a/third_party/ffmpeg/chromium/config/Chrome/win/x64/config.h
++++ b/third_party/ffmpeg/chromium/config/Chrome/win/x64/config.h
+@@ -1,7 +1,7 @@
+ /* Automatically generated by configure - do not modify! */
+ #ifndef FFMPEG_CONFIG_H
+ #define FFMPEG_CONFIG_H
+-/* #define FFMPEG_CONFIGURATION "--disable-everything --disable-all --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages --disable-static --enable-avcodec --enable-avformat --enable-avutil --enable-static --enable-libopus --disable-debug --disable-bzlib --disable-error-resilience --disable-iconv --disable-network --disable-schannel --disable-sdl2 --disable-symver --disable-xlib --disable-zlib --disable-securetransport --disable-faan --disable-alsa --disable-iamf --disable-checkasm --disable-autodetect --enable-decoder='vorbis,libopus,flac' --enable-decoder='pcm_u8,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,mp3' --enable-decoder='pcm_s16be,pcm_s24be,pcm_mulaw,pcm_alaw' --enable-demuxer='ogg,matroska,wav,flac,mp3,mov' --enable-parser='opus,vorbis,flac,mpegaudio,vp9' --extra-cflags=-I/usr/local/google/home/ezemtsov/projects/chrome/src/third_party/opus/src/include --disable-linux-perf --x86asmexe=nasm --optflags='\"-O2\"' --toolchain=msvc --extra-cflags=-I/usr/local/google/home/ezemtsov/projects/chrome/src/third_party/ffmpeg/chromium/include/win --target-os=win64 --enable-cross-compile --cc=clang-cl --ld=lld-link --nm=llvm-nm --ar=llvm-ar --extra-cflags=-O2 --extra-cflags=/winsysroot/usr/local/google/home/ezemtsov/projects/chrome/src/third_party/depot_tools/win_toolchain/vs_files/e66617bc68 --extra-ldflags='/winsysroot:/usr/local/google/home/ezemtsov/projects/chrome/src/third_party/depot_tools/win_toolchain/vs_files/e66617bc68' --enable-decoder='aac,h264' --enable-demuxer=aac --enable-parser='aac,h264'" -- elide long configuration string from binary */
++/* #define FFMPEG_CONFIGURATION "--disable-everything --disable-all --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages --disable-static --enable-avcodec --enable-avformat --enable-avutil --enable-static --enable-libopus --disable-debug --disable-bzlib --disable-error-resilience --disable-iconv --disable-network --disable-schannel --disable-sdl2 --disable-symver --disable-xlib --disable-zlib --disable-securetransport --disable-faan --disable-alsa --disable-iamf --disable-checkasm --disable-autodetect --enable-decoder='vorbis,libopus,flac' --enable-decoder='pcm_u8,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,mp3' --enable-decoder='pcm_s16be,pcm_s24be,pcm_mulaw,pcm_alaw' --enable-demuxer='ogg,matroska,wav,flac,mp3,mov' --enable-parser='opus,vorbis,flac,mpegaudio,vp9' --extra-cflags=-I/usr/local/google/home/ezemtsov/projects/chrome/src/third_party/opus/src/include --disable-linux-perf --x86asmexe=nasm --optflags='\"-O2\"' --toolchain=msvc --extra-cflags=-I/usr/local/google/home/ezemtsov/projects/chrome/src/third_party/ffmpeg/chromium/include/win --target-os=win64 --enable-cross-compile --cc=clang-cl --ld=lld-link --nm=llvm-nm --ar=llvm-ar --extra-cflags=-O2 --extra-cflags=/winsysroot/usr/local/google/home/ezemtsov/projects/chrome/src/third_party/depot_tools/win_toolchain/vs_files/e66617bc68 --extra-ldflags='/winsysroot:/usr/local/google/home/ezemtsov/projects/chrome/src/third_party/depot_tools/win_toolchain/vs_files/e66617bc68' --enable-decoder='aac,h264' --enable-demuxer=aac --enable-parser='aac,h264' --enable-decoder=hevc --enable-parser=hevc" -- elide long configuration string from binary */
+ #define FFMPEG_LICENSE "LGPL version 2.1 or later"
+ #define CONFIG_THIS_YEAR 2026
+ #define FFMPEG_DATADIR "/usr/local/share/ffmpeg"
+@@ -734,7 +734,7 @@
+ #define CONFIG_AUDIO_FRAME_QUEUE 0
+ #define CONFIG_AUDIODSP 0
+ #define CONFIG_BLOCKDSP 0
+-#define CONFIG_BSWAPDSP 0
++#define CONFIG_BSWAPDSP 1
+ #define CONFIG_CABAC 1
+ #define CONFIG_CBS 0
+ #define CONFIG_CBS_APV 0
+@@ -777,8 +777,8 @@
+ #define CONFIG_H264PRED 1
+ #define CONFIG_H264QPEL 1
+ #define CONFIG_H264_SEI 1
+-#define CONFIG_HEVCPARSE 0
+-#define CONFIG_HEVC_SEI 0
++#define CONFIG_HEVCPARSE 1
++#define CONFIG_HEVC_SEI 1
+ #define CONFIG_HPELDSP 0
+ #define CONFIG_HUFFMAN 0
+ #define CONFIG_HUFFYUVDSP 0
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/win/x64/config_components.asm b/third_party/ffmpeg/chromium/config/Chrome/win/x64/config_components.asm
+--- a/third_party/ffmpeg/chromium/config/Chrome/win/x64/config_components.asm
++++ b/third_party/ffmpeg/chromium/config/Chrome/win/x64/config_components.asm
+@@ -142,7 +142,7 @@
+ %define CONFIG_H264_QSV_DECODER 0
+ %define CONFIG_H264_RKMPP_DECODER 0
+ %define CONFIG_HAP_DECODER 0
+-%define CONFIG_HEVC_DECODER 0
++%define CONFIG_HEVC_DECODER 1
+ %define CONFIG_HEVC_QSV_DECODER 0
+ %define CONFIG_HEVC_RKMPP_DECODER 0
+ %define CONFIG_HEVC_V4L2M2M_DECODER 0
+@@ -1048,7 +1048,7 @@
+ %define CONFIG_H261_PARSER 0
+ %define CONFIG_H263_PARSER 0
+ %define CONFIG_H264_PARSER 1
+-%define CONFIG_HEVC_PARSER 0
++%define CONFIG_HEVC_PARSER 1
+ %define CONFIG_HDR_PARSER 0
+ %define CONFIG_IPU_PARSER 0
+ %define CONFIG_JPEG2000_PARSER 0
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/win/x64/config_components.h b/third_party/ffmpeg/chromium/config/Chrome/win/x64/config_components.h
+--- a/third_party/ffmpeg/chromium/config/Chrome/win/x64/config_components.h
++++ b/third_party/ffmpeg/chromium/config/Chrome/win/x64/config_components.h
+@@ -144,7 +144,7 @@
+ #define CONFIG_H264_QSV_DECODER 0
+ #define CONFIG_H264_RKMPP_DECODER 0
+ #define CONFIG_HAP_DECODER 0
+-#define CONFIG_HEVC_DECODER 0
++#define CONFIG_HEVC_DECODER 1
+ #define CONFIG_HEVC_QSV_DECODER 0
+ #define CONFIG_HEVC_RKMPP_DECODER 0
+ #define CONFIG_HEVC_V4L2M2M_DECODER 0
+@@ -1050,7 +1050,7 @@
+ #define CONFIG_H261_PARSER 0
+ #define CONFIG_H263_PARSER 0
+ #define CONFIG_H264_PARSER 1
+-#define CONFIG_HEVC_PARSER 0
++#define CONFIG_HEVC_PARSER 1
+ #define CONFIG_HDR_PARSER 0
+ #define CONFIG_IPU_PARSER 0
+ #define CONFIG_JPEG2000_PARSER 0
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/win/x64/libavcodec/codec_list.c b/third_party/ffmpeg/chromium/config/Chrome/win/x64/libavcodec/codec_list.c
+--- a/third_party/ffmpeg/chromium/config/Chrome/win/x64/libavcodec/codec_list.c
++++ b/third_party/ffmpeg/chromium/config/Chrome/win/x64/libavcodec/codec_list.c
+@@ -1,5 +1,6 @@
+ static const FFCodec * const codec_list[] = {
+     &ff_h264_decoder,
++    &ff_hevc_decoder,
+     &ff_aac_decoder,
+     &ff_flac_decoder,
+     &ff_mp3_decoder,
+diff --git a/third_party/ffmpeg/chromium/config/Chrome/win/x64/libavcodec/parser_list.c b/third_party/ffmpeg/chromium/config/Chrome/win/x64/libavcodec/parser_list.c
+--- a/third_party/ffmpeg/chromium/config/Chrome/win/x64/libavcodec/parser_list.c
++++ b/third_party/ffmpeg/chromium/config/Chrome/win/x64/libavcodec/parser_list.c
+@@ -2,6 +2,7 @@
+     &ff_aac_parser,
+     &ff_flac_parser,
+     &ff_h264_parser,
++    &ff_hevc_parser,
+     &ff_mpegaudio_parser,
+     &ff_opus_parser,
+     &ff_vorbis_parser,
+diff --git a/third_party/ffmpeg/ffmpeg_generated.gni b/third_party/ffmpeg/ffmpeg_generated.gni
+--- a/third_party/ffmpeg/ffmpeg_generated.gni
++++ b/third_party/ffmpeg/ffmpeg_generated.gni
+@@ -635,10 +635,92 @@
+   ]
+   ffmpeg_asm_deps += [
+     "libavcodec/x86/bswapdsp.asm",
++  ]
++  ffmpeg_asm_include_dirs += [
++    "//third_party/ffmpeg/libavcodec/x86",
++    "//third_party/ffmpeg/libavcodec/x86/h26x",
++    "//third_party/ffmpeg/libavcodec/x86/hevc",
++  ]
++}
++
++# The same source set on the remaining targets whose config enables the
++# decoder. Held apart from the linux/x64 stanza above because that one is a
++# single target and this list is arch-independent; the conditions are disjoint,
++# so no target receives a name twice.
++if ((ffmpeg_branding == "Chrome" && current_cpu == "x64" &&
++     os_config == "win") ||
++    ((current_cpu == "arm64" || current_cpu == "arm64e") &&
++     ffmpeg_branding == "Chrome" && os_config == "linux")) {
++  ffmpeg_c_sources += [
++    "libavcodec/bswapdsp.c",
++    "libavcodec/hevc/autorename_libavcodec_hevc_cabac.c",
++    "libavcodec/hevc/autorename_libavcodec_hevc_parse.c",
++    "libavcodec/hevc/autorename_libavcodec_hevc_parser.c",
++    "libavcodec/hevc/data.c",
++    "libavcodec/hevc/dsp.c",
++    "libavcodec/hevc/filter.c",
++    "libavcodec/hevc/hevcdec.c",
++    "libavcodec/hevc/mvs.c",
++    "libavcodec/hevc/pred.c",
++    "libavcodec/hevc/ps.c",
++    "libavcodec/hevc/refs.c",
++    "libavcodec/hevc/sei.c",
++  ]
++  ffmpeg_c_deps += [
++    "libavcodec/hevc/cabac.c",
++    "libavcodec/hevc/parse.c",
++    "libavcodec/hevc/parser.c",
++  ]
++}
++
++# The x86 half, shared with the linux/x64 stanza above. os_config "win-msvc" is
++# absent because our Windows target is clang, and "linux-noasm" because MSAN
++# builds without assembly and BUILD.gn strips these sources.
++if (ffmpeg_branding == "Chrome" && current_cpu == "x64" && os_config == "win") {
++  ffmpeg_c_sources += [
++    "libavcodec/x86/bswapdsp_init.c",
++    "libavcodec/x86/h26x/h2656dsp.c",
++    "libavcodec/x86/hevc/dsp_init.c",
+   ]
++  ffmpeg_asm_sources += [
++    "libavcodec/x86/autorename_libavcodec_x86_bswapdsp.asm",
++    "libavcodec/x86/h26x/h2656_inter.asm",
++    "libavcodec/x86/hevc/add_res.asm",
++    "libavcodec/x86/hevc/deblock.asm",
++    "libavcodec/x86/hevc/dequant.asm",
++    "libavcodec/x86/hevc/idct.asm",
++    "libavcodec/x86/hevc/mc.asm",
++    "libavcodec/x86/hevc/sao.asm",
++    "libavcodec/x86/hevc/sao_10bit.asm",
++  ]
++  ffmpeg_asm_deps += [ "libavcodec/x86/bswapdsp.asm" ]
+   ffmpeg_asm_include_dirs += [
+     "//third_party/ffmpeg/libavcodec/x86",
+     "//third_party/ffmpeg/libavcodec/x86/h26x",
+     "//third_party/ffmpeg/libavcodec/x86/hevc",
+   ]
+ }
++
++# The arm64 half. hevc/dsp.c:262 and hevc/pred.c:82 call
++# ff_hevc_dsp_init_aarch64 and ff_hevc_pred_init_aarch64 unconditionally under
++# ARCH_AARCH64, so these are required rather than optional, and the set is the
++# nine objects libavcodec/aarch64/Makefile lists for CONFIG_HEVC_DECODER --
++# three of which live in aarch64/h26x. There is no arm64 counterpart to the
++# x86 bswapdsp asm: bswapdsp.c dispatches only on ARCH_RISCV and ARCH_X86, so
++# aarch64 runs its C implementation.
++if ((current_cpu == "arm64" || current_cpu == "arm64e") &&
++    ffmpeg_branding == "Chrome" && os_config == "linux") {
++  ffmpeg_c_sources += [
++    "libavcodec/aarch64/hevcdsp_init_aarch64.c",
++    "libavcodec/aarch64/hevcpred_init_aarch64.c",
++  ]
++  ffmpeg_gas_sources += [
++    "libavcodec/aarch64/h26x/epel_neon.S",
++    "libavcodec/aarch64/h26x/qpel_neon.S",
++    "libavcodec/aarch64/h26x/sao_neon.S",
++    "libavcodec/aarch64/hevcdsp_deblock_neon.S",
++    "libavcodec/aarch64/hevcdsp_dequant_neon.S",
++    "libavcodec/aarch64/hevcdsp_idct_neon.S",
++    "libavcodec/aarch64/hevcpred_neon.S",
++  ]
++}

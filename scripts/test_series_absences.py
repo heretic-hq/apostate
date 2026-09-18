@@ -171,10 +171,12 @@ class IncludeOnlyTests(unittest.TestCase):
     def test_includer_read_a_different_targets_copy_so_it_is_not_verified(self):
         """The discriminator: same includer, same name, different file.
 
-        This is the real Windows case. allcodecs.c is compiled everywhere, and
-        on Windows it reads win-msvc's codec_list.c, never the linux/x64 one a
-        patch edits. Verification keyed on the includer existing would call
-        this covered.
+        This is the real Windows case. allcodecs.c is compiled on every target
+        -- ffmpeg_generated.gni:90 lists it under a condition that ORs
+        is_apple, is_win and use_linux_config -- and on windows-x64 it reads
+        config/Chrome/win/x64's codec_list.c, never the linux/x64 one a patch
+        edits. Verification keyed on the includer existing would call this
+        covered, which is how an unverified hunk keeps a passing badge.
         """
         includers, _ = self.fixture.discover([UNIT])
         code, output, report = self.fixture.run_gate(

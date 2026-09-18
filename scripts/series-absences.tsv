@@ -68,13 +68,21 @@ third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc	macos-*	platfo
 # Confirmed empirically on the macos-arm64 graph, where `ninja -t deps` for
 # allcodecs.o names config/Chrome/mac/arm64/libavcodec/codec_list.c.
 #
-# Measured across all 44 config directories at this revision: Chrome/linux/x64
-# is the ONLY one whose codec_list.c and parser_list.c carry an HEVC entry.
+# Each config directory's pair is therefore verifiable on exactly one target
+# and declared on the other three. After patch 0109 three directories carry an
+# HEVC entry -- linux/x64 (0061), linux/arm64 and win/x64 (0109). mac/arm64
+# stays at zero deliberately: media/gpu/mac/video_toolbox_video_decoder.cc:521
+# passes HEVCPROFILE_MIN..HEVCPROFILE_MAX on any macOS host, so the software
+# decoder is not needed there.
 third_party/ffmpeg/chromium/config/Chrome/linux/x64/libavcodec/codec_list.c	linux-arm64,windows-*,macos-*	platform	only linux-x64 puts chromium/config/Chrome/linux/x64 on the ffmpeg include path (third_party/ffmpeg/BUILD.gn:14 with os_config/ffmpeg_arch from ffmpeg_options.gni); every other target reads its own config directory's codec_list.c
 third_party/ffmpeg/chromium/config/Chrome/linux/x64/libavcodec/parser_list.c	linux-arm64,windows-*,macos-*	platform	only linux-x64 puts chromium/config/Chrome/linux/x64 on the ffmpeg include path (third_party/ffmpeg/BUILD.gn:14 with os_config/ffmpeg_arch from ffmpeg_options.gni); every other target reads its own config directory's parser_list.c
-third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_cabac.c	linux-arm64,windows-*,macos-*	platform	patches/0061-software-hevc-decoder.patch adds it to ffmpeg_c_sources under `if (ffmpeg_branding == "Chrome" && current_cpu == "x64" && os_config == "linux")`
-third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_parse.c	linux-arm64,windows-*,macos-*	platform	patches/0061-software-hevc-decoder.patch adds it to ffmpeg_c_sources under `if (ffmpeg_branding == "Chrome" && current_cpu == "x64" && os_config == "linux")`
-third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_parser.c	linux-arm64,windows-*,macos-*	platform	patches/0061-software-hevc-decoder.patch adds it to ffmpeg_c_sources under `if (ffmpeg_branding == "Chrome" && current_cpu == "x64" && os_config == "linux")`
+third_party/ffmpeg/chromium/config/Chrome/linux/arm64/libavcodec/codec_list.c	linux-x64,windows-*,macos-*	platform	only linux-arm64 puts chromium/config/Chrome/linux/arm64 on the ffmpeg include path (ffmpeg_arch follows current_cpu); every other target reads its own config directory's codec_list.c
+third_party/ffmpeg/chromium/config/Chrome/linux/arm64/libavcodec/parser_list.c	linux-x64,windows-*,macos-*	platform	only linux-arm64 puts chromium/config/Chrome/linux/arm64 on the ffmpeg include path (ffmpeg_arch follows current_cpu); every other target reads its own config directory's parser_list.c
+third_party/ffmpeg/chromium/config/Chrome/win/x64/libavcodec/codec_list.c	linux-*,macos-*	platform	only windows-x64 puts chromium/config/Chrome/win/x64 on the ffmpeg include path (os_config is "win" because build/args/windows-x64.gn:5 sets is_clang, not "win-msvc"); every other target reads its own config directory's codec_list.c
+third_party/ffmpeg/chromium/config/Chrome/win/x64/libavcodec/parser_list.c	linux-*,macos-*	platform	only windows-x64 puts chromium/config/Chrome/win/x64 on the ffmpeg include path (os_config is "win" because build/args/windows-x64.gn:5 sets is_clang, not "win-msvc"); every other target reads its own config directory's parser_list.c
+third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_cabac.c	macos-*	platform	ffmpeg_c_sources gains it from patches/0061 under `current_cpu == "x64" && os_config == "linux"` and from patches/0109 under `(x64 && os_config == "win") || (arm64 && os_config == "linux")`; macOS matches neither, os_config being "mac"
+third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_parse.c	macos-*	platform	ffmpeg_c_sources gains it from patches/0061 under `current_cpu == "x64" && os_config == "linux"` and from patches/0109 under `(x64 && os_config == "win") || (arm64 && os_config == "linux")`; macOS matches neither, os_config being "mac"
+third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_parser.c	macos-*	platform	ffmpeg_c_sources gains it from patches/0061 under `current_cpu == "x64" && os_config == "linux"` and from patches/0109 under `(x64 && os_config == "win") || (arm64 && os_config == "linux")`; macOS matches neither, os_config being "mac"
 
 # ----------------------------------------------------------------------- ozone
 # //ui/ozone asserts use_ozone at BUILD.gn:12 and build/config/ozone.gni:11

@@ -271,24 +271,36 @@ file `base/BUILD.gn` compiles on every platform, and it was found by reading.
 translation units, de-duplicated, in series order. It is derived rather than
 maintained because a list that has to be updated by hand stops covering files
 silently, which is the failure this gate exists to remove. At Chromium
-152.0.7977.83 the series touches 132 translation units.
+152.0.7977.83 the series touches 136 translation units.
 
 The filter is `.c`, `.cc`, `.cpp`, `.mm`, `.m`, so the gate's coverage stops
-at files that produce an object of their own. **The series also patches 52
-files that do not: 49 headers and 3 `.asm`.** None of them is in the unit list,
-so none is verified and none can appear as an absence either — including two
-that are include-only in exactly the way `codec_list.c` is, the ffmpeg
-config's `config.asm` and `config_components.asm`, which asm sources such as
-`libavcodec/x86/h264_chromamc.asm` pull in with `%include`. The third,
-`libavcodec/x86/autorename_libavcodec_x86_bswapdsp.asm`, patch `0061` adds to
-`ffmpeg_asm_sources`, so it does produce an object and is simply outside the
-suffix filter. Headers are the old assumption stated plainly in
-`series-translation-units.py`: "covered by compiling the translation units
-that include it", which is an assumption rather than a check, and it is the
-same assumption `codec_list.c` falsified. Extending the include-only
-mechanism over those 52 files is a coverage change with a bill attached — each
-includer's object joins a paid compile set — so it is recorded here rather
-than made quietly.
+at files that produce an object of their own. **The series also patches 58
+files that do not: 53 headers and 5 `.asm`.** None of them is in the unit
+list, so none is verified and none can appear as an absence either — including
+the ffmpeg configs' `config.asm` and `config_components.asm`, which are
+include-only in exactly the way `codec_list.c` is: asm sources such as
+`libavcodec/x86/h264_chromamc.asm` pull them in with `%include`.
+`libavcodec/x86/autorename_libavcodec_x86_bswapdsp.asm` is the exception that
+patches `0061` and `0109` add to `ffmpeg_asm_sources`, so it does produce an
+object and is simply outside the suffix filter. Headers are the old assumption
+stated plainly in `series-translation-units.py`: "covered by compiling the
+translation units that include it", which is an assumption rather than a
+check, and it is the same assumption `codec_list.c` falsified.
+
+`.S` sources are outside the filter too, and patch `0109` shows why that is
+not merely theoretical: its arm64 leg adds seven `.S` files to
+`ffmpeg_gas_sources`, three of them under `libavcodec/aarch64/h26x`
+(`epel_neon.S`, `qpel_neon.S`, `sao_neon.S`) whose names contain no "hevc" at
+all. Dropping them leaves 355 undefined `ff_hevc_put_hevc_*` symbols, and
+because the gate compiles rather than links, and `.S` is not a gate suffix,
+that failure would surface only at link time in a full build. Those files are
+not patched, only listed, so they are outside this gate's remit by
+construction rather than by oversight — but the gap is real and is recorded
+here.
+
+Extending the include-only mechanism over the 58 patched non-unit files is a
+coverage change with a bill attached — each includer's object joins a paid
+compile set — so it is recorded here rather than made quietly.
 
 `scripts/checkseries.sh` compiles them for one target and classifies each
 result. Membership comes from `ninja -t compdb`, a query against the build
@@ -328,9 +340,17 @@ one level out instead of removing it.
 The two declared categories are human statements, because no build graph can
 tell a platform-scoped file from an overlooked one, and they are checked in
 both directions: a file nothing accounts for fails the run as `unexplained`,
-and a declaration the run disproves fails it as stale. Measured at
-152.0.7977.83: `linux-x64` reports 129 compiles, 2 include-only and 1 declared
-absence; `windows-x64` 113 and 19; `macos-arm64` 113 and 19.
+and a declaration the run disproves fails it as stale.
+
+At 152.0.7977.83 with patch `0109` in the series, each of the three patched
+ffmpeg config directories resolves to `include-only` on exactly the one target
+whose include path reaches it, and to a declared `absent-platform` on the other
+three. `macos-arm64` is measured against its real build graph: 136 units, 113
+in the graph, 23 declared absences, 0 unexplained. `linux-x64` reports 129
+compiles, 2 include-only and 5 declared absences, and `windows-x64` 116, 2 and
+18 — both replayed from their real gate artifacts with `0109`'s four new units
+and its `ffmpeg_c_sources` additions applied. `linux-arm64` has no gate
+artifact yet, so its numbers are not stated here.
 
 Each run writes a JSON report, and `scripts/checkseries.sh --merge` puts the
 per-platform reports side by side. `compiles` and `include-only` are coverage;

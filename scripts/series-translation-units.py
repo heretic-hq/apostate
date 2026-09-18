@@ -33,7 +33,7 @@ import sys
 # until scripts/series_absences.py started resolving such a file to its
 # includer and reading ninja's recorded dependencies, patch 0061's
 # registration was compiled by nothing the gate checked. At 152.0.7977.83 the
-# series patches 52 files outside this tuple -- 49 headers and 3 .asm, two of
+# series patches 58 files outside this tuple -- 53 headers and 5 .asm, four of
 # the .asm include-only in exactly that way -- so they are neither verified
 # nor visible as absences. docs/BUILD.md records that gap; closing it means
 # putting each includer's object into a paid compile set, which is a coverage

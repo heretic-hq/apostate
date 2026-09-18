@@ -148,3 +148,12 @@
 # effect it is upstream of 0102, 0103 and 0104, which have no WebGL context to
 # act on without it on a host with no usable GPU driver.
 0108-gl-keep-the-software-webgl-fallback.patch
+
+# 0109 extends 0061's ffmpeg configuration to the targets 0061 enabled nothing
+# on, so 0061 comes ahead of it three times over: its ffmpeg_generated.gni
+# hunks append after 0061's stanza and carry its closing brace as context, its
+# build_ffmpeg.py hunk rewrites the condition 0061 introduced, and the five
+# switches it flips are the ones 0061 established as the set. It touches no
+# file any other patch in the series touches, so nothing else orders it, and it
+# is last because it was authored last.
+0109-software-hevc-on-every-shipped-target.patch

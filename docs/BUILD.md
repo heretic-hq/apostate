@@ -21,6 +21,8 @@ CI build alone does not establish it.
 | `build/WINDOWS_SDK_INSTALLER_URL` | Version-specific 10.0.26100 SDK installer, for the Debuggers feature |
 | `build/WINDOWS_SDK_INSTALLER_VERSION` | Which SDK release that URL serves, `10.0.26100.4654` |
 | `build/WINDOWS_SDK_INSTALLER_SHA256` | Digest of those installer bytes |
+| `build/WINDOWS_SDK_VERSION` | SDK *directory* version the preflight checks, `10.0.26100.0`; mirrors Chromium's own constant |
+| `build/WINDOWS_VS_COMPONENTS` | Visual Studio components the Windows build requires, and the file that proves each |
 | `build/linux/Dockerfile` | Linux base image digest and build environment |
 | `patches/series` | Patch names and application order |
 | `build/MANIFEST.lock` | Generated record of resolved build inputs and outputs |
@@ -57,7 +59,7 @@ The build scripts share workspace and tool paths through `scripts/lib.sh`.
 | `scripts/resolve-build-targets.sh` | Resolve the CI target list and hosted runner labels |
 | `scripts/verify-runner.sh` | Check the target against the runner OS and architecture |
 | `scripts/verify-host-tooling.sh` | Report every tool or SDK component the target's build will need and this host lacks |
-| `scripts/provision-windows-debuggers.sh` | Install the pinned SDK's Debugging Tools feature when the image lacks it |
+| `scripts/provision-windows-toolchain.sh` | Install the Visual Studio components and SDK features the Windows image lacks |
 | `scripts/reclaim-windows-disk.sh` | Remove measured, build-irrelevant software from the Windows runner image |
 | `scripts/bootstrap.sh` | Fetch pinned depot_tools and check host prerequisites |
 | `scripts/fetch-sources.sh` | Fetch and sync the pinned Chromium revision |
@@ -178,9 +180,20 @@ name, bootstraps, fetches, applies patches, runs Linux hooks and sysroot
 installation, configures, builds, checks, packages, optionally attests and
 uploads.
 
-The host-tooling check runs before checkout. Every target needs Python, Git
-and tar, and must pass a real `tar --zstd` write probe. Linux also needs Docker
-and a working daemon; macOS needs `xcodebuild`, `xcrun` and `plutil`. Testing
+The host-tooling check runs immediately after the repository checkout and
+before bootstrap, so it can read the pins in `build/` but not the Chromium
+checkout, which does not exist for another twelve minutes. That is the
+distinction that decides where an assertion belongs: anything answerable from
+the pins and the image goes here, anything needing `$SRC` goes in
+`scripts/configure.sh`. A check placed on the wrong side of that line either
+cannot run or skips silently, and a silent skip renders as green.
+
+Every target needs Python and Git. Non-Windows targets need `tar` and must
+pass a real `tar --zstd` write probe; `windows-x64` needs `7z` instead,
+because that is what packages its `.zip`. Linux also needs Docker and a
+working daemon; macOS needs `xcodebuild`, `xcrun` and `plutil`; Windows needs
+the whole Visual Studio and SDK prerequisite set described under
+[Hosted runners and workspaces](#hosted-runners-and-workspaces). Testing
 archive support early avoids completing a full Chromium build only to fail at
 the final packaging step.
 
@@ -198,7 +211,11 @@ The two callers are `.github/workflows/build-nightly.yml` and
 | Matrix `fail-fast` | `false` | `true` |
 | Additional jobs | Resolve targets | Version-tag and baseline gate, target resolution, publication |
 
-Each build job has a 360-minute timeout. Both callers use the workflow-level
+Each build job has a 600-minute timeout. Blacksmith runners register as
+self-hosted, so GitHub's 6-hour cap does not apply and the ceiling is ours;
+600 minutes is chosen so the 12-vCPU macOS build has room to finish a full
+fetch plus official build rather than being killed at 95% after paying for all
+of it. Both callers use the workflow-level
 `apostate-build` concurrency group with `cancel-in-progress: false`, so a
 nightly and a release cannot overlap. Each matrix leg has its own VM and
 could run concurrently. Serialization contains costs while the fresh-build
@@ -351,22 +368,52 @@ never reach the package.
 That image excludes the full Visual Studio IDE and provides VS Build Tools
 2022 instead. `build/vs_toolchain.py` searches `BuildTools` alongside
 `Enterprise`, `Professional`, `Community`, `Preview` and `Insiders`, so
-autodetection finds it, which is the reason no path is pinned. Two files the
-Windows build hard-requires come from outside Build Tools, and the workflow's
-host-tooling step checks both before fetching Chromium rather than failing
-hours later:
+autodetection finds it, which is the reason no path is pinned.
 
-- `<SDK>/Debuggers/x64/dbghelp.dll`, which `vs_toolchain.py` marks
-  non-optional; it needs the Windows SDK feature "Debugging Tools for
-  Windows".
-- `<VS>/DIA SDK/bin/amd64/msdia140.dll`, copied unconditionally and located
-  through `vswhere`.
+#### What the Windows build needs that Build Tools alone does not give
+
+"VS Build Tools is installed" is not the same claim as "Chromium can build".
+The prerequisite set comes from three separate products, and a complete
+compiler plus a complete SDK is not evidence that the third is there. Every
+entry below is asserted by `scripts/verify-host-tooling.sh` from the
+filesystem alone, before bootstrap, and every failure names the component id
+that supplies the missing file.
+
+| Prerequisite | Source that requires it | Supplied by |
+| --- | --- | --- |
+| `VC/Tools/MSVC/<ver>/bin/Hostx64/{x64,x86}/cl.exe` | `setup_toolchain.py` asserts `cl.exe is not found in PATH`, and `win_toolchain_data.gni` runs it for x86 **and** x64 even for an x64-only target | `Microsoft.VisualStudio.Component.VC.Tools.x86.x64` |
+| `VC/Auxiliary/Build/vcvarsall.bat` | `setup_toolchain.py` raises `<path> is missing - make sure VC++ tools are installed` | same component |
+| `VC/Tools/MSVC/<ver>/atlmfc/include/{atldef.h,atlbase.h}` and `atlmfc/lib/x64` | `base/win/atl_throw.h` includes `<atldef.h>` and `base/BUILD.gn` compiles `base/win/atl_throw.cc` on every Windows build; `base/win/atl.h` pulls eight more ATL headers; Dawn's DXC includes `<atlbase.h>` from `dxc/Support/WinIncludes.h` | `Microsoft.VisualStudio.Component.VC.ATL` |
+| `<VS>/DIA SDK/bin/amd64/msdia140.dll` | `vs_toolchain.py` `_CopyDebugger` copies it with no existence check, during `gn gen` | the DIA SDK, shipped with any VS C++ workload |
+| `<SDK>/Include/10.0.26100.0/{ucrt,um,shared}` and `<SDK>/Lib/10.0.26100.0/{ucrt,um}/x64` | `setup_toolchain.py` checks every emitted `INCLUDE` and `LIB` entry and raises `Path "..." does not exist. Make sure the necessary SDK is installed.` | Windows 11 SDK 10.0.26100 |
+| `<SDK>/Debuggers/x64/dbghelp.dll` | `vs_toolchain.py` marks it non-optional: `You must install Windows 10 SDK version ... including the "Debugging Tools for Windows" feature.` | the SDK feature `OptionId.WindowsDesktopDebuggers` |
+| `%windir%/System32/{msvcp140,msvcp140_atomic_wait,vccorlib140,vcruntime140,vcruntime140_1}.dll` | with `DEPOT_TOOLS_WIN_TOOLCHAIN=0`, `vs_toolchain.py` takes its runtime source directories from `System32`, not the VS Redist tree, and `build/toolchain/win/BUILD.gn` runs `copy_dlls` during `gn gen`; `_CopyRuntimeImpl` does not check its source | the machine-wide Visual C++ Redistributable |
+
+`dbgcore.dll` and `symsrv.dll` are optional by name in `vs_toolchain.py`'s own
+table, and the CDB bundle (`cdb.exe`, `dbgeng.dll`, `dbgmodel.dll`,
+`winext/`, `winxp/`) only matters if `//build/win:copy_cdb_to_output` enters
+the graph. Those are reported and never fatal: failing on them would fail a
+runner the build works on.
+
+MFC is **not** required, and this is the one place the upstream instructions
+are worth contradicting. `docs/windows_build_instructions.md` says to install
+`Microsoft.VisualStudio.Component.VC.ATLMFC`, because the IDE checkbox it
+names is "MFC/ATL support" and MFC depends on ATL, so that is how a human gets
+ATL through the installer UI. No file Chromium compiles includes an `afx*.h`
+header; `remoting`'s `atlapp.h` and `atlcrack.h` are WTL, vendored at
+`third_party/wtl`, and WTL needs ATL. The ARM64 components the same document
+lists are conditioned on building for ARM64 Win32, and `target_cpu` is `x64`.
+`build/WINDOWS_VS_COMPONENTS` records both decisions with their sources.
 
 Measured on the image: `dbghelp.dll` is absent, so the Debugging Tools feature
-is not installed. `scripts/verify-host-tooling.sh` reports it in about a
-minute, and `.github/workflows/probe-runners.yml` runs that check on the
-smallest instance of each family. Whether a tool is present is a property of
-the image, and the cheapest runner answers it identically.
+is not installed, and `atlmfc` is absent, so the ATL component is not
+installed. The second one was learned the expensive way — the first Windows
+run to reach compilation reached 33,797 edges and failed on
+`'atldef.h' file not found` — which is why the check is now a table read from
+a pin file rather than a hand-maintained list of the failures seen so far.
+`.github/workflows/probe-runners.yml` runs the whole provision-then-verify
+path on the smallest instance of each family. Whether a component is present
+is a property of the image, and the cheapest runner answers it identically.
 
 Free space is not. Measured: a 2 vCPU Windows runner reported 70.8 GB free while
 a 32 vCPU Windows runner reported 55 GB, a 14 GB difference on the class that
@@ -378,18 +425,67 @@ identical.
 
 Measured on the image, `msdia140.dll` and the DIA SDK are present, and Build
 Tools sits at `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`,
-under `Program Files (x86)` rather than `Program Files`. Only the Debuggers
-feature is missing, which is why the toolchain paths are autodetected rather
-than written down.
+under `Program Files (x86)` rather than `Program Files`. That path is why
+`scripts/lib.sh` exports `vs2022_install`: `vs_toolchain.py`'s `MSVC_LOCATION`
+table looks for 2022 under `%ProgramFiles%`, so every candidate path misses
+and GN reports `No supported Visual Studio can be found` with the toolchain
+sitting right there. `vs%YEAR%_install` is checked before the table, and
+`vswhere -products '*' -version '[17.0,18.0)'` resolves the real path without
+patching Chromium or assuming an edition.
 
-`scripts/provision-windows-debuggers.sh` installs that one feature, and both
-the build and the probe run it. It is idempotent, so it costs nothing once the
-image ships the feature. It pins the installer by URL and by digest:
+#### Provisioning
+
+`scripts/provision-windows-toolchain.sh` installs what is missing, and the
+build, the gate and the probe all run it. It is idempotent in both phases:
+with everything present it does nothing and exits 0, so an image that gains a
+component later stops paying for it automatically.
+
+The SDK's Debugging Tools feature comes from the pinned `winsdksetup.exe`.
 `build/WINDOWS_SDK_INSTALLER_URL` is the version-specific 10.0.26100 link
 rather than a "latest SDK" link, `build/WINDOWS_SDK_INSTALLER_VERSION` records
 which release that serves, and `build/WINDOWS_SDK_INSTALLER_SHA256` is checked
 before the installer runs, because a pinned URL only promises a name. Only
 `OptionId.WindowsDesktopDebuggers` is requested.
+
+The Visual Studio components come from the VS installer's `modify --add`. The
+installer is located rather than hardcoded — derived from the resolved install
+(`<...>/Microsoft Visual Studio/Installer`), with both `Program Files` trees as
+fallbacks, accepting either `setup.exe` or `vs_installer.exe` — and driven with
+`--quiet --norestart --nocache`: no UI on a headless runner, never reboot the
+runner out from under a job, and delete the payloads afterwards, because
+Windows is the target with the least free disk.
+
+Three details there are not optional:
+
+- **Exit code 3010 is a success.** Microsoft documents it as "Operation
+  completed successfully, but install requires reboot before it can be used",
+  and so is 1641. Treating a non-zero status as failure would fail a run that
+  installed everything it was asked for.
+- **The exit code is read from a file, not from `$?`.** A shell sees only the
+  low eight bits of a process status, so 3010 would arrive as 194 and
+  `-1073720687` as noise. The install runs under PowerShell, which writes the
+  real 32-bit value out.
+- **No exit code is trusted anyway.** Both phases re-test the same files they
+  tested before installing, and those files are the only success signal.
+  Headers and import libraries need no registration — clang-cl only reads
+  them — so a 3010 is expected to be harmless here, but "expected" is not a
+  check. If ATL ever does need the reboot it asked for, provisioning fails
+  naming the component instead of handing the gate a broken toolchain, and the
+  message says that baking it into the image is then the only option.
+
+One honest limit. The component payload is fetched from Microsoft at whatever
+servicing version the installed Build Tools is on, and there is no digest we
+can pin, unlike the SDK installer. That is a per-job network dependency inside
+every Windows build. It does not widen the reproducibility boundary as much as
+it first appears: `build/args/windows-x64.gn` deliberately pins no toolchain
+path, so the entire MSVC header set, the SDK and the CRT are *already* resolved
+from the runner's installation rather than from a pin. ATL joins a set that was
+never pinned, rather than opening a new hole. What is pinned is the request —
+`build/WINDOWS_VS_COMPONENTS` names the component ids and `scripts/lib.sh`
+bounds the VS version to `[17.0,18.0)` — and the resolved toolset directory is
+logged on every run. Closing the boundary properly means recording that
+toolset version in `build/MANIFEST.lock` alongside the other resolved inputs,
+or building the runner image ourselves; neither is done today.
 
 Which SDK version the build uses is not decided by any pin of ours, and cannot
 drift. `build/vs_toolchain.py` hardcodes `SDK_VERSION = '10.0.26100.0'` and
@@ -398,10 +494,22 @@ prints it verbatim as GN's `sdk_version`, with
 cross-check. There is no version autodetection to mislead, so an SDK
 directory appearing alongside can never be selected over the intended one. That
 pin travels with `build/CHROMIUM_VERSION`, which is why
-`build/args/windows-x64.gn` names no version either. The script still logs the
-`bin`, `Include` and `Lib` version directories before and after, because a
-component of the pinned version *disappearing* is a real failure and the
-listing is how it would be recognised.
+`build/args/windows-x64.gn` names no version either.
+
+`build/WINDOWS_SDK_VERSION` is a third copy of it, and exists only because
+`scripts/verify-host-tooling.sh` has to check `<SDK>/Include/<version>` before
+a checkout exists to read the constant from. A mirror nothing compares is a
+mirror that drifts, in the worst direction — the preflight would confirm an SDK
+version the build does not use and pass — so `scripts/configure.sh` reads
+`SDK_VERSION` out of `build/vs_toolchain.py` and fails if the two disagree,
+naming the value to correct. That check sits in `configure.sh` and not in the
+preflight for the same reason the preflight needs the mirror at all: it is the
+first step where both halves exist.
+
+The provisioning script still logs the `bin`, `Include` and `Lib` version
+directories before and after, because a component of the pinned version
+*disappearing* is a real failure and the listing is how it would be
+recognised.
 
 Measured build sizes:
 

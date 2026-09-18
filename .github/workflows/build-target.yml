@@ -88,14 +88,17 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
           persist-credentials: false
-      # The runner image carries the Windows SDK without its Debugging Tools
-      # feature, which vs_toolchain.py treats as mandatory. Installs it from a
-      # pinned 10.0.26100 installer and asserts no other SDK version appeared.
-      # Idempotent, so it costs nothing once the image ships the feature.
-      - name: Provision Windows debugging tools
+      # The runner image is missing two different prerequisites from two
+      # different products: the Windows SDK's "Debugging Tools for Windows"
+      # feature, which vs_toolchain.py treats as mandatory, and the Visual
+      # Studio ATL component, without which base/win/atl_throw.cc cannot find
+      # <atldef.h>. Both are installed here, before the sync, from the pinned
+      # SDK installer and the VS installer respectively. Idempotent, so it
+      # costs nothing once the image ships them.
+      - name: Provision Windows toolchain
         if: ${{ startsWith(inputs.target, 'windows-') }}
         shell: bash
-        run: bash scripts/provision-windows-debuggers.sh
+        run: bash scripts/provision-windows-toolchain.sh
       # 130GB is the volume size; only 55GB of it is free, against a measured
       # 66GB build. Removes measured, build-irrelevant software from the image.
       # Never fatal: reclaiming less than hoped must not fail a build that

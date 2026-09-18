@@ -188,13 +188,17 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
-      # gn gen runs vs_toolchain.py, which treats the SDK's Debugging Tools
-      # feature as mandatory and the runner image does not carry it. This gate
-      # cannot configure Windows without it. Idempotent.
-      - name: Provision Windows debugging tools
+      # Two prerequisites the image lacks, from two products. gn gen runs
+      # vs_toolchain.py, which treats the SDK's Debugging Tools feature as
+      # mandatory, so the gate cannot configure Windows without it; and the
+      # compile needs the Visual Studio ATL component, which is what the
+      # 33,797-edge run failed on with "'atldef.h' file not found". Both are
+      # installed before the sync, so the gate never pays for one to learn
+      # about the other. Idempotent.
+      - name: Provision Windows toolchain
         if: ${{ startsWith(matrix.target, 'windows-') }}
         shell: bash
-        run: bash scripts/provision-windows-debuggers.sh
+        run: bash scripts/provision-windows-toolchain.sh
       # bootstrap.sh refuses to start below 46 GB free for windows-x64, which
       # is the measured full checkout plus output; the 32 vCPU image has 55 GB
       # free. The gate does not produce 16 GB of output, but the floor is the
@@ -206,6 +210,9 @@ jobs:
       - name: Verify host tooling
         shell: bash
         run: bash scripts/verify-host-tooling.sh "$APOSTATE_TARGET"
+        # Runs before bootstrap and the ~12 minute sync deliberately: a missing
+        # Visual Studio component or SDK feature now fails in seconds naming
+        # the component id, rather than after 20 minutes of compiling.
       - name: Verify runner pairing
         shell: bash
         run: bash scripts/verify-runner.sh "$APOSTATE_TARGET"

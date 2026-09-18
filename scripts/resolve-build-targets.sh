@@ -27,9 +27,9 @@ if not raw:
 # cannot be scheduled. Both Linux targets use the pinned linux/amd64 build
 # container, which requires an x64 host, so linux-arm64 cross-compiles on the
 # same runner as linux-x64. windows-x64 builds natively: the windows-2025
-# image carries VS 2022 Build Tools, which vs_toolchain.py autodetects, plus
-# the Windows SDK minus its Debugging Tools feature, which
-# scripts/provision-windows-debuggers.sh installs from a pinned installer.
+# image carries VS 2022 Build Tools, which vs_toolchain.py autodetects, but it
+# lacks the SDK's Debugging Tools feature and the Visual Studio ATL component,
+# both of which scripts/provision-windows-toolchain.sh installs before the sync.
 runner_labels = {
     "linux-x64": ["blacksmith-32vcpu-ubuntu-2404"],
     "linux-arm64": ["blacksmith-32vcpu-ubuntu-2404"],

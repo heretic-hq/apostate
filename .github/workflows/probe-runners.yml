@@ -10,10 +10,21 @@ name: probe runners
 # 32 vCPU one, so the answer costs a fraction of what learning it during a
 # build costs.
 #
-# It is also the cheap way to confirm a fix: the Windows image lacks the
-# Windows SDK's "Debugging Tools for Windows" feature, which
-# build/vs_toolchain.py treats as mandatory, and this reports whether that is
-# still true in about a minute.
+# It is also the cheap way to confirm a fix, and the only place the Windows
+# setup path is exercised without paying for a sync. A 2 vCPU Windows minute
+# bills at a sixteenth of the 32 vCPU gate runner's, and this job does no
+# checkout of Chromium at all, so a full provision-then-verify rehearsal costs
+# cents against ~$15 and ~25 minutes for a series-gate run. Every Windows
+# prerequisite question -- is the component on the image, does the installer
+# add it, is it usable in the same job after a reboot-required exit code --
+# gets answered here, on the real image, and never inside a gate run that has
+# already paid for 28 GB of sync.
+#
+# Which is why the steps below both PROVISION and then VERIFY THE WHOLE SET:
+# scripts/verify-host-tooling.sh asserts exactly what
+# scripts/provision-windows-toolchain.sh installs, so a probe that passes and a
+# gate that then fails on a missing prerequisite is not a reachable outcome. A
+# probe asserting less than the gate needs would be worse than no probe.
 
 on:
   workflow_dispatch:
@@ -40,7 +51,10 @@ jobs:
   probe:
     name: probe-${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    # 15 was enough when this only reported what the image had. It now installs
+    # the SDK Debuggers feature and any missing Visual Studio component, both
+    # downloads, on the slowest runner class we use.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -105,11 +119,16 @@ jobs:
           du -sm /c/hostedtoolcache/* 2>/dev/null | sort -rn | head -10
       # Runs the same provisioning the build does, so this probe rehearses the
       # real Windows setup path rather than only reporting what the bare image
-      # has. A pass here means the build's first minutes will pass too.
-      - name: Provision Windows debugging tools
+      # has. A pass here means the build's first minutes will pass too. It
+      # reports the Visual Studio install path, the resolved MSVC toolset, the
+      # SDK version directories, whether the VS package cache exists, and per
+      # component whether it was already present or installed by this run --
+      # every Windows failure on this project so far was diagnosed from one
+      # line of that kind of output, and here it is free.
+      - name: Provision Windows toolchain
         if: ${{ matrix.target == 'windows-x64' }}
         shell: bash
-        run: bash scripts/provision-windows-debuggers.sh
+        run: bash scripts/provision-windows-toolchain.sh
       - name: Verify host tooling
         env:
           PROBE_TARGET: ${{ matrix.target }}

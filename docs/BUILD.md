@@ -131,6 +131,13 @@ each entry's name and complete patch bytes, in series order with NUL
 separators. Any edit to any listed patch changes that digest, even if the
 series file is unchanged.
 
+Windows builds record four more fields, because `windows-x64` is the only
+target whose toolchain comes from the runner rather than from a pin:
+`visual_studio_version`, `msvc_toolset_version`, `windows_sdk_version` and
+`vs_components_sha256`. They are attribution, not pins — see
+[Provisioning](#provisioning). They sit before `[outputs]`, so they change
+`manifest_sha256` and leave `outputs_sha256` alone.
+
 The `release-gate` job in `.github/workflows/release.yml` runs
 `scripts/validate-release-baseline.py --release` before scheduling any
 Chromium build. It checks the committed manifest against the current version,
@@ -405,15 +412,23 @@ header; `remoting`'s `atlapp.h` and `atlcrack.h` are WTL, vendored at
 lists are conditioned on building for ARM64 Win32, and `target_cpu` is `x64`.
 `build/WINDOWS_VS_COMPONENTS` records both decisions with their sources.
 
-Measured on the image: `dbghelp.dll` is absent, so the Debugging Tools feature
-is not installed, and `atlmfc` is absent, so the ATL component is not
-installed. The second one was learned the expensive way — the first Windows
-run to reach compilation reached 33,797 edges and failed on
-`'atldef.h' file not found` — which is why the check is now a table read from
-a pin file rather than a hand-maintained list of the failures seen so far.
-`.github/workflows/probe-runners.yml` runs the whole provision-then-verify
-path on the smallest instance of each family. Whether a component is present
-is a property of the image, and the cheapest runner answers it identically.
+Measured on the image by `.github/workflows/probe-runners.yml`, which runs the
+whole provision-then-verify path on a 2 vCPU Windows runner with no Chromium
+checkout: `dbghelp.dll` is absent, so the Debugging Tools feature is not
+installed, and `atlmfc` is absent, so the ATL component is not installed.
+Everything else in the table above is present, including the five `System32`
+CRT DLLs, whose absence would have arrived as a bare Python traceback out of
+`gn` rather than as anything nameable. The MSVC toolset is `14.44.35207`, the
+SDK carries `Include` and `Lib` for `10.0.22621.0` and `10.0.26100.0`, and
+`bin` carries six versions — which is exactly why the version the build uses is
+not autodetected.
+
+ATL being absent was learned the expensive way: the first Windows run to reach
+compilation reached 33,797 edges and failed on `'atldef.h' file not found`.
+That is why the check is now a table read from a pin file rather than a
+hand-maintained list of the failures seen so far. Whether a component is
+present is a property of the image, and the cheapest runner answers it
+identically.
 
 Free space is not. Measured: a 2 vCPU Windows runner reported 70.8 GB free while
 a 32 vCPU Windows runner reported 55 GB, a 14 GB difference on the class that
@@ -468,24 +483,42 @@ Three details there are not optional:
 - **No exit code is trusted anyway.** Both phases re-test the same files they
   tested before installing, and those files are the only success signal.
   Headers and import libraries need no registration — clang-cl only reads
-  them — so a 3010 is expected to be harmless here, but "expected" is not a
-  check. If ATL ever does need the reboot it asked for, provisioning fails
-  naming the component instead of handing the gate a broken toolchain, and the
-  message says that baking it into the image is then the only option.
+  them — so a 3010 should be harmless here, but "should" is not a check. If ATL
+  ever does need the reboot it asked for, provisioning fails naming the
+  component instead of handing the gate a broken toolchain, and the message
+  says that baking it into the image is then the only option.
+
+Measured, and it settles whether provisioning at job start is viable at all:
+the installer returns **0 in 23 seconds** on this image and the ATL headers are
+usable immediately, in the same job. It never asked for a reboot. The payload
+is 9 MB on disk. The behaviour on 3010, 1641, each documented failure code and
+an undocumented one was demonstrated against a stub installer rather than
+against a real reboot-required install, so that half is proven code and
+reasoned premise, not a measurement — which is why the re-check exists.
 
 One honest limit. The component payload is fetched from Microsoft at whatever
 servicing version the installed Build Tools is on, and there is no digest we
 can pin, unlike the SDK installer. That is a per-job network dependency inside
-every Windows build. It does not widen the reproducibility boundary as much as
-it first appears: `build/args/windows-x64.gn` deliberately pins no toolchain
-path, so the entire MSVC header set, the SDK and the CRT are *already* resolved
-from the runner's installation rather than from a pin. ATL joins a set that was
-never pinned, rather than opening a new hole. What is pinned is the request —
+every Windows build — small, 9 MB and 23 seconds measured, but real. The VS
+package cache on the image is 44 MB, so the payload does come off the network
+rather than out of a local cache.
+
+It does not widen the reproducibility boundary as much as it first appears:
+`build/args/windows-x64.gn` deliberately pins no toolchain path, so the entire
+MSVC header set, the SDK and the CRT are *already* resolved from the runner's
+installation rather than from a pin. ATL joins a set that was never pinned,
+rather than opening a new hole. What is pinned is the request —
 `build/WINDOWS_VS_COMPONENTS` names the component ids and `scripts/lib.sh`
-bounds the VS version to `[17.0,18.0)` — and the resolved toolset directory is
-logged on every run. Closing the boundary properly means recording that
-toolset version in `build/MANIFEST.lock` alongside the other resolved inputs,
-or building the runner image ourselves; neither is done today.
+bounds the VS version to `[17.0,18.0)`.
+
+"Already unpinned" is an argument for recording what we got, not for continuing
+not to, so `scripts/build.sh` writes the resolved Visual Studio instance
+version, MSVC toolset version, SDK version and a digest of
+`build/WINDOWS_VS_COMPONENTS` into `build/MANIFEST.lock` on Windows builds.
+That makes the input *attributed* rather than pinned: a reproducibility
+comparison that disagrees can now be traced to a toolset upgrade instead of
+being blamed on the patches. Pinning it properly means building the runner
+image ourselves, which is not done.
 
 Which SDK version the build uses is not decided by any pin of ours, and cannot
 drift. `build/vs_toolchain.py` hardcodes `SDK_VERSION = '10.0.26100.0'` and

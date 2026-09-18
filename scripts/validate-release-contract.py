@@ -19,6 +19,7 @@ separate, keyless check via ``gh attestation verify``.
 from __future__ import annotations
 
 import argparse
+from fractions import Fraction
 import json
 import math
 import pathlib
@@ -172,6 +173,31 @@ def type_matches(value: Any, expected: str) -> bool:
     return isinstance(value, TYPE_NAMES[expected])
 
 
+def multiple_step(value: Any, path: str, node_path: str) -> Fraction:
+    """Return a schema's ``multipleOf`` as an exact positive rational."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ContractError(f"{path}: {node_path} multipleOf must be a number")
+    if not math.isfinite(value) or value <= 0:
+        raise ContractError(f"{path}: {node_path} multipleOf must be positive and finite")
+    return Fraction(str(value))
+
+
+def is_multiple_of(value: int | float, step: Fraction) -> bool:
+    """Exact multiple test, because binary floating point cannot do this one.
+
+    ``value % step`` is wrong for a decimal step. Of the 101 battery levels
+    ``multipleOf: 0.01`` permits, 93 leave a nonzero remainder under ``%``
+    (0.09 % 0.01 is 0.009999999999999995), and dividing instead fails the
+    other way round (0.29 / 0.01 is 28.999999999999996). Both would reject a
+    level the schema allows. ``str()`` gives the shortest decimal that
+    round-trips the float, which is the literal the schema author wrote, so
+    the rationals built from it divide exactly.
+    """
+    if not math.isfinite(value):
+        return False
+    return (Fraction(str(value)) / step).denominator == 1
+
+
 def validate(
     value: Any,
     schema: dict[str, Any],
@@ -198,7 +224,7 @@ def validate(
         "minLength", "minimum", "minContains", "not", "oneOf", "pattern",
         "properties", "propertyNames", "required", "then", "type",
         "additionalProperties", "contains", "exclusiveMinimum", "exclusiveMaximum",
-        "uniqueItems",
+        "uniqueItems", "multipleOf",
     }
     unknown = set(schema) - supported - ANNOTATIONS
     if unknown:
@@ -243,6 +269,10 @@ def validate(
             errors.append(f"{path}: not above exclusiveMinimum {schema['exclusiveMinimum']}")
         if "exclusiveMaximum" in schema and value >= schema["exclusiveMaximum"]:
             errors.append(f"{path}: not below exclusiveMaximum {schema['exclusiveMaximum']}")
+        if "multipleOf" in schema:
+            step = multiple_step(schema["multipleOf"], path, "schema")
+            if not is_multiple_of(value, step):
+                errors.append(f"{path}: {value!r} is not a multiple of {schema['multipleOf']}")
 
     if isinstance(value, list):
         if "minItems" in schema and len(value) < schema["minItems"]:
@@ -407,6 +437,12 @@ def validate_schema_document(path: pathlib.Path) -> None:
                 re.compile(pattern)
             except re.error as exc:
                 raise ContractError(f"{path}: {node_path}.pattern is invalid") from exc
+        if "multipleOf" in node:
+            # Checked here as well as against an instance, because
+            # --check-schemas never walks into a document: a nonsense step
+            # would otherwise sit in the schema until the first profile
+            # carrying that field arrived.
+            multiple_step(node["multipleOf"], str(path), node_path)
 
     visit(schema, "$", path)
 

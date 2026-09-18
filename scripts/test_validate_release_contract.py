@@ -116,5 +116,27 @@ class ContractValidatorTests(unittest.TestCase):
         self.assertNotEqual(run_validator("profile", invalid_name).returncode, 0)
         invalid_size = {"theme": {"system_fonts": {"caption": {"family": "Arial", "size_px": 0}}}}
         self.assertNotEqual(run_validator("profile", invalid_size).returncode, 0)
+
+    def test_battery_step_accepts_every_level_the_schema_permits(self) -> None:
+        """`multipleOf: 0.01` under binary floating point.
+
+        All 101 levels the schema permits leave a nonzero `% 0.01` remainder
+        except eight, so a modulo implementation rejects 93 legal profiles --
+        including `level: 1.0`, the value the emitter reports whenever the
+        battery is absent. Every level is asserted rather than a sample,
+        because which ones survive `%` is an artefact of the representation
+        and not a property anyone can reason about.
+        """
+        for step in range(101):
+            value = {"battery": {"present": True, "charging": False, "level": step / 100,
+                                 "discharging_time_seconds": 60 * step}}
+            self.assertEqual(run_validator("profile", value).returncode, 0,
+                             f"level {step / 100} was rejected")
+        for off_step in ({"level": 0.875}, {"charging_time_seconds": 4230},
+                         {"discharging_time_seconds": 90}):
+            value = {"battery": {"present": True, "charging": True, "level": 0.5, **off_step}}
+            self.assertNotEqual(run_validator("profile", value).returncode, 0, off_step)
+
+
 if __name__ == "__main__":
     unittest.main()

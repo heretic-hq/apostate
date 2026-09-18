@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -409,6 +410,67 @@ def parse_axis(path: Path) -> dict:
         "servability": servability,
         "option_sets": option_sets,
     }
+
+
+# --------------------------------------------------------------------------
+# Stamping the pinned build into the captured user agents
+# --------------------------------------------------------------------------
+
+
+def load_build_stamp(data_root: Path) -> tuple[object, Path]:
+    """`user_agent_for_build` from the reference resolver, as a module attribute.
+
+    The rule that turns a captured UA string into the one this build may serve
+    has to be identical in the compiled tables and in the reference resolver,
+    or the binary and the golden vectors disagree about a page-visible string.
+    So there is one implementation and this loads it, the same way
+    `scripts/import-capture.py` loads the admission gate out of
+    `scripts/decompose-capture.py` rather than keeping a second copy.
+    """
+    script = data_root / "scripts/profile_resolver.py"
+    if not script.is_file():
+        raise GeneratorError(f"{script}: missing; it owns the user-agent build stamp")
+    spec = importlib.util.spec_from_file_location("apostate_profile_resolver", script)
+    if spec is None or spec.loader is None:
+        raise GeneratorError(f"{script}: cannot be loaded as a module")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not hasattr(module, "user_agent_for_build"):
+        raise GeneratorError(
+            f"{script} does not export user_agent_for_build; the reference resolver "
+            "changed shape and the compiled tables would carry a stale browser major"
+        )
+    return module, script
+
+
+def stamp_user_agents(axes: list[dict], stamp, pinned_version: str) -> int:
+    """Rewrite every `browser.user_agent` to the pinned build's major.
+
+    The tables record what a physical device sent, major included. The version a
+    UA claims is a build invariant -- `resources/profiles/catalogue.json` lists
+    `chromium_version` among the fields a profile never varies -- so it is the
+    build compiling these tables that decides it, not the capture. Doing the
+    substitution here means the compositor merges a finished string and needs no
+    version handling of its own.
+    """
+    stamped = 0
+    for axis in axes:
+        for option_set in axis["option_sets"]:
+            for option in option_set["options"]:
+                browser = option["value"].get("browser")
+                if not isinstance(browser, dict):
+                    continue
+                user_agent = browser.get("user_agent")
+                if not isinstance(user_agent, str):
+                    continue
+                try:
+                    browser["user_agent"] = stamp(user_agent, pinned_version)
+                except Exception as exc:
+                    raise GeneratorError(
+                        f"{axis['axis']}/{option['id']}: {exc}"
+                    ) from exc
+                stamped += 1
+    return stamped
 
 
 # --------------------------------------------------------------------------
@@ -1392,6 +1454,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"{dispersion_dir}: no dispersion tables found. The compositor "
                 "cannot draw from an empty catalogue"
             )
+
+        # The digest above is taken from the file bytes as authored, so it stays
+        # a digest of the inputs; build/CHROMIUM_VERSION is already one of them,
+        # which is what makes a version bump a new catalogue version. What the
+        # compiled table carries is the stamped string.
+        resolver, resolver_path = load_build_stamp(data_root)
+        read_paths.append(resolver_path)
+        stamp_user_agents(axes, resolver.user_agent_for_build, pinned_version)
 
         anchors = []
         for path in collect(anchors_dir):

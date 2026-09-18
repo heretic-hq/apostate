@@ -276,7 +276,7 @@ prevalence; they are not uniform.
 
 | Axis | Option unit | Conditioned on | Servability limit |
 | --- | --- | --- | --- |
-| `os_release` | OS build + client-hint `platformVersion` | platform | none |
+| `os_release` | OS build + client-hint `platformVersion` + the platform's UA string | platform | none |
 | `anchor` | GPU capability cluster | platform | the claimed platform's anchors, minus the software one; the host's backend is not consulted |
 | `gpu_identity` | vendor + renderer string pair | anchor | must be registered on the anchor |
 | `cpu` | core-count bucket | platform, device class | `<=` host logical cores |
@@ -289,6 +289,30 @@ prevalence; they are not uniform.
 | `locale` | language list + timezone | launch precedence, GeoIP | none |
 
 Notes that matter per axis:
+
+**OS release.** This axis owns every surface that names the operating system:
+`navigator.platform`, the `Sec-CH-UA-Platform` and `-Platform-Version` hints,
+and the complete `navigator.userAgent` string. They live in one option because
+a browser that contradicts itself about its OS is more detectable than one
+claiming nothing, and one draw cannot contradict itself. Splitting the UA into
+its own axis would let two draws pick a Windows `navigator.platform` and a macOS
+user agent, which is worse than shipping neither.
+
+The UA string is stored as a physical device sent it, never assembled: the OS
+token, the AppleWebKit version and the trailing Safari token vary together, and
+only a capture records them together. Chrome's UA reduction freezes the OS token
+per platform, so one measured string covers every release of that platform --
+every Windows capture in `resources/fingerprints/raw` carries
+`Windows NT 10.0` whatever the real build, every macOS one
+`Intel Mac OS X 10_15_7` whatever the real version.
+
+The browser version inside it is not the profile's. It is an invariant this
+binary owns, so the major is stamped in from the pinned build --
+`user_agent_for_build` in `scripts/profile_resolver.py`, called once by
+`scripts/generate-dispersion-tables.py` when the tables are compiled and again
+on the reference path, so both implementations serve one string. A Chromium bump
+therefore moves the UA without a data edit, and a table string the rule cannot
+stamp fails the build rather than shipping a stale major.
 
 **Font packs.** The mandatory core set for an OS release is not optional. A
 machine claiming macOS without Menlo, Monaco, Zapfino, PingFang SC and

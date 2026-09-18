@@ -107,6 +107,24 @@ _PROFILE_TOP_LEVEL = {
 _UNION_PATHS = frozenset({("fonts", "enumeration_allowlist")})
 _BUILD_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)\.(\d+)$")
 _CHROME_UA_RE = re.compile(r"(?:Chrome|Chromium)/(\d+)(?:\.|\s|$)")
+# The reduced UA's browser-version token. Chrome's UA reduction renders the
+# version as MAJOR.0.0.0 and freezes everything else per platform, so the major
+# is the only part of a captured UA string that may legitimately differ from the
+# build serving it. `\b` before the product name is load-bearing: it refuses to
+# match inside "HeadlessChrome/...", which is a product token patch 0002 removes
+# at the emitter and which no table may carry.
+_UA_PRODUCT_RE = re.compile(r"\b(Chrome|Chromium)/(\d+)\.0\.0\.0\b")
+# The OS token Chrome's reduced UA carries for each platform persona. Frozen per
+# platform by the reduction, which is why one string covers every release: every
+# Windows capture in resources/fingerprints/raw carries "Windows NT 10.0"
+# whatever the real build, every macOS one "Intel Mac OS X 10_15_7" whatever the
+# real version. Keys are exactly PLATFORMS, and _normalise_platform admits
+# nothing else.
+_UA_OS_TOKENS = {
+    "windows": "Windows NT 10.0",
+    "macos": "Macintosh; Intel Mac OS X 10_15_7",
+    "linux": "X11; Linux x86_64",
+}
 _LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 _TIMEZONE_RE = re.compile(r"^(?:UTC|[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)*)$")
 _ID_RE = re.compile(r"^[a-z0-9]+(?:[-.][a-z0-9]+)*$")
@@ -325,6 +343,48 @@ def subset_included(root: bytes, label: str, optional_index: int, weight: int) -
     """Independent inclusion for optional pack ``optional_index``."""
     return ((draw(root, label, optional_index + 1) * 100) >> 64) < int(weight)
 
+
+# --------------------------------------------------------------------------
+# The one build-stamping rule, shared with the table generator
+# --------------------------------------------------------------------------
+def user_agent_for_build(user_agent: str, browser_build: str) -> str:
+    """A captured UA string re-stamped with the major of ``browser_build``.
+
+    ``resources/profiles/dispersion/os_release.json`` stores each platform's UA
+    exactly as a physical device sent it, because the OS token, the AppleWebKit
+    version and the trailing Safari token vary together and only a capture
+    records them together -- the argument ``config/profile.schema.json`` makes
+    for the field and patch 0009 makes for replacing the string whole.
+
+    The browser version inside it is not the profile's to choose.
+    ``resources/profiles/catalogue.json`` names ``chromium_version`` a build
+    invariant a profile never varies, and the schema for ``browser.user_agent``
+    says outright that its version must match the binary because Apostate does
+    not spoof its own version. So the major is substituted here from the build
+    that will actually serve the string. That is what stops a Chromium bump from
+    shipping the major of whatever device the capture came off: the two real
+    Windows captures in ``resources/fingerprints/raw`` differ in nothing but
+    this token, 152 on one box and 153 on the other.
+
+    ``scripts/generate-dispersion-tables.py`` calls this when it compiles the
+    tables into the binary, so the C++ compositor merges a string that already
+    carries the pinned build's major and needs no substitution of its own.
+    """
+    build = _BUILD_RE.fullmatch(browser_build)
+    if build is None:
+        raise ResolverError(
+            f"browser_build {browser_build!r} is not a Chromium four-component version, "
+            "so there is no major to stamp into a user agent"
+        )
+    found = _UA_PRODUCT_RE.findall(user_agent)
+    if len(found) != 1:
+        raise ResolverError(
+            f"user agent {user_agent!r} carries {len(found)} reduced Chrome version "
+            "token(s), expected exactly one of the form Chrome/MAJOR.0.0.0: a string "
+            "without one is not a reduced Chrome UA, and one with two would leave a "
+            "stale major behind wherever this rule did not reach"
+        )
+    return _UA_PRODUCT_RE.sub(r"\g<1>/" + build.group(1) + ".0.0.0", user_agent)
 
 # --------------------------------------------------------------------------
 # Catalogue and dispersion tables
@@ -974,13 +1034,44 @@ def _coherence_check(profile: Mapping[str, Any], platform: str, browser_build: s
     wow64 = (profile.get("platform") or {}).get("wow64")
     if wow64 is True and platform != "windows":
         raise ResolverError("wow64 is a Windows-only fact")
+    # coh: coh.ua-platform-agreement - navigator.platform, the two Client Hints
+    # platform reads and the UA string's OS token are all drawn from one
+    # os_release option, so they cannot disagree by construction. What
+    # composition could still get wrong is shipping no UA at all, and for the
+    # whole of the first V3 run it did: the field was declared in the schema and
+    # consumed by patch 0009, no option supplied it, the override never fired,
+    # and Chromium's host-derived default served "X11; Linux x86_64" underneath a
+    # Win32 navigator.platform. An absent UA is a defect, not a silence, so the
+    # two conditions below are unconditional.
     browser = profile.get("browser") or {}
     user_agent = browser.get("user_agent")
-    if isinstance(user_agent, str):
-        matched = _CHROME_UA_RE.search(user_agent)
-        build_match = _BUILD_RE.fullmatch(browser_build)
-        if matched and build_match and matched.group(1) != build_match.group(1):
-            raise ResolverError("profile user-agent major version conflicts with browser_build")
+    if not isinstance(user_agent, str) or not user_agent:
+        raise ResolverError(
+            f"composed profile claims platform {platform} but carries no "
+            "browser.user_agent: with the field absent the UA emitter falls back to the "
+            "build's host-derived string, which contradicts navigator.platform and both "
+            "Client Hints platform reads"
+        )
+    claimed_token = _UA_OS_TOKENS[platform]
+    wrong = sorted(token for name, token in _UA_OS_TOKENS.items()
+                   if name != platform and token in user_agent)
+    if claimed_token not in user_agent or wrong:
+        raise ResolverError(
+            f"profile user-agent {user_agent!r} does not describe the claimed platform "
+            f"{platform}: expected the OS token {claimed_token!r}"
+            + (f" and not {wrong}" if wrong else "")
+        )
+    # coh: coh.ua-version-agreement - the major a UA claims belongs to the build,
+    # not to the device the string was captured off. `user_agent_for_build`
+    # stamps it during composition; this is that substitution's post-condition,
+    # and it is what fails if a table ever carries a UA the rule could not place.
+    matched = _CHROME_UA_RE.search(user_agent)
+    build_match = _BUILD_RE.fullmatch(browser_build)
+    if matched is None or build_match is None or matched.group(1) != build_match.group(1):
+        raise ResolverError(
+            f"profile user-agent {user_agent!r} does not claim the major of browser build "
+            f"{browser_build}"
+        )
 
 
 def _first(mapping: Mapping[str, Any], *keys: str, default: Any = None) -> Any:
@@ -1232,6 +1323,14 @@ def _resolve_internal(config: Mapping[str, Any] | None = None, **overrides: Any)
     # it. Derived from the composition root rather than the profile digest: a
     # field inside the profile cannot depend on a hash of the profile.
     profile["id"] = f"fp-{root.hex()[:24]}"
+
+    # The tables carry the UA as captured. The compiled tables the browser reads
+    # are stamped once by scripts/generate-dispersion-tables.py; this is the same
+    # rule on the reference path, so both implementations serve one string.
+    composed_browser = profile.get("browser")
+    if isinstance(composed_browser, dict) and isinstance(composed_browser.get("user_agent"), str):
+        composed_browser["user_agent"] = user_agent_for_build(
+            composed_browser["user_agent"], browser_build)
 
     _derive_work_area(profile)
     locale_source = _apply_locale_overrides(profile, cfg)

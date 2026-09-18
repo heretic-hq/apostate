@@ -100,6 +100,75 @@ Two reads of the same value inside one launch always agree. There is no canvas
 noise, no WebGL noise and no audio noise anywhere in this browser. Variation
 comes from a different seed, which is a different device.
 
+## Headless Linux servers
+
+This is the deployment most Apostate installs run in, and it is supported
+directly rather than tolerated. No GPU is required and no graphics switch has to
+be passed:
+
+```sh
+./chrome --headless=new --fingerprint=12345
+```
+
+The browser serves the profile's GPU identity whether or not the host has a
+card. On a machine with no graphics device the persona picks the capability
+cluster, so a default Linux launch presents an NVIDIA identity and
+`--fingerprint-platform=windows` presents a Direct3D 11 one. The host's own
+software rasteriser is not what a page sees. What a page can still tell is
+render *timing* and per-pixel output, which is a property of the rasteriser
+rather than of the identity.
+
+[docs/LIMITATIONS.md](docs/LIMITATIONS.md) has the measured timing numbers, the
+one capability that stays bound to the host, and the status of this behaviour: it
+is new in this release and is on that page's list of things written but not yet
+run, so read `getSupportedExtensions()` and the renderer string from a page on
+your own host before relying on either.
+
+Both packages default to headless, so the `launch()` examples above run
+unchanged on such a host.
+
+### Headed on a virtual display
+
+For the most aggressive targets, the suites that score behaviour as well as the
+fingerprint, run headed on a virtual display instead. There is still no GPU
+involved: the display is an X server with nothing behind it.
+
+```sh
+sudo apt install xvfb
+Xvfb :99 -screen 0 1920x1080x24 &
+export DISPLAY=:99
+```
+
+Then launch headed, behind a residential proxy:
+
+```python
+from apostate import launch
+
+browser = launch(
+    fingerprint=12345,
+    headless=False,
+    proxy="http://user:pass@residential-host:8080",
+)
+```
+
+```javascript
+import { launch } from "@heretic-hq/apostate";
+
+const browser = await launch({
+  fingerprint: 12345,
+  headless: false,
+  proxy: "http://user:pass@residential-host:8080",
+});
+```
+
+`DISPLAY` is read from the environment the launcher runs in, so exporting it
+before the script is the whole of the wiring. The binary run directly takes the
+same environment:
+
+```sh
+DISPLAY=:99 ./chrome --fingerprint=12345
+```
+
 ## Pin an identity
 
 A random identity per session looks like a different machine every time. Hitting
@@ -130,8 +199,9 @@ presents as:
 A persona that does not match the host needs that platform's fonts installed on
 the machine, which is a one-time setup step you do yourself:
 [docs/FONTS.md](docs/FONTS.md). Running without them is a common reason a
-session gets blocked. Read [known limitations](docs/LIMITATIONS.md) too, because
-the OS identity moves and the GPU does not.
+session gets blocked. Read [known limitations](docs/LIMITATIONS.md) too: on a
+host with a graphics device the OS identity moves and the GPU does not, and on
+a host without one the GPU moves with the persona.
 
 To see exactly what a launch decided and why, ask it:
 
@@ -246,7 +316,10 @@ Not changed, and not claimable:
 - The Chromium version. The binary really is the version it reports.
 - Anything the machine cannot do. A profile presents fewer cores, less memory,
   a smaller screen and fewer codecs than the host has, never more.
-- The graphics backend. A Windows persona on a Mac keeps an Apple GPU.
+- The graphics backend, where the host has one. A Windows persona on a Mac keeps
+  an Apple GPU. A host with no graphics device has no backend to keep, so there
+  the persona picks the GPU cluster — see
+  [Headless Linux servers](#headless-linux-servers).
 - Fonts that are not installed. Enumeration removes families; it cannot add one
   without the font file.
 - The WebRTC packet source, for now. A relay through a SOCKS5 proxy is written

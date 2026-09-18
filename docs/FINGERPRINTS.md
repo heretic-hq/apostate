@@ -115,19 +115,22 @@ The five anchors in `corpus/anchors/`, measured here, with digests as emitted by
 | `windows-d3d11-intel-79dfeb5b4f99` | ANGLE/D3D11 | UHD 630 | `be8acf33` | `e695c2da` | `918f09f6` |
 | `linux-swiftshader-google-6922d61bab83` | ANGLE/SwiftShader | SwiftShader Device (Subzero) | `6087e24b` | `9b8362e1` | `918f09f6` |
 
-The last one is the odd one and it is deliberate. It is a software rasteriser,
-captured from a stock Chromium rather than from hardware, so its evidence class
-is `compatibility-capture` and it claims no hardware at all. Its purpose is to
-give a GPU-less host something coherent to serve: patches `0027` and `0038`
-raise this fork's own SwiftShader limits above stock's so a profile's claim can
-pass the clamp, and no stock build reports those raised values. Serving this
-anchor claims the stock figures, and because the clamp only ever reduces, the
-stock figures are what reach the page. So a GPU-less host presenting this
-cluster looks like stock software rendering instead of looking like this fork.
-It is the newest of the five and it has not been compiled into a binary yet: its
-id is absent from the shipped 152.0.7977.83 macOS build while the two hardware
-anchors that build serves are present. It also offers one identity, because it
-has one member, so it rotates nothing.
+The last one is the odd one. It is a software rasteriser, captured from a stock
+Chromium rather than from hardware, so its evidence class is
+`compatibility-capture` and it claims no hardware at all. No seed draws it, on
+any host, including a host with no GPU: a GPU-less host serves the profile's
+hardware identity like any other, and a renderer string that names a software
+rasteriser is a signal handed to a detector for free. What the anchor remains is
+the way to ask for stock software rendering deliberately, through
+`--fingerprint-anchor` or the two GPU string switches. Serving it claims stock's
+limit figures rather than the raised ones patches `0027` and `0038` give this
+fork's own SwiftShader, and because the clamp only ever reduces, stock's figures
+are what reach the page — so a launch that pins it looks like stock software
+rendering rather than like this fork. It is the newest of the five and it has
+not been compiled into a binary yet: its id is absent from the shipped
+152.0.7977.83 macOS build while the two hardware anchors that build serves are
+present. It also offers one identity, because it has one member, so it rotates
+nothing.
 
 Four results follow, and they do not all point the same way.
 
@@ -156,15 +159,22 @@ not a GPU measurement at all. It is fonts and raster, which is why it is
 excluded from the anchor key and recorded separately so the exclusion stays
 checkable.
 
-Therefore: **`--fingerprint-platform` does not move the GPU cluster.** It
-changes OS identity, client hints, fonts, voices, locale, screen geometry and
-hardware buckets. The GPU cluster is selected from anchors the host can
-actually serve. On a macOS host a Windows persona keeps an Apple GPU cluster,
-and that mismatch is reported as a limitation rather than hidden.
+Therefore: **`--fingerprint-platform` does not move the GPU cluster on a host
+with a graphics backend.** It changes OS identity, client hints, fonts, voices,
+locale, screen geometry and hardware buckets. Where the host has hardware, the
+GPU cluster is selected from anchors that hardware can actually serve: on a
+macOS host a Windows persona keeps an Apple GPU cluster, and that mismatch is
+reported as a limitation rather than hidden.
 
-The consequence for deployment: a coherent Windows fingerprint wants a Windows
-host. That is a property of graphics drivers rather than of this codebase, and
-every product in this space has it. This one reports it.
+Where the host has no graphics backend at all, the persona does pick the
+cluster, because there is no capability table for the claim to contradict. A
+GPU-less Linux server presents its persona's cluster and serves the profile's
+GPU identity, not the host's software rasteriser.
+
+The consequence for deployment: a coherent Windows fingerprint wants either a
+Windows host or a host with no GPU. The middle case, a Windows persona on a Mac
+or on a Linux workstation with a card, is the one that reports a mismatch, and
+that is a property of graphics drivers rather than of this codebase.
 
 ### Three anchors were measured on another build
 
@@ -232,9 +242,9 @@ sampling and no re-draw, so every profile is coherent by construction rather
 than by validation.
 
 ```text
-platform persona -> os release -> anchor (host-servable) -> identity string
-  -> cpu bucket -> memory bucket -> panel -> furniture -> font packs
-  -> media topology -> voice table -> locale/timezone
+platform persona -> os release -> anchor (host backend where there is one)
+  -> identity string -> cpu bucket -> memory bucket -> panel -> furniture
+  -> font packs -> media topology -> voice table -> locale/timezone
 ```
 
 A coherence-graph violation after resolution is a defect in the option tables,
@@ -249,7 +259,7 @@ prevalence; they are not uniform.
 | Axis | Option unit | Conditioned on | Servability limit |
 | --- | --- | --- | --- |
 | `os_release` | OS build + client-hint `platformVersion` | platform | none |
-| `anchor` | GPU capability cluster | platform, host backend | host must serve the cluster |
+| `anchor` | GPU capability cluster | platform, and the host backend where the host has one | a host with a hardware backend must serve the cluster; a host with no graphics device draws on the persona platform instead |
 | `gpu_identity` | vendor + renderer string pair | anchor | must be registered on the anchor |
 | `cpu` | core-count bucket | platform, device class | `<=` host logical cores |
 | `memory` | `deviceMemory` bucket | device class | `<=` host physical memory |

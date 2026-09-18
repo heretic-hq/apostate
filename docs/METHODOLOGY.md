@@ -155,11 +155,12 @@ Profiles are partitioned by CPU instruction set for that reason.
 **WebGL limit tables identify the backend, not the GPU.** On Metal, ANGLE
 hard-codes the whole limit and precision table instead of querying the device,
 so an M1 and an M4 Max return identical numbers. The same NVIDIA silicon returns
-a different table through D3D11 than through Vulkan. A claimed GPU model
-therefore cannot carry a limit table from a backend the host is not running, and
-the GPU capability cluster is selected from what the host's graphics stack can
-actually serve. [docs/LIMITATIONS.md](LIMITATIONS.md) states the user-visible
-consequence.
+a different table through D3D11 than through Vulkan. So a limit table is
+evidence about a backend, and on a host that is running one the capability
+cluster is selected from what that backend can serve. On a host running no
+hardware backend at all there is no table for a claim to contradict, and the
+cluster follows the claimed platform instead.
+[docs/LIMITATIONS.md](LIMITATIONS.md) states the user-visible consequence.
 
 **Software rendering is a throughput fact, not a string fact.** Stock
 Chromium's SwiftShader caps `MAX_TEXTURE_SIZE` and `MAX_RENDERBUFFER_SIZE` at
@@ -170,7 +171,24 @@ fragment-shader workload runs about 230 times slower in software and small draw
 calls about 35 times slower, on an identical CPU baseline. Closing that would
 mean either making software rendering fast or slowing real hardware down, and a
 deliberate timing adjustment is a new observable, which rule 3 forbids. So the
-browser declines to claim a discrete GPU on a host that renders in software.
+timing gap ships open and the strings do not: a host that renders in software
+serves the profile's GPU identity like any other host.
+
+That last sentence is a reversal. An earlier revision of this page ended the
+paragraph with "the browser declines to claim a discrete GPU on a host that
+renders in software", and patch commentary written against that rule is still in
+the tree. The reversal is recorded here rather than quietly deleted, because
+this page is cited as authoritative elsewhere.
+
+The reason is deployment shape rather than taste. Almost every host this runs on
+is a headless server with no GPU, and `ANGLE (Google, Vulkan 1.3.0 (SwiftShader
+Device (LLVM ...)))` sorts such a launch out of the ordinary population on a
+substring match, while the timing gap it was supposed to stay coherent with
+costs a page a benchmark to measure. Trading a free signal for an expensive one
+is the wrong direction. Rule 6 is not weakened by this, because a renderer
+string is an identity rather than a capacity: what the host cannot honour — an
+extension it does not implement, a limit it would refuse to allocate — is still
+subtracted rather than claimed.
 
 ## 10. Verification
 

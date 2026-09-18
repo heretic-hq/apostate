@@ -116,6 +116,44 @@ browser = launch(
 | `user_data_dir` | off-the-record | Persist cookies and storage. |
 | `args` | none | Extra switches passed to the browser. |
 
+### Headless Linux servers
+
+The usual deployment, and the one this is built for: a Linux server with no
+graphics device. Nothing extra is needed and no GPU is required. `headless` is
+already the default, and the profile's GPU identity is served whether or not the
+host has a card — on a machine with no graphics device the persona picks the
+capability cluster, so a default launch presents an NVIDIA identity and
+`fingerprint_platform="windows"` presents a Direct3D 11 one.
+
+For the most aggressive targets, the suites that score behaviour as well as the
+fingerprint, run headed on a virtual display instead. Still no GPU: the display
+is an X server with nothing behind it.
+
+```sh
+sudo apt install xvfb
+Xvfb :99 -screen 0 1920x1080x24 &
+export DISPLAY=:99
+```
+
+```python
+browser = launch(
+    fingerprint=42,
+    headless=False,
+    proxy="http://user:pass@residential-host:8080",
+)
+```
+
+`DISPLAY` reaches the browser through the environment. The launcher sets no
+environment of its own, so the driver hands the browser yours, and exporting
+`DISPLAY` before the script runs is the whole of the wiring.
+
+What a page can still tell on such a host is render timing and per-pixel output,
+which come from the rasteriser rather than from the identity. The measured
+numbers, the one capability that stays host-bound, and the status of the served
+GPU identity — new in this release, and on that page's list of behaviours
+written but not yet run — are in
+[docs/LIMITATIONS.md](https://github.com/heretic-hq/apostate/blob/main/docs/LIMITATIONS.md).
+
 ### Fonts for a cross-platform persona
 
 Asking for a platform other than the one you are running on means that

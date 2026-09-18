@@ -110,13 +110,24 @@ case "$(uname -s)" in
     # this records the value that was actually used.
     _sdk_version="$(sed -n "s/^SDK_VERSION = '\([^']*\)'.*/\1/p" \
       "$SRC/build/vs_toolchain.py" | head -1)"
+    # The SDK's servicing revision, measured rather than assumed. This is the
+    # field the sixth Windows defect proves is load-bearing: revisions 4654 and
+    # 7705 both live in a directory called 10.0.26100.0 and differ in whether a
+    # type Chromium requires exists at all, so windows_sdk_version alone cannot
+    # distinguish two builds that compiled different headers. dbghelp.dll is
+    # used because it is the one SDK file with a version resource that tracks
+    # servicing; the headers have none, which is why
+    # build/WINDOWS_SDK_REQUIREMENTS asserts them by symbol instead.
+    _sdk_revision="$(windows_file_version "$(windows_sdk_root)/Debuggers/x64/dbghelp.dll" || true)"
     windows_toolchain_lines=(
       "visual_studio_version = \"${_vs_version:-unknown}\""
       "msvc_toolset_version = \"$([ -n "$_toolset" ] && basename "$_toolset" || echo unknown)\""
       "windows_sdk_version  = \"${_sdk_version:-unknown}\""
+      "windows_sdk_revision = \"${_sdk_revision:-unknown}\""
       "vs_components_sha256 = \"$(shasum -a 256 "$REPO_ROOT/build/WINDOWS_VS_COMPONENTS" | cut -d' ' -f1)\""
+      "sdk_requirements_sha256 = \"$(shasum -a 256 "$REPO_ROOT/build/WINDOWS_SDK_REQUIREMENTS" | cut -d' ' -f1)\""
     )
-    unset _vs_version _toolset _sdk_version
+    unset _vs_version _toolset _sdk_version _sdk_revision
     ;;
 esac
 

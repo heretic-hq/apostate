@@ -163,12 +163,16 @@ case "$target" in
     # ------------------------------------------------------------------
     # Windows SDK
     # ------------------------------------------------------------------
-    sdk_root="${WINDOWSSDKDIR:-/c/Program Files (x86)/Windows Kits/10}"
+    sdk_root="$(windows_sdk_root)"
     # build/vs_toolchain.py hardcodes SDK_VERSION and prints it verbatim as gn's
     # sdk_version, so the directory name is not ours to choose. This file
     # mirrors it because the checkout does not exist yet; scripts/configure.sh
     # compares the two once it does, so the mirror cannot drift unnoticed.
-    sdk_version="$(tr -d '[:space:]' < "$REPO_ROOT/build/WINDOWS_SDK_VERSION" 2>/dev/null)"
+    #
+    # And the directory name is ALL it gives us: it is the major build, so it
+    # is identical on every 26100 servicing revision. The revision assertions
+    # below are a separate mechanism for that reason.
+    sdk_version="$(windows_sdk_version 2>/dev/null || true)"
     if [ -z "$sdk_version" ]; then
       fail "build/WINDOWS_SDK_VERSION is missing or empty; cannot check the SDK trees"
     elif [ ! -d "$sdk_root" ]; then
@@ -229,6 +233,61 @@ case "$target" in
           note "absent   Debuggers/x64/$opt (optional)"
         fi
       done
+
+      # ----------------------------------------------------------------
+      # Revision, not presence
+      # ----------------------------------------------------------------
+      # Everything above asks "does this exist", and none of it can tell SDK
+      # revision 4654 from 7705: both install into Include/10.0.26100.0, and
+      # HKLM\...\Windows Kits\Installed Roots keys the same way, so the
+      # revision is nowhere in a name. Measured cost of not checking it: the
+      # windows-x64 gate reached 26,642 of 33,797 edges and failed with
+      # "error: unknown type name 'IUIAutomationClientInfo'", with every
+      # presence check above green.
+      want_revision="$(tr -d '[:space:]' < "$REPO_ROOT/build/WINDOWS_SDK_INSTALLER_VERSION" 2>/dev/null)"
+      if [ ! -f "$REPO_ROOT/build/WINDOWS_SDK_REQUIREMENTS" ]; then
+        # Explicitly, rather than letting the read loop find nothing. A table
+        # that silently reads as empty is a check that renders as green.
+        fail "build/WINDOWS_SDK_REQUIREMENTS is missing; no SDK revision is being checked at all"
+      else
+        note "SDK revision requirements (pinned installer ${want_revision:-<unset>}):"
+        while IFS=' ' read -r kind path expected; do
+          [ -n "$kind" ] || continue
+          case "$kind" in
+            symbol)
+              windows_sdk_has_symbol "$sdk_root/$path" "$expected"
+              case "$?" in
+                0) note "present  $expected, declared under $path" ;;
+                2) fail "no directory $sdk_root/$path, so $expected cannot be checked
+      install: Windows 11 SDK ${want_revision:-10.0.26100.7705}
+      needed by: build/WINDOWS_SDK_REQUIREMENTS" ;;
+                *) fail "$expected is not declared by any header under $sdk_root/$path
+      install: Windows 11 SDK ${want_revision:-10.0.26100.7705}; this SDK is an OLDER servicing revision
+      needed by: build/WINDOWS_SDK_REQUIREMENTS, which cites the consumer. The
+      directories are all present -- the revision is what is wrong, and the
+      directory names cannot show it" ;;
+              esac
+              ;;
+            version)
+              got_version="$(windows_file_version "$sdk_root/$path" || true)"
+              if [ -z "$got_version" ]; then
+                fail "cannot read a FileVersion from $sdk_root/$path
+      install: Windows 11 SDK ${want_revision:-10.0.26100.7705}
+      needed by: build/WINDOWS_SDK_REQUIREMENTS requires it to be >= $expected"
+              elif version_at_least "$got_version" "$expected"; then
+                note "present  $path is $got_version (>= $expected)"
+              else
+                fail "$sdk_root/$path is $got_version, older than the required $expected
+      install: Windows 11 SDK ${want_revision:-10.0.26100.7705} including \"Debugging Tools for Windows\"
+      needed by: docs/windows_build_instructions.md, for reading the large-page PDBs Chrome uses above 4 GiB"
+              fi
+              ;;
+            *)
+              fail "build/WINDOWS_SDK_REQUIREMENTS has an unknown requirement kind '$kind'; nothing checked that row"
+              ;;
+          esac
+        done < <(windows_sdk_requirements)
+      fi
     fi
 
     # ------------------------------------------------------------------

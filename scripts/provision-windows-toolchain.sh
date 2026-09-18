@@ -308,27 +308,42 @@ PS1
 fi
 
 # ---------------------------------------------------------------------------
-# Phase 2: the Windows SDK's Debugging Tools feature
+# Phase 2: the Windows SDK, at the pinned servicing revision
 # ---------------------------------------------------------------------------
 #
-# The installer is pinned by URL AND by SHA-256, because a pinned URL only
-# promises a name. build/WINDOWS_SDK_INSTALLER_URL is the version-specific
-# 10.0.26100 link, not a "latest SDK" link -- the same link Chromium's own
-# upstream neighbour (microsoft/WindowsAppSDK build/scripts/windows-sdk.ps1)
-# uses for this SDK version. Only OptionId.WindowsDesktopDebuggers is requested,
-# never Microsoft's "/features +".
+# This phase used to install only the Debugging Tools feature, and its
+# idempotency test was "does dbghelp.dll exist". Both were too narrow, and the
+# sixth Windows defect is what that cost: the image carries SDK 10.0.26100 at
+# servicing revision 4654, Chromium's own
+# docs/windows_build_instructions.md:54-56 requires 10.0.26100.7705, and
+# ui/accessibility/platform/uia_client_info_source_win.cc uses
+# IUIAutomationClientInfo unconditionally. The gate reached 26,642 of 33,797
+# edges before failing on "unknown type name". A dbghelp-only test would have
+# skipped this install entirely and never touched the headers.
 #
-# Which SDK version the build uses is NOT decided here and cannot drift:
-# build/vs_toolchain.py hardcodes SDK_VERSION = '10.0.26100.0' and prints it
-# verbatim as gn's sdk_version, with build/toolchain/win/setup_toolchain.py
-# holding a second copy as a cross-check. There is no version autodetection to
-# mislead, so an SDK directory appearing here can never be selected over the
-# intended one. That pin travels with build/CHROMIUM_VERSION. This script still
-# logs the version directories before and after, because a component of the
-# pinned version DISAPPEARING is a real failure and the listing is how it would
-# be recognised.
+# So the predicate is now build/WINDOWS_SDK_REQUIREMENTS -- the revision table
+# -- and the features requested include the desktop C++ headers and libraries,
+# not just the debuggers. Option ids are Microsoft's, taken from
+# microsoft/WindowsAppSDK build/scripts/Install-WindowsSdkISO.ps1:11, which
+# requests OptionId.DesktopCPPx64, OptionId.DesktopCPPx86 and
+# OptionId.WindowsDesktopDebuggers among others. Never Microsoft's
+# "/features +", which installs everything on the target with the least disk.
+#
+# The installer is pinned by URL AND by SHA-256, because a pinned URL only
+# promises a name. build/WINDOWS_SDK_INSTALLER_URL is the version-specific link
+# for one release from Microsoft's own download table, not a "latest SDK" link.
+#
+# Which Include/Lib DIRECTORY the build uses is not decided here and cannot
+# drift: build/vs_toolchain.py hardcodes SDK_VERSION = '10.0.26100.0' and
+# prints it verbatim as gn's sdk_version, with
+# build/toolchain/win/setup_toolchain.py holding a second copy as a
+# cross-check. That is also precisely why the revision needs its own table: an
+# upgrade from 4654 to 7705 changes the headers inside that directory and does
+# not change its name. This script logs the version directories before and
+# after, because a component of the pinned version DISAPPEARING is a real
+# failure and the listing is how it would be recognised.
 
-sdk_root="${WINDOWSSDKDIR:-/c/Program Files (x86)/Windows Kits/10}"
+sdk_root="$(windows_sdk_root)"
 [ -d "$sdk_root" ] || die "no Windows SDK at $sdk_root"
 dbghelp="$sdk_root/Debuggers/x64/dbghelp.dll"
 
@@ -339,18 +354,44 @@ list_versions() {
   done
 }
 
-if [ -f "$dbghelp" ]; then
-  say "debugging tools already present at $sdk_root/Debuggers"
-  list_versions
+# Every reason this phase might need to run, gathered rather than short-
+# circuited, so one log says what the image is short of instead of one thing
+# per run. Same reason verify-host-tooling.sh reports every gap.
+sdk_gaps=()
+[ -f "$dbghelp" ] || sdk_gaps+=("Debuggers/x64/dbghelp.dll is absent")
+while IFS=' ' read -r kind path expected; do
+  [ -n "$kind" ] || continue
+  case "$kind" in
+    symbol)
+      windows_sdk_has_symbol "$sdk_root/$path" "$expected" ||
+        sdk_gaps+=("$expected is not declared under $path")
+      ;;
+    version)
+      got="$(windows_file_version "$sdk_root/$path" || true)"
+      if [ -z "$got" ]; then
+        sdk_gaps+=("no FileVersion readable from $path")
+      elif ! version_at_least "$got" "$expected"; then
+        sdk_gaps+=("$path is $got, older than the required $expected")
+      fi
+      ;;
+    *) die "build/WINDOWS_SDK_REQUIREMENTS has an unknown requirement kind '$kind'" ;;
+  esac
+done < <(windows_sdk_requirements)
+
+say "SDK version directories present"
+list_versions
+
+if [ "${#sdk_gaps[@]}" -eq 0 ]; then
+  say "the Windows SDK already satisfies every pinned requirement"
   exit 0
 fi
+
+say "${#sdk_gaps[@]} SDK requirement(s) unmet:"
+for gap in "${sdk_gaps[@]}"; do printf '  %s\n' "$gap"; done
 
 url="$(pin WINDOWS_SDK_INSTALLER_URL)"
 version="$(pin WINDOWS_SDK_INSTALLER_VERSION)"
 want_sha="$(pin WINDOWS_SDK_INSTALLER_SHA256)"
-
-say "SDK version directories before install"
-list_versions
 
 installer_exe="$work/winsdksetup.exe"
 
@@ -367,24 +408,60 @@ say "installer sha256 $got_sha"
   got      $got_sha
 The pinned URL served different bytes. Verify the release before repinning."
 
-say "installing only OptionId.WindowsDesktopDebuggers"
+say "installing SDK $version: desktop C++ headers and libraries, and the debuggers"
 # MSYS rewrites arguments that look like paths, so /features would arrive as a
 # Windows path and the installer would reject it.
 set +e
 MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
-  "$installer_exe" /features OptionId.WindowsDesktopDebuggers /quiet /norestart
+  "$installer_exe" /features \
+    OptionId.DesktopCPPx64 \
+    OptionId.DesktopCPPx86 \
+    OptionId.WindowsDesktopDebuggers \
+    /quiet /norestart
 sdk_rc=$?
 set -e
 # 3010 is ERROR_SUCCESS_REBOOT_REQUIRED: installed, reboot pending. The files
-# are in place, and the dbghelp.dll check below is the real success signal.
+# are in place, and the requirement re-check below is the real success signal.
 case "$sdk_rc" in
   0) ;;
   3010) say "installer reported a pending reboot (3010); files are in place" ;;
-  *) die "winsdksetup.exe exited $sdk_rc" ;;
+  *) die "winsdksetup.exe exited $sdk_rc; its log is at %TEMP%\\Windows Kits\\10\\WindowsSDK.log" ;;
 esac
 
 say "SDK version directories after install"
 list_versions
 
-[ -f "$dbghelp" ] || die "install reported success but $dbghelp is still missing"
-say "dbghelp.dll present at $sdk_root/Debuggers/x64"
+# Re-test the same requirements, not a proxy for them. An installer that
+# reported success while leaving an older header in place is the exact failure
+# this phase exists to stop, and its exit code cannot be asked about that.
+remaining=()
+[ -f "$dbghelp" ] || remaining+=("Debuggers/x64/dbghelp.dll is still absent")
+while IFS=' ' read -r kind path expected; do
+  [ -n "$kind" ] || continue
+  case "$kind" in
+    symbol)
+      windows_sdk_has_symbol "$sdk_root/$path" "$expected" ||
+        remaining+=("$expected is still not declared under $path")
+      ;;
+    version)
+      got="$(windows_file_version "$sdk_root/$path" || true)"
+      if [ -z "$got" ]; then
+        remaining+=("still no FileVersion readable from $path")
+      elif ! version_at_least "$got" "$expected"; then
+        remaining+=("$path is still $got, older than $expected")
+      else
+        say "$path is now $got"
+      fi
+      ;;
+  esac
+done < <(windows_sdk_requirements)
+
+if [ "${#remaining[@]}" -gt 0 ]; then
+  printf 'error: winsdksetup.exe exited %s but the SDK still does not satisfy:\n' "$sdk_rc" >&2
+  for gap in "${remaining[@]}"; do printf '  - %s\n' "$gap" >&2; done
+  printf 'The pinned installer is %s. Either the requested features do not carry\n' "$version" >&2
+  printf 'these files, or this image pins an older SDK some other way. Check\n' >&2
+  printf 'build/WINDOWS_SDK_REQUIREMENTS against the installer'"'"'s /list output.\n' >&2
+  exit 1
+fi
+say "the Windows SDK satisfies every pinned requirement at revision $version"

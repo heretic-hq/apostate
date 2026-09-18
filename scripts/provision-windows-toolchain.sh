@@ -408,13 +408,17 @@ say "installer sha256 $got_sha"
   got      $got_sha
 The pinned URL served different bytes. Verify the release before repinning."
 
-# Bounded by this script, not by the job timeout, and logged to a file this
-# script prints. Measured the hard way: the first run of this phase ran
-# winsdksetup.exe for 43m43s and the 45-minute job timeout killed the step,
-# which destroyed the only evidence of what it had been doing. A job timeout is
-# the wrong instrument for a process that might hang -- it reports "cancelled"
-# and takes the log with it. So: a deadline the script owns, its own /log, and
-# the tail printed whether it succeeds, fails or runs out of time.
+# A DEADLINE ENFORCED BY THE LAYER ABOVE THE THING BEING MEASURED IS THE WRONG
+# INSTRUMENT, BECAUSE IT DESTROYS EXACTLY THE EVIDENCE YOU NEEDED. That is the
+# general rule; here is the instance that taught it. The first run of this phase
+# ran winsdksetup.exe for 43m43s, the 45-minute job timeout killed the step, the
+# run was reported as "cancelled", and the installer's output went with it --
+# leaving no way to tell a slow install from a stuck one, which is the only
+# question that mattered. The rule applies to every timeout in this repository
+# that is owned by a workflow rather than by the script it bounds.
+#
+# So: a deadline this script owns, the installer's own /log, and the tail
+# printed whether it succeeds, fails or runs out of time.
 APOSTATE_SDK_INSTALL_TIMEOUT="${APOSTATE_SDK_INSTALL_TIMEOUT:-25m}"
 sdk_log="$work/winsdk-install.log"
 say "installing SDK $version: desktop C++ headers and libraries, and the debuggers"

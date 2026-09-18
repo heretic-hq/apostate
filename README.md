@@ -199,9 +199,9 @@ browser = launch(args=["--fingerprint=12345"])
 ```
 
 The seed is any printable ASCII up to 512 bytes. Integers are the usual choice.
-Nothing is stored, so the same seed gives the same device on any host that can
-serve it, which makes a seed portable in a way a copied profile directory is
-not.
+Nothing is stored for it, so the same seed gives the same device on any host
+that can serve it — a seed travels as a string, where a profile directory has
+to be copied.
 
 `--fingerprint-platform` chooses which operating system the identity presents
 as, and the GPU follows it:
@@ -232,13 +232,24 @@ It prints the resolved value per surface, where the value came from, and the
 limitations that apply on this host, then exits. Output goes to stdout and is
 not reachable from a page.
 
-The report ends with the argument that recreates the launch, which is how you
-keep a random identity you liked:
+The report names which of the three identity lifetimes the launch is in, and
+ends with the argument that recreates it — which is how you keep a random
+identity you liked:
 
 ```text
   seed                616c9fdee878b07b0ffab172936c21a7da947f77fa7153f5b1aba863c19acb0d
-  seed source         drawn from OS entropy
+  seed source         drawn from OS entropy for this launch only (ephemeral)
   reproduce with      --fingerprint=616c9fdee878b07b0ffab172936c21a7da947f77fa7153f5b1aba863c19acb0d
+```
+
+Against a `--user-data-dir` it names the file the identity is bound to, and
+whether this launch is the one that created it:
+
+```text
+  seed                4f3c8a1e09b7d2650c3ab8f41d7e5920ac6b13f8e04d7a29bb5c1e6370d8f425
+  seed source         this profile's identity file (stable for this --user-data-dir)
+  identity file       /home/you/work-profile/apostate/identity (read from disk)
+  reproduce with      --fingerprint=4f3c8a1e09b7d2650c3ab8f41d7e5920ac6b13f8e04d7a29bb5c1e6370d8f425
 ```
 
 It is also the first thing to run when a site blocks you. The report carries a
@@ -246,28 +257,52 @@ It is also the first thing to run when a site blocks you. The report carries a
 out to be listed there. [docs/FLAGS.md](docs/FLAGS.md) walks through the three
 common ones and what to do about each.
 
-## Coming from a persistent profile directory
+## How long an identity lasts
 
-A user-data directory used to carry the seed, so relaunching the same directory
-reproduced the identity. It no longer does. `--user-data-dir` keeps cookies,
-storage and history; the device is drawn fresh every launch.
+Three lifetimes. Pick the one you want; the launch picks it for you from what
+you pass.
 
-This matters most for Playwright's `launch_persistent_context`, which is the
-common automation entry point and reuses one directory by design. Under the
-current default it gets a new device each launch. Pass `--fingerprint` to get
-the old behaviour:
+| You launch with | The identity is | It lasts |
+| --- | --- | --- |
+| `--fingerprint=<seed>` | the one that seed selects | forever, anywhere — the seed *is* the identity |
+| `--user-data-dir=DIR` | bound to `DIR` | until you delete `DIR`; it survives renaming and moving it |
+| neither | drawn fresh from OS entropy | this launch only, recorded nowhere |
+
+A `--user-data-dir` keeps one machine because it keeps everything else. The
+first launch against a directory mints an identity into
+`DIR/apostate/identity` and every launch after reads it back. That directory
+already holds cookies, localStorage and logged-in sessions, so a different
+GPU, core count, installed memory and panel on every visit would show a site
+one account whose hardware keeps changing — which no real machine does, and
+which is a worse story than either signal alone.
+
+So Playwright's `launch_persistent_context` needs no flag. It reuses one
+directory by design, and that reuse is now what makes the identity stable:
 
 ```python
-browser = launch_persistent_context(
-    user_data_dir="./work-profile",
-    args=["--fingerprint=12345"],
-)
+browser = launch_persistent_context(user_data_dir="./work-profile")
 ```
 
-Pin the seed whenever a site should recognise the visitor. Returning-visitor
-scoring is the case where a rotating device actively hurts: the same cookies and
-the same address arriving on different hardware every session is a worse story
-than either signal alone.
+**If you wanted a fresh machine each run** and have been reusing a directory
+out of habit, you now have to say so, because you will otherwise get the same
+one every time. Either drop `--user-data-dir` — that is the ephemeral default,
+and the right answer if you did not need the cookies either — or give each run
+its own directory, or delete `DIR/apostate/identity` between runs.
+
+Read the identity to move a machine somewhere else, write it to choose one by
+hand:
+
+```sh
+cat ./work-profile/apostate/identity     # -> pass as --fingerprint=… anywhere
+```
+
+Copying a profile directory clones its machine, deliberately: the copy has the
+same logged-in sessions, and an identity that changed under them would defeat
+the point.
+
+`--fingerprint-explain` names which of the three you got and which file it came
+from. [docs/FLAGS.md](docs/FLAGS.md#how-long-an-identity-lasts) has the rest,
+including what happens when the directory is read-only or the file is damaged.
 
 ## Flags
 
@@ -301,10 +336,18 @@ outranks: it composes nothing, so pairing it with a persona, an anchor pin or a
 per-field override stops the launch instead of quietly winning.
 `--fingerprint-explain` still works with it.
 
-Every standard Chromium flag still works, including `--proxy-server`,
-`--headless`, `--user-data-dir` and `--lang`. Drive automation with
-`--remote-debugging-pipe` rather than `--remote-debugging-port`: a page can
-detect an open debugging port. Playwright already uses the pipe.
+Every standard Chromium flag still works, including `--headless`,
+`--user-data-dir` and `--lang`. `--proxy-server` works too and is the one that
+is not merely standard: a credential in the URL is accepted, as
+`--proxy-server=socks5://user:pass@host:1080`, which upstream refuses with
+`ERR_NO_SUPPORTED_PROXIES`. The credential is taken off the switch before
+Chromium's proxy configuration sees it, so it stays out of NetLog, socket-pool
+keys and `chrome://version`;
+[docs/FLAGS.md](docs/FLAGS.md#the-proxy) has the encoding rules, the schemes
+that take one, and what happens if you also supply one in a profile envelope.
+Drive automation with `--remote-debugging-pipe` rather than
+`--remote-debugging-port`: a page can detect an open debugging port. Playwright
+already uses the pipe.
 
 [docs/FLAGS.md](docs/FLAGS.md) is the full reference, with accepted values,
 precedence and the profile fields behind each flag.

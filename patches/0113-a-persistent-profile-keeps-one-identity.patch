@@ -1,0 +1,953 @@
+Subject: compose: a persistent profile keeps one identity
+
+Four sequential launches of the shipped macOS artifact against one
+--user-data-dir composed four machines:
+
+  Apple M4 Pro   14 cores  16 GiB  1512x982
+  Apple M1        8 cores  16 GiB  1470x956
+  Apple M2 Pro   10 cores  32 GiB  1728x1117
+  Apple M2 Pro   12 cores  32 GiB  1512x982
+
+That directory holds cookies, localStorage and logged-in sessions. Presenting a
+different GPU, core count, installed memory and panel to the same cookie jar on
+every launch is a stronger signal than any individual fingerprint value: the
+site sees one account whose hardware changes between visits, which no real
+machine does. Coherence is the axiom this violates -- correct means "equal to
+reference device D", and a device that is a different D each Tuesday is not a
+device. The per-launch draw was right for the ephemeral case and wrong for the
+persistent one, and 0081 applied it to both.
+
+So the seed grows a layer. Precedence, strongest first, with the first two
+unchanged:
+
+  --fingerprint=<seed>   the identity that seed names, on any machine
+  the profile identity   stable for the --user-data-dir the launch named
+  fresh OS entropy       the default when no directory was named
+
+A bare launch still draws 32 bytes and keeps nothing. That is deliberate and it
+is the reason the condition is the *switch* rather than the resolved path:
+Chrome always resolves a user data directory, so binding on the resolved path
+would make every launch sticky and take the ephemeral default away. Only a
+launch that named a directory gets an identity that outlives it.
+
+Stored, not derived. Hashing the absolute path would keep the filesystem clean
+and survive a wiped profile, but it makes two unrelated profiles that happen to
+share a path -- two containers each mounting /profile, two users each using
+~/.apostate -- one machine, and it silently changes the machine when a
+directory is renamed or moved. An operator who moves a profile means "take my
+machine with it". A file gives every directory an independent identity and
+keeps it across a move, and 0081 already reads that directory for provisioned
+fonts, so the compositor is not learning to touch the filesystem here; it is
+writing 65 bytes where it already reads.
+
+The file is <user-data-dir>/apostate/identity: one seed, one newline, nothing
+else, so `cat` prints something that can be pasted straight back as
+--fingerprint=<seed>. Its rule is exactly --fingerprint's rule, which is why a
+seed chosen by hand in a text editor is honoured rather than treated as damage.
+
+It is not a new observable, and that was checked rather than assumed.
+chrome::DIR_USER_DATA is registered kBlockAllChildren in
+ChromeFileSystemAccessPermissionContext's blocklist -- the only web API that
+can name an absolute path refuses that directory and everything beneath it --
+and GenerateBlockPaths resolves it through PathService, which
+InitializeUserDataDir has already overridden with the --user-data-dir value, so
+the block follows the switch. A web origin cannot fetch a file: URL, a file:
+document is an opaque origin without --allow-file-access-from-files, and
+ChromeNetworkDelegate::IsAccessAllowed gates navigation the same way for this
+file as for the Cookies database beside it. Chrome Sync carries typed models
+out of <user-data-dir>/<Profile>/, never a file at the user-data-dir root;
+Crashpad uploads minidumps and only the attachments it is handed, and Chrome
+hands it none. No process name changes, no command line changes, no timing
+changes: the browser reads the file, composes, and passes the composed profile
+down exactly as before.
+
+The awkward cases, each decided rather than defaulted:
+
+  Unwritable directory. The launch proceeds with an ephemeral identity and a
+  limitation saying so. Refusing to start because an identity could not be
+  filed away is a worse answer than the behaviour this patch replaces, and the
+  operator needs to know the rotation is still happening because a site
+  sharing that cookie jar can see it.
+
+  Corrupt, truncated or unparseable file. Replaced once, reported once, stable
+  afterwards. Ignoring it would restore exactly this defect; refusing the
+  launch would turn one bad byte into a browser that will not start. The
+  terminating newline is what makes truncation detectable at all -- without it
+  a half-written seed reads as a shorter but perfectly valid one, which is an
+  identity change reported nowhere.
+
+  Unreadable file, as opposed to invalid. Left on disk untouched, with an
+  ephemeral identity for this launch. A permission error or a failing disk
+  must cost one launch, never the identity it failed to read. This is the one
+  case that is deliberately not "replace".
+
+  A directory Chromium creates on this launch. Mints and stores, like any
+  other first launch. The identity is minted alongside the cookie jar it will
+  be presented with, which is the pairing that has to hold.
+
+  Incognito and guest over a persistent profile. Unchanged, and deliberately
+  so: they share the browser process, so they share SysInfo, the composed
+  profile and therefore the identity. Rotating per session is not possible
+  without a second browser process, and a window that reported different
+  hardware from its own browser would be incoherent in a way no real machine
+  is.
+
+  A directory copied to a new location. Clones the identity, intentionally. A
+  copy of a profile is a copy of its cookies and its logged-in sessions; an
+  identity that changed under them would reintroduce the defect at the one
+  moment the operator is most likely to be resuming a session. Two clones used
+  at once look like one machine in two places, which is what they are -- and
+  --fingerprint=<seed> remains the way to say "same profile, different
+  machine".
+
+Two instances racing a fresh directory are safe by construction: the write is
+FLAG_CREATE, so the create fails when the file is already there and the loser
+adopts the winner's seed. The directory never ends up with two identities and
+neither process overwrites a seed the other is already presenting. This is also
+why the patch is comfortable running at 0084's PreSandboxStartup hook in a
+process that may turn out to be a second instance -- it either finds an
+identity or files one that a first instance would have filed identically.
+
+--fingerprint-explain now distinguishes all three origins in its "seed source"
+line and adds an "identity file" line naming the path and whether this launch
+created it. That is the line an operator reads when debugging exactly this
+behaviour, and "created this launch" on a profile they believed was
+established is the whole diagnosis.
+
+--- a/base/apostate/compose.cc
++++ b/base/apostate/compose.cc
+@@ -1663,7 +1663,30 @@ std::optional<std::string> ComposeProfileForCurrentProcess(
+     return std::nullopt;
+   }
+ 
+-  const SeedResolution seed = ResolveSeed(command_line);
++  // Chrome's resolved directory when the caller knows it, the explicit switch
++  // otherwise. Hoisted above the seed because the layer below --fingerprint
++  // is bound to this directory, and unchanged in what it means: font
++  // provisioning still reads it on every launch, named directory or not.
++  const FilePath state_root =
++      user_data_dir.empty()
++          ? command_line.GetSwitchValuePath(kUserDataDirSwitch)
++          : user_data_dir;
++  const FilePath state_directory =
++      state_root.empty() ? FilePath()
++                         : state_root.AppendASCII(kStateDirectoryName);
++
++  // The identity binds only when the launch *named* a directory. The test is
++  // the switch and not the resolved path, because Chrome always resolves one:
++  // a resolved path is no evidence that anybody asked for a persistent
++  // profile, and binding on it would make a bare launch sticky, which is the
++  // one thing the launch contract promises it is not. What gets written to is
++  // still the resolved path, because that is the directory the cookies
++  // actually land in when the named one turned out to be invalid and Chrome
++  // fell back.
++  const bool named_a_directory =
++      !command_line.GetSwitchValuePath(kUserDataDirSwitch).empty();
++  const SeedResolution seed = ResolveSeed(
++      command_line, named_a_directory ? state_directory : FilePath());
+ 
+   std::string rejection;
+   FieldOverrides overrides;
+@@ -1712,15 +1735,7 @@ std::optional<std::string> ComposeProfileForCurrentProcess(
+   request.catalogue_version = kCatalogueVersion;
+   request.chromium_version = kChromiumVersion;
+   request.catalogue_digest = kCatalogueDigest;
+-  // Chrome's resolved directory when the caller knows it, the explicit switch
+-  // otherwise. Only font provisioning reads it; nothing is written.
+-  const FilePath state_root =
+-      user_data_dir.empty()
+-          ? command_line.GetSwitchValuePath(kUserDataDirSwitch)
+-          : user_data_dir;
+-  request.state_directory = state_root.empty()
+-                                ? FilePath()
+-                                : state_root.AppendASCII(kStateDirectoryName);
++  request.state_directory = state_directory;
+   request.pinned_anchor =
+       command_line.GetSwitchValueASCII(switches::kFingerprintAnchor);
+   request.accept_languages = command_line.GetSwitchValueASCII(kLangSwitch);
+@@ -1752,6 +1767,8 @@ std::optional<std::string> ComposeProfileForCurrentProcess(
+   }
+ 
+   composition->seed_origin = seed.origin;
++  composition->identity_file = seed.identity_file.AsUTF8Unsafe();
++  composition->identity_minted = seed.identity_minted;
+   if (!seed.limitation.empty()) {
+     composition->limitations.push_back("seed: " + seed.limitation);
+   }
+--- a/base/apostate/compose.h
++++ b/base/apostate/compose.h
+@@ -48,8 +48,9 @@ namespace switches {
+ // to a page.
+ 
+ // Deterministic seed. An integer or an arbitrary printable string. Absent
+-// means a fresh seed for this launch alone, which is the default and the
+-// reason the binary spoofs with no arguments at all.
++// means the identity bound to the --user-data-dir the launch named, or a
++// fresh seed for this launch alone when it named none -- which is the default
++// and the reason the binary spoofs with no arguments at all.
+ inline constexpr char kFingerprint[] = "fingerprint";
+ 
+ // The canonical reserved --fingerprint value: inherit the host, compose
+@@ -188,6 +189,12 @@ struct BASE_EXPORT SurfaceRecord {
+ struct BASE_EXPORT Composition {
+   std::string seed;
+   SeedOrigin seed_origin = SeedOrigin::kGenerated;
++  // Where a kProfileBound seed was read from or written to, and whether this
++  // launch is the one that minted it. Empty and false for every other origin.
++  // Carried so --fingerprint-explain can name the file an operator has to
++  // look at when an identity is not the one they expected.
++  std::string identity_file;
++  bool identity_minted = false;
+ 
+   // The requested persona and the host it is running on. When they differ the
+   // GPU cluster stays with the host and that is recorded in `limitations`.
+--- a/base/apostate/compose_unittest.cc
++++ b/base/apostate/compose_unittest.cc
+@@ -12,10 +12,16 @@
+ #include <vector>
+ 
+ #include "base/apostate/dispersion_table.h"
++#include "base/apostate/explain.h"
+ #include "base/apostate/host_capability.h"
+ #include "base/apostate/profile.h"
++#include "base/apostate/seed.h"
+ #include "base/base64.h"
++#include "base/command_line.h"
+ #include "base/containers/span.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/files/scoped_temp_dir.h"
+ #include "base/json/json_writer.h"
+ #include "base/strings/string_number_conversions.h"
+ #include "base/values.h"
+@@ -1025,5 +1031,306 @@ TEST(ApostateComposeTest, TheComposedProfileKeepsTheCredentialsItReplaced) {
+       Base64Encode(as_byte_span(std::string_view("{}"))), composed));
+ }
+ 
++// ---------------------------------------------------------------------------
++// The seed layer: pinned by flag, bound to a profile, or ephemeral
++// ---------------------------------------------------------------------------
++
++CommandLine BareCommandLine() {
++  return CommandLine(CommandLine::NO_PROGRAM);
++}
++
++CommandLine FingerprintCommandLine(std::string_view value) {
++  CommandLine command_line(CommandLine::NO_PROGRAM);
++  command_line.AppendSwitchASCII(switches::kFingerprint, std::string(value));
++  return command_line;
++}
++
++FilePath IdentityFileIn(const FilePath& state_directory) {
++  return state_directory.AppendASCII(IdentityFileName());
++}
++
++// The defect this layer exists to fix: four launches against one directory
++// used to be four machines sharing one cookie jar.
++TEST(ApostateSeedTest, OneDirectoryKeepsOneIdentityAcrossLaunches) {
++  ScopedTempDir root;
++  ASSERT_TRUE(root.CreateUniqueTempDir());
++  const FilePath state = root.GetPath().AppendASCII("apostate");
++
++  const SeedResolution first = ResolveSeed(BareCommandLine(), state);
++  EXPECT_EQ(SeedOrigin::kProfileBound, first.origin);
++  EXPECT_TRUE(first.identity_minted);
++  EXPECT_FALSE(first.seed.empty());
++  EXPECT_EQ(IdentityFileIn(state), first.identity_file);
++
++  for (int launch = 0; launch < 3; ++launch) {
++    const SeedResolution again = ResolveSeed(BareCommandLine(), state);
++    EXPECT_EQ(SeedOrigin::kProfileBound, again.origin);
++    EXPECT_EQ(first.seed, again.seed);
++    EXPECT_FALSE(again.identity_minted);
++    EXPECT_TRUE(again.limitation.empty());
++  }
++}
++
++// Two directories are two machines. A stored identity is per directory, which
++// is the property a derived-from-the-path seed would not have for two
++// containers that both mount their profile at the same path.
++TEST(ApostateSeedTest, TwoDirectoriesAreTwoIdentities) {
++  ScopedTempDir first_root;
++  ScopedTempDir second_root;
++  ASSERT_TRUE(first_root.CreateUniqueTempDir());
++  ASSERT_TRUE(second_root.CreateUniqueTempDir());
++
++  const SeedResolution first = ResolveSeed(
++      BareCommandLine(), first_root.GetPath().AppendASCII("apostate"));
++  const SeedResolution second = ResolveSeed(
++      BareCommandLine(), second_root.GetPath().AppendASCII("apostate"));
++
++  EXPECT_EQ(SeedOrigin::kProfileBound, first.origin);
++  EXPECT_EQ(SeedOrigin::kProfileBound, second.origin);
++  EXPECT_NE(first.seed, second.seed);
++}
++
++// An identity that moves with the directory. This is what storing buys over
++// hashing the path, and it is the case an operator hits by renaming a profile.
++TEST(ApostateSeedTest, TheIdentityFollowsADirectoryThatMoves) {
++  ScopedTempDir root;
++  ASSERT_TRUE(root.CreateUniqueTempDir());
++  const FilePath original = root.GetPath().AppendASCII("before");
++  const FilePath moved = root.GetPath().AppendASCII("after");
++
++  const SeedResolution minted = ResolveSeed(BareCommandLine(), original);
++  ASSERT_EQ(SeedOrigin::kProfileBound, minted.origin);
++  ASSERT_TRUE(Move(original, moved));
++
++  const SeedResolution after = ResolveSeed(BareCommandLine(), moved);
++  EXPECT_EQ(SeedOrigin::kProfileBound, after.origin);
++  EXPECT_EQ(minted.seed, after.seed);
++}
++
++// No directory named, so nothing for an identity to outlive. Ephemeral
++// sessions have to keep rotating or the default stops being a fresh device.
++TEST(ApostateSeedTest, NoDirectoryStillDrawsAFreshIdentityEveryLaunch) {
++  const SeedResolution first = ResolveSeed(BareCommandLine(), FilePath());
++  const SeedResolution second = ResolveSeed(BareCommandLine(), FilePath());
++
++  EXPECT_EQ(SeedOrigin::kGenerated, first.origin);
++  EXPECT_EQ(SeedOrigin::kGenerated, second.origin);
++  EXPECT_NE(first.seed, second.seed);
++  EXPECT_TRUE(first.identity_file.empty());
++}
++
++// Precedence: the flag outranks the profile, and does not disturb it. A
++// launch that pins a seed must not renumber the directory it ran against,
++// because the next unpinned launch has to present what it presented before.
++TEST(ApostateSeedTest, AnExplicitSeedOutranksTheProfileAndLeavesItAlone) {
++  ScopedTempDir root;
++  ASSERT_TRUE(root.CreateUniqueTempDir());
++  const FilePath state = root.GetPath().AppendASCII("apostate");
++
++  const SeedResolution bound = ResolveSeed(BareCommandLine(), state);
++  ASSERT_EQ(SeedOrigin::kProfileBound, bound.origin);
++
++  const SeedResolution pinned =
++      ResolveSeed(FingerprintCommandLine("a-named-seed"), state);
++  EXPECT_EQ(SeedOrigin::kSwitch, pinned.origin);
++  EXPECT_EQ("a-named-seed", pinned.seed);
++  EXPECT_TRUE(pinned.identity_file.empty());
++
++  const SeedResolution after = ResolveSeed(BareCommandLine(), state);
++  EXPECT_EQ(SeedOrigin::kProfileBound, after.origin);
++  EXPECT_EQ(bound.seed, after.seed);
++}
++
++// Host pass-through still composes nothing, and still writes nothing: a
++// directory that has never been launched without --fingerprint=host must not
++// acquire an identity from a launch that asked for none.
++TEST(ApostateSeedTest, HostPassThroughComposesNothingAndStoresNothing) {
++  ScopedTempDir root;
++  ASSERT_TRUE(root.CreateUniqueTempDir());
++  const FilePath state = root.GetPath().AppendASCII("apostate");
++
++  const SeedResolution host = ResolveSeed(FingerprintCommandLine("host"), state);
++  EXPECT_EQ(SeedOrigin::kHostInheritance, host.origin);
++  EXPECT_FALSE(host.should_compose());
++  EXPECT_FALSE(PathExists(IdentityFileIn(state)));
++}
++
++// A rejected --fingerprint is still a refusal, not a silent fall-through to
++// the profile identity. Falling through would present a device the launch did
++// not ask for while reporting success.
++TEST(ApostateSeedTest, AnUnusableSeedIsRefusedRatherThanFallingToTheProfile) {
++  ScopedTempDir root;
++  ASSERT_TRUE(root.CreateUniqueTempDir());
++  const FilePath state = root.GetPath().AppendASCII("apostate");
++
++  const SeedResolution refused =
++      ResolveSeed(FingerprintCommandLine(std::string(513, 'a')), state);
++  EXPECT_TRUE(refused.rejected);
++  EXPECT_EQ(SeedOrigin::kHostInheritance, refused.origin);
++  EXPECT_FALSE(PathExists(IdentityFileIn(state)));
++}
++
++// The file is one seed and one newline, so `cat` gives an operator something
++// they can paste straight back as --fingerprint=<seed>.
++TEST(ApostateSeedTest, TheStoredFileRoundTripsThroughTheFlag) {
++  ScopedTempDir root;
++  ASSERT_TRUE(root.CreateUniqueTempDir());
++  const FilePath state = root.GetPath().AppendASCII("apostate");
++
++  const SeedResolution minted = ResolveSeed(BareCommandLine(), state);
++  ASSERT_EQ(SeedOrigin::kProfileBound, minted.origin);
++
++  std::string contents;
++  ASSERT_TRUE(ReadFileToString(IdentityFileIn(state), &contents));
++  EXPECT_EQ(minted.seed + "\n", contents);
++
++  const SeedResolution pinned =
++      ResolveSeed(FingerprintCommandLine(minted.seed), FilePath());
++  EXPECT_EQ(minted.seed, pinned.seed);
++}
++
++// A seed written by hand is honoured, because the file's rule is the flag's
++// rule. An operator pinning a profile by editing the file is using it
++// correctly, not corrupting it.
++TEST(ApostateSeedTest, AHandWrittenSeedIsHonoured) {
++  ScopedTempDir root;
++  ASSERT_TRUE(root.CreateUniqueTempDir());
++  const FilePath state = root.GetPath().AppendASCII("apostate");
++  ASSERT_TRUE(CreateDirectory(state));
++  ASSERT_TRUE(WriteFile(IdentityFileIn(state), "chosen-by-hand\n"));
++
++  const SeedResolution bound = ResolveSeed(BareCommandLine(), state);
++  EXPECT_EQ(SeedOrigin::kProfileBound, bound.origin);
++  EXPECT_EQ("chosen-by-hand", bound.seed);
++  EXPECT_FALSE(bound.identity_minted);
++}
++
++// Corrupt, truncated and non-printable all mean the same thing: this is not
++// an identity. Each is replaced once, reported once, and stable afterwards --
++// the alternative is a directory that silently draws a new machine forever,
++// which is the defect this layer exists to fix.
++TEST(ApostateSeedTest, AFileThatIsNotAnIdentityIsReplacedAndReported) {
++  const std::string_view corrupt[] = {
++      "",              // empty
++      "nonewline",     // truncated mid-write: the terminator is gone
++      "two\nlines\n",  // not one seed
++      "\x01\x02\n",    // not printable
++      "has a space\n",
++  };
++
++  for (const std::string_view content : corrupt) {
++    ScopedTempDir root;
++    ASSERT_TRUE(root.CreateUniqueTempDir());
++    const FilePath state = root.GetPath().AppendASCII("apostate");
++    ASSERT_TRUE(CreateDirectory(state));
++    ASSERT_TRUE(WriteFile(IdentityFileIn(state), content));
++
++    const SeedResolution replaced = ResolveSeed(BareCommandLine(), state);
++    EXPECT_EQ(SeedOrigin::kProfileBound, replaced.origin) << content;
++    EXPECT_TRUE(replaced.identity_minted) << content;
++    EXPECT_FALSE(replaced.limitation.empty()) << content;
++
++    // Reported once, then the directory is well again.
++    const SeedResolution next = ResolveSeed(BareCommandLine(), state);
++    EXPECT_EQ(replaced.seed, next.seed) << content;
++    EXPECT_TRUE(next.limitation.empty()) << content;
++  }
++}
++
++// A seed over the length limit is corrupt rather than silently truncated to a
++// valid prefix, which would be an identity change reported nowhere.
++TEST(ApostateSeedTest, AnOverlongStoredSeedIsNotTruncatedIntoAValidOne) {
++  ScopedTempDir root;
++  ASSERT_TRUE(root.CreateUniqueTempDir());
++  const FilePath state = root.GetPath().AppendASCII("apostate");
++  ASSERT_TRUE(CreateDirectory(state));
++  const std::string overlong = std::string(513, 'a') + "\n";
++  ASSERT_TRUE(WriteFile(IdentityFileIn(state), overlong));
++
++  const SeedResolution replaced = ResolveSeed(BareCommandLine(), state);
++  EXPECT_EQ(SeedOrigin::kProfileBound, replaced.origin);
++  EXPECT_NE(std::string(512, 'a'), replaced.seed);
++  EXPECT_FALSE(replaced.limitation.empty());
++}
++
++// A directory that cannot hold a file still launches, with a coherent device
++// and a limitation saying the identity is not kept. Refusing to start because
++// an identity could not be filed away would be worse than the behaviour this
++// patch replaces.
++TEST(ApostateSeedTest, AnUnwritableDirectoryFallsBackToEphemeralAndSaysSo) {
++  ScopedTempDir root;
++  ASSERT_TRUE(root.CreateUniqueTempDir());
++  // A regular file where the state directory's parent has to be, so the
++  // directory cannot be created on any platform and for any user, including
++  // root -- which a chmod-based test does not achieve.
++  const FilePath blocked = root.GetPath().AppendASCII("not-a-directory");
++  ASSERT_TRUE(WriteFile(blocked, "x"));
++
++  const SeedResolution fell_back =
++      ResolveSeed(BareCommandLine(), blocked.AppendASCII("apostate"));
++  EXPECT_EQ(SeedOrigin::kGenerated, fell_back.origin);
++  EXPECT_TRUE(fell_back.should_compose());
++  EXPECT_FALSE(fell_back.seed.empty());
++  EXPECT_FALSE(fell_back.limitation.empty());
++  EXPECT_TRUE(fell_back.identity_file.empty());
++}
++
++// A file this process cannot read is left alone rather than deleted. A
++// permission error or a failing disk must cost one ephemeral launch, not the
++// identity it failed to read.
++TEST(ApostateSeedTest, AnUnreadableIdentityIsLeftOnDisk) {
++  ScopedTempDir root;
++  ASSERT_TRUE(root.CreateUniqueTempDir());
++  const FilePath state = root.GetPath().AppendASCII("apostate");
++  // A directory in the identity's place: it opens and refuses to be read,
++  // which is the same shape as an unreadable file and works as any user.
++  ASSERT_TRUE(CreateDirectory(IdentityFileIn(state)));
++
++  const SeedResolution fell_back = ResolveSeed(BareCommandLine(), state);
++  EXPECT_EQ(SeedOrigin::kGenerated, fell_back.origin);
++  EXPECT_FALSE(fell_back.limitation.empty());
++  EXPECT_TRUE(DirectoryExists(IdentityFileIn(state)));
++}
++
++// The line an operator reads when debugging exactly this behaviour. It has to
++// separate the three lifetimes -- pinned by flag, bound to a profile,
++// ephemeral -- and name the file, or "why is my machine different" has no
++// answer in the report.
++TEST(ApostateSeedTest, TheExplainReportDistinguishesTheThreeLifetimes) {
++  const HostCapability host;
++  Composition composition;
++  composition.seed = "a-seed";
++
++  composition.seed_origin = SeedOrigin::kSwitch;
++  const std::string pinned = FormatExplainReport(composition, host);
++  EXPECT_NE(std::string::npos, pinned.find("seed source"));
++  EXPECT_NE(std::string::npos, pinned.find("pinned by flag"));
++  EXPECT_EQ(std::string::npos, pinned.find("identity file"));
++
++  composition.seed_origin = SeedOrigin::kGenerated;
++  const std::string ephemeral = FormatExplainReport(composition, host);
++  EXPECT_NE(std::string::npos, ephemeral.find("ephemeral"));
++  EXPECT_EQ(std::string::npos, ephemeral.find("identity file"));
++
++  composition.seed_origin = SeedOrigin::kProfileBound;
++  composition.identity_file = "/profiles/one/apostate/identity";
++  composition.identity_minted = true;
++  const std::string minted = FormatExplainReport(composition, host);
++  EXPECT_NE(std::string::npos, minted.find("stable for this --user-data-dir"));
++  EXPECT_NE(std::string::npos,
++            minted.find("/profiles/one/apostate/identity (created this "
++                        "launch)"));
++
++  composition.identity_minted = false;
++  const std::string read = FormatExplainReport(composition, host);
++  EXPECT_NE(std::string::npos,
++            read.find("/profiles/one/apostate/identity (read from disk)"));
++
++  // All three read differently, which is the property the report exists for.
++  EXPECT_NE(pinned, ephemeral);
++  EXPECT_NE(ephemeral, read);
++  EXPECT_NE(pinned, read);
++}
++
+ }  // namespace
+ }  // namespace base::apostate
+--- a/base/apostate/explain.cc
++++ b/base/apostate/explain.cc
+@@ -24,9 +24,11 @@ namespace {
+ std::string_view SeedOriginName(SeedOrigin origin) {
+   switch (origin) {
+     case SeedOrigin::kSwitch:
+-      return "--fingerprint (stable across launches)";
++      return "--fingerprint (pinned by flag, identical on any machine)";
++    case SeedOrigin::kProfileBound:
++      return "this profile's identity file (stable for this --user-data-dir)";
+     case SeedOrigin::kGenerated:
+-      return "drawn from OS entropy for this launch only";
++      return "drawn from OS entropy for this launch only (ephemeral)";
+     case SeedOrigin::kHostInheritance:
+       return "none: the host is inherited";
+   }
+@@ -106,9 +108,19 @@ std::string FormatExplainReport(const Composition& composition,
+   }
+   AppendField(out, "seed", composition.seed);
+   AppendField(out, "seed source", SeedOriginName(composition.seed_origin));
++  // Which file, and whether this launch is the one that put it there. "seed
++  // source" says the identity is bound to a profile; this says to what, and
++  // it is the line that answers "why did my machine change" -- a path that is
++  // not the directory the operator meant, or a "created this launch" on what
++  // they believed was an established profile, is the whole diagnosis.
++  if (!composition.identity_file.empty()) {
++    AppendField(out, "identity file",
++                composition.identity_file +
++                    (composition.identity_minted ? " (created this launch)"
++                                                 : " (read from disk)"));
++  }
+   // The one thing an operator wants from a random launch: the exact argument
+-  // that reproduces it. There is no seed file to read it out of any more, so
+-  // the report is where it comes from.
++  // that reproduces it, on this machine or any other.
+   AppendField(out, "reproduce with", "--fingerprint=" + composition.seed);
+   AppendField(out, "root", HexEncodeLower(composition.root));
+ 
+--- a/base/apostate/seed.cc
++++ b/base/apostate/seed.cc
+@@ -6,14 +6,19 @@
+ 
+ #include <array>
+ #include <cstdint>
++#include <optional>
+ #include <string>
+ #include <string_view>
+ 
+ #include "base/apostate/compose.h"
+ #include "base/command_line.h"
++#include "base/containers/span.h"
++#include "base/files/file.h"
++#include "base/files/file_util.h"
+ #include "base/rand_util.h"
+ #include "base/strings/string_number_conversions.h"
+ #include "base/strings/string_util.h"
++#include "base/strings/string_view_util.h"
+ 
+ namespace base::apostate {
+ 
+@@ -25,6 +30,20 @@ namespace {
+ // somewhere else. A binary value would not round-trip through a shell.
+ constexpr size_t kSeedEntropyBytes = 32;
+ 
++// The longest seed IsUsableSeed accepts, plus the terminator the file carries.
++constexpr size_t kMaxSeedBytes = 512;
++constexpr size_t kMaxIdentityFileBytes = kMaxSeedBytes + 1;
++
++// The file, inside the state directory, that binds an identity to a user data
++// directory.
++//
++// No extension, so no platform associates a handler with it; a plain lowercase
++// name, so it does not collide with a Chromium profile directory name; and it
++// sits in this project's own subdirectory rather than beside Chromium's own
++// state, so nothing Chromium writes can stand on it and a user clearing
++// Chromium's files does not have to guess which ones are ours.
++constexpr char kIdentityFileName[] = "identity";
++
+ // The reserved --fingerprint spellings that turn composition off. `host` is
+ // the canonical one; the rest exist because they are the spellings a user
+ // already has in their launch scripts, and a launch whose identity is the
+@@ -46,7 +65,7 @@ bool IsOffValue(std::string_view value) {
+ // usable. Restricting it to one short printable line is about diagnosis: a
+ // seed nobody can read back and retype is a seed nobody can reproduce.
+ bool IsUsableSeed(std::string_view seed) {
+-  if (seed.empty() || seed.size() > 512) {
++  if (seed.empty() || seed.size() > kMaxSeedBytes) {
+     return false;
+   }
+   for (const char c : seed) {
+@@ -64,13 +83,197 @@ std::string GenerateSeed() {
+   return HexEncodeLower(entropy);
+ }
+ 
++// What the identity file turned out to be.
++enum class StoredSeedState {
++  // The file holds one usable seed. `seed` is it.
++  kRead,
++  // There is no file. This directory has no identity yet.
++  kAbsent,
++  // There is a file and it is not an identity: empty, truncated mid-write,
++  // longer than any seed, or carrying bytes a seed cannot contain.
++  kCorrupt,
++  // There is a file and this process could not read it. Distinct from corrupt
++  // on purpose: a permission error or a failing disk must not be answered by
++  // deleting the identity it failed to read.
++  kUnreadable,
++};
++
++// Reads the identity file.
++//
++// The accepted form is exactly one seed followed by one newline, and the
++// accepted seed is exactly what --fingerprint accepts -- one rule for both, so
++// a seed the report prints can be pasted into the file and a seed in the file
++// can be pasted onto a command line. The terminator is what makes a truncated
++// file detectable at all: a short write loses the newline, and without it a
++// half-written seed would be read as a shorter but perfectly valid one, which
++// is a silent identity change rather than a reported one.
++StoredSeedState ReadStoredSeed(const FilePath& path, std::string* seed) {
++  File file(path, File::FLAG_OPEN | File::FLAG_READ);
++  if (!file.IsValid()) {
++    return file.error_details() == File::FILE_ERROR_NOT_FOUND
++               ? StoredSeedState::kAbsent
++               : StoredSeedState::kUnreadable;
++  }
++
++  // One byte past the longest file that can be valid, so a longer one is
++  // recognised as too long rather than silently truncated to a valid prefix.
++  std::array<uint8_t, kMaxIdentityFileBytes + 1> buffer = {};
++  const std::optional<size_t> read = file.ReadAtCurrentPos(span(buffer));
++  if (!read.has_value()) {
++    return StoredSeedState::kUnreadable;
++  }
++  if (*read > kMaxIdentityFileBytes) {
++    return StoredSeedState::kCorrupt;
++  }
++
++  std::string_view content = as_string_view(span(buffer).first(*read));
++  if (!content.ends_with('\n')) {
++    return StoredSeedState::kCorrupt;
++  }
++  content.remove_suffix(1);
++  if (content.ends_with('\r')) {
++    content.remove_suffix(1);
++  }
++  if (!IsUsableSeed(content)) {
++    return StoredSeedState::kCorrupt;
++  }
++
++  seed->assign(content);
++  return StoredSeedState::kRead;
++}
++
++// Writes `seed` to the identity file, creating the state directory if it is
++// not there.
++//
++// FLAG_CREATE, not FLAG_CREATE_ALWAYS: the create fails when the file already
++// exists, which is what makes two instances racing a fresh directory safe.
++// Whichever one reaches the directory first owns the identity and the other
++// adopts it, so the directory never ends up with two identities and neither
++// process overwrites a seed the other is already presenting.
++bool WriteStoredSeed(const FilePath& directory,
++                     const FilePath& path,
++                     std::string_view seed) {
++  if (!CreateDirectory(directory)) {
++    return false;
++  }
++  File file(path, File::FLAG_CREATE | File::FLAG_WRITE);
++  if (!file.IsValid()) {
++    return false;
++  }
++  const std::string line = std::string(seed) + "\n";
++  if (!file.WriteAtCurrentPosAndCheck(as_byte_span(line))) {
++    return false;
++  }
++  // The identity must survive a machine that loses power between this launch
++  // and the next one; otherwise the very first launch against a directory is
++  // the one most likely to lose the identity it just minted.
++  return file.Flush();
++}
++
++// Binds an identity to `state_directory`, reading the one already there or
++// minting one if there is none.
++void BindToProfile(const FilePath& state_directory,
++                   SeedResolution* resolution) {
++  const FilePath path = state_directory.AppendASCII(kIdentityFileName);
++  resolution->identity_file = path;
++
++  std::string stored;
++  StoredSeedState state = ReadStoredSeed(path, &stored);
++
++  if (state == StoredSeedState::kCorrupt) {
++    // Replace it. Refusing the launch would turn one bad byte into a browser
++    // that will not start, and ignoring the file would restore exactly the
++    // defect this layer exists to fix -- a new machine on every launch against
++    // one cookie jar, reported nowhere. Replacing restores the invariant from
++    // the next launch on, and says so once, here.
++    if (DeleteFile(path)) {
++      resolution->limitation =
++          "the identity file at " + path.AsUTF8Unsafe() +
++          " was not a readable identity and was replaced, so this profile "
++          "presents a different machine from now on; the previous identity "
++          "cannot be recovered from it";
++      state = StoredSeedState::kAbsent;
++    } else {
++      resolution->limitation =
++          "the identity file at " + path.AsUTF8Unsafe() +
++          " is not a readable identity and could not be replaced, so this "
++          "launch composed a fresh identity that is not stored; every launch "
++          "against this directory will differ until the file is removed";
++      resolution->seed = GenerateSeed();
++      resolution->origin = SeedOrigin::kGenerated;
++      resolution->identity_file = FilePath();
++      return;
++    }
++  }
++
++  if (state == StoredSeedState::kUnreadable) {
++    // Leave it alone. A transient read failure costs one ephemeral launch;
++    // deleting on a read error costs the identity permanently.
++    resolution->limitation =
++        "the identity file at " + path.AsUTF8Unsafe() +
++        " could not be read, so this launch composed a fresh identity that is "
++        "not stored; the stored identity was left untouched and the next "
++        "launch will use it again if it becomes readable";
++    resolution->seed = GenerateSeed();
++    resolution->origin = SeedOrigin::kGenerated;
++    resolution->identity_file = FilePath();
++    return;
++  }
++
++  if (state == StoredSeedState::kRead) {
++    resolution->seed = std::move(stored);
++    resolution->origin = SeedOrigin::kProfileBound;
++    return;
++  }
++
++  // Nothing bound to this directory yet, so mint one and keep it. A directory
++  // Chromium created on this very launch lands here, which is right: the
++  // identity is minted alongside the cookie jar it will be presented with.
++  std::string minted = GenerateSeed();
++  if (WriteStoredSeed(state_directory, path, minted)) {
++    resolution->seed = std::move(minted);
++    resolution->origin = SeedOrigin::kProfileBound;
++    resolution->identity_minted = true;
++    return;
++  }
++
++  // The create can fail because another instance won the race, in which case
++  // the identity is now there to be read and adopting it is exactly right.
++  if (ReadStoredSeed(path, &stored) == StoredSeedState::kRead) {
++    resolution->seed = std::move(stored);
++    resolution->origin = SeedOrigin::kProfileBound;
++    return;
++  }
++
++  // A read-only directory, a full disk, a profile on a medium that cannot be
++  // written. The launch still gets a coherent device -- refusing to start
++  // because an identity could not be filed away would be a worse answer than
++  // the pre-existing behaviour -- but it is ephemeral and the operator is told
++  // so rather than left to discover it by being clustered.
++  resolution->limitation =
++      "the identity could not be written to " + path.AsUTF8Unsafe() +
++      ", so this launch composed a fresh one that is not stored; every launch "
++      "against this directory will present a different machine until the "
++      "directory is writable, which a site sharing its cookie jar can see";
++  resolution->seed = std::move(minted);
++  resolution->origin = SeedOrigin::kGenerated;
++  resolution->identity_file = FilePath();
++}
++
+ }  // namespace
+ 
+-SeedResolution ResolveSeed(const CommandLine& command_line) {
++const char* IdentityFileName() {
++  return kIdentityFileName;
++}
++
++SeedResolution ResolveSeed(const CommandLine& command_line,
++                           const FilePath& state_directory) {
+   SeedResolution resolution;
+ 
+   // --fingerprint wins outright, and an off value disables every layer below
+-  // it.
++  // it. Neither spelling reads or writes the identity file: a launch that
++  // names its own seed is not asking what this directory usually presents,
++  // and must not renumber it either.
+   if (command_line.HasSwitch(switches::kFingerprint)) {
+     const std::string value =
+         command_line.GetSwitchValueASCII(switches::kFingerprint);
+@@ -93,8 +296,18 @@ SeedResolution ResolveSeed(const CommandLine& command_line) {
+     return resolution;
+   }
+ 
+-  // The default, and the whole point of the binary: a fresh coherent device
+-  // for this launch, recorded nowhere.
++  // The launch named a user data directory, so the identity belongs to that
++  // directory and not to this launch. The directory already carries cookies,
++  // localStorage and logged-in sessions across launches; an identity that did
++  // not carry with them would show a site one account whose hardware changes
++  // between visits.
++  if (!state_directory.empty()) {
++    BindToProfile(state_directory, &resolution);
++    return resolution;
++  }
++
++  // No directory was named, so there is nothing for an identity to outlive:
++  // a fresh coherent device for this launch, recorded nowhere.
+   resolution.seed = GenerateSeed();
+   resolution.origin = SeedOrigin::kGenerated;
+   return resolution;
+--- a/base/apostate/seed.h
++++ b/base/apostate/seed.h
+@@ -8,6 +8,7 @@
+ #include <string>
+ 
+ #include "base/base_export.h"
++#include "base/files/file_path.h"
+ 
+ namespace base {
+ 
+@@ -19,7 +20,11 @@ namespace apostate {
+ enum class SeedOrigin {
+   // --fingerprint=<seed>. Reproducible on any machine, with nothing on disk.
+   kSwitch,
+-  // Drawn from OS entropy for this launch and kept nowhere. The default.
++  // The identity file in the user data directory the launch named. Stable for
++  // that directory across launches, for as long as the directory exists.
++  kProfileBound,
++  // Drawn from OS entropy for this launch and kept nowhere. The default when
++  // no user data directory was named.
+   kGenerated,
+   // --fingerprint=host, and its off/false/0/disable/disabled spellings. No
+   // composition at all; every layer below it is off.
+@@ -30,6 +35,14 @@ struct BASE_EXPORT SeedResolution {
+   // Empty when `origin` is kHostInheritance.
+   std::string seed;
+   SeedOrigin origin = SeedOrigin::kHostInheritance;
++  // The identity file this seed was read from or written to. Empty unless
++  // `origin` is kProfileBound. Reported so an operator debugging a changed
++  // identity is told which file to look at rather than having to guess.
++  FilePath identity_file;
++  // True when this launch minted the identity rather than finding it. The
++  // first launch against a directory, and the launch after the file was
++  // removed or replaced.
++  bool identity_minted = false;
+   // Non-empty when the launch asked for something it did not get. Reported by
+   // --fingerprint-explain, never silently swallowed.
+   std::string limitation;
+@@ -45,30 +58,55 @@ struct BASE_EXPORT SeedResolution {
+ 
+ // Resolves the seed for this launch.
+ //
+-// Precedence, strongest first: an explicit --fingerprint, then 32 bytes of OS
+-// entropy drawn for this launch alone. A reserved off value short-circuits
+-// both and composes nothing.
++// Precedence, strongest first: an explicit --fingerprint, then the identity
++// bound to `state_directory`, then 32 bytes of OS entropy drawn for this
++// launch alone. A reserved off value short-circuits all three and composes
++// nothing.
+ //
+-// The seed's lifetime is the launch, not the user-data directory. A bare
++// `state_directory` is this project's subdirectory of the user data directory
++// the launch named, and is empty when the launch named none. That emptiness is
++// the whole of the second layer's condition, and it is deliberate: a bare
+ // launch is a different coherent device every time, which is what someone who
+ // runs the binary with no arguments expects and what the launch contract
+-// promises. An identity that has to stay the same across launches is asked for
+-// by name, with --fingerprint=<seed>, and that is strictly better than a file:
+-// it reproduces on another machine, in another container, and in a colleague's
+-// shell, none of which a file does.
++// promises.
+ //
+-// There is deliberately no persisted seed. A seed file would make the default
+-// identity depend on whether a directory happened to exist -- the same launch
+-// random in a temporary directory and sticky in a named one -- and it would
+-// write the entire identity to disk, where a copied profile, a backup or a
+-// synced directory carries it, and where it survives the clear-everything a
+-// user believes clears their identity.
++// The persisted layer exists because the alternative is worse than a file on
++// disk. A --user-data-dir holds cookies, localStorage and logged-in sessions,
++// so presenting a different GPU, core count and panel to the same cookie jar
++// on every launch shows a site one account whose hardware changes between
++// visits -- a stronger signal than any single fingerprint value, and one no
++// real machine produces. An identity that has to survive a launch is therefore
++// bound to the directory that already survives it.
+ //
+-// Pure: no filesystem, no globals, no ordering requirement beyond a populated
+-// command line. That is what lets patch 0084 resolve the seed from a startup
+-// hook in a process that may still turn out to be a second instance and exit
+-// immediately: deciding an identity leaves no trace to undo.
+-BASE_EXPORT SeedResolution ResolveSeed(const CommandLine& command_line);
++// Binding stores rather than derives. Deriving the seed from the directory's
++// path would keep the filesystem clean, but it makes two unrelated profiles at
++// the same path -- two containers each using /profile, two users each using
++// ~/.apostate -- one machine, and it silently changes the machine when the
++// directory is renamed or moved. Storing gives every directory an independent
++// identity and keeps it across a move, which is what an operator means by "my
++// profile".
++//
++// The file is not a new observable. It lives under chrome::DIR_USER_DATA,
++// which Chrome's File System Access permission context blocks with
++// kBlockAllChildren -- the only web API that can name an absolute path refuses
++// that directory and everything beneath it, and the blocklist resolves through
++// PathService so it follows a --user-data-dir override. A page cannot fetch a
++// file: URL from a web origin, a file: document is an opaque origin without
++// --allow-file-access-from-files, and the file is no more reachable than the
++// Cookies database sitting beside it. Nothing about it reaches a renderer: the
++// browser reads it, composes, and passes only the composed profile down.
++//
++// Reads and writes the filesystem, which the caller must account for: this can
++// no longer run in a process that may turn out to be a second instance without
++// leaving a trace. It is safe anyway, because the write is an exclusive create
++// -- a second instance racing a first adopts whichever seed reached the
++// directory first, and neither overwrites the other.
++BASE_EXPORT SeedResolution ResolveSeed(const CommandLine& command_line,
++                                       const FilePath& state_directory);
++
++// The name of the identity file inside the state directory. Exposed for the
++// tests and for the explain report; nothing else should need it.
++BASE_EXPORT const char* IdentityFileName();
+ 
+ }  // namespace apostate
+ }  // namespace base

@@ -52,9 +52,12 @@ jobs:
     name: probe-${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     # 15 was enough when this only reported what the image had. It now installs
-    # the SDK Debuggers feature and any missing Visual Studio component, both
-    # downloads, on the slowest runner class we use.
-    timeout-minutes: 30
+    # any missing Visual Studio component and, when the SDK is at an older
+    # servicing revision, the pinned SDK's desktop C++ headers and libraries
+    # as well -- which is the large download, on the slowest runner class we
+    # use. A 2 vCPU Windows minute is cheap enough that the headroom costs
+    # nothing and a timeout here would waste the whole run.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:

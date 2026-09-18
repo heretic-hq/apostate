@@ -86,18 +86,27 @@ on:
 permissions:
   contents: read
 
-# Two runs of the same gate syncing Chromium at once would double the bill for
-# no new information, so a push or the weekly cron still supersedes its own
-# predecessor. A manual dispatch does not, and the group carries the target
-# set, both learned the expensive way: dispatching a windows-x64 gate under a
-# flat group with cancel-in-progress killed a linux-x64 job at 1h07m, minutes
-# before it would have produced the first Linux verdict this project has ever
-# had. Cancelling is safe in the sense that the gate writes nothing outside its
-# own VM, which is what the previous version of this comment said and is not
-# the point: an hour of compute is the cost, and safety was never the risk.
+# Two runs of the same gate syncing Chromium at once double the bill for no new
+# information, and killing a run in flight throws away everything it has
+# already paid for. Queueing avoids both, so nothing here cancels anything: a
+# second run of the same target set waits for the first instead of superseding
+# it. This workflow has no push trigger, only manual dispatch and a weekly
+# cron, so the queue is bounded by definition and cannot pile up.
+#
+# The group carries the requested target set, with the cron's effective default
+# spelled out so a scheduled run and a manual run of the same pair collapse
+# into one group rather than both syncing. Both halves were learned the
+# expensive way: a flat group with cancel-in-progress meant dispatching a
+# windows-x64 gate killed a linux-x64 job at 1h07m, minutes before the first
+# Linux verdict this project has ever had.
+#
+# Residual, stated because it cannot be fixed here: GitHub resolves this group
+# before the setup job resolves targets, so a manual dispatch naming a subset
+# ("linux-x64") does not collapse against a cron run of the pair, and both sync
+# Linux. That costs one extra sync in a case that needs a human to cause.
 concurrency:
-  group: apostate-series-gate-${{ github.event_name }}-${{ github.event.inputs.targets || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  group: apostate-series-gate-${{ github.event.inputs.targets || 'linux-x64,windows-x64' }}
+  cancel-in-progress: false
 
 jobs:
   setup:

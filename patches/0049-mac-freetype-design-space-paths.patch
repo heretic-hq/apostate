@@ -24,13 +24,24 @@ every target in build/args sets is_official_build = true -- so no configuration
 this repository produces compiles it, confirmed absent from the macos-arm64
 ninja graph.
 
-Dropping it costs no coverage, which is the part worth stating rather than
-assuming. Patch 0053 adds skia/ext/design_space_paths_unittest.cc, registered
-in skia/BUILD.gn and not gated on skia_enable_tools, and it asserts the same
-three properties: the flag survives SkFontPriv::Flatten and Unflatten, it
-reaches fRec.fFlags on the design-space scaler and not the native one, and
+What it would have tested is covered, but not identically, and the difference
+is worth stating rather than glossing. Patch 0053 adds
+skia/ext/design_space_paths_unittest.cc to skia_unittests, which is not gated
+on skia_enable_tools and so is buildable here, and it asserts the same three
+properties: the flag survives SkFontPriv::Flatten and Unflatten, it reaches
+fRec.fFlags on the design-space scaler and not the native one, and
 DescriptorGivenRecAndEffects produces different descriptors for the two, so
 the strike cache cannot alias a design-space font onto native-space metrics.
+
+That coverage is `if (is_linux)` only, because the test needs real FreeType and
+0053 asserts enable_freetype beside it. So the property is exercised on Linux
+while this patch is aimed at Mac profiles. That is acceptable rather than
+merely tolerated: the flag-to-fRec-to-descriptor path lives in
+SkScalerContext, which is shared code with no platform branch, so Linux
+exercises the same logic Mac relies on. It is not a substitute for measuring
+Mac glyph bounds, which is what the V3 named-face diagnostics are for, and
+restoring the FontTest.cpp hunk would not have closed that gap either, since
+nothing builds it on any platform.
 That last one is the property the rest of this patch depends on, and it is
 checked by a test the tree can actually build.
 

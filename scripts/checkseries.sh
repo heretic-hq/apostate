@@ -203,6 +203,18 @@ say "V1 series gate  target=$TARGET  $total translation units from patches/serie
 PHASE1_PY="$(cat <<'PY'
 import collections, re, sys
 
+# Windows Python writes \r\n for every \n in text mode, and this stream is
+# read back by `while IFS=$'\t' read -r path objs` in bash. The trailing \r
+# lands on the last field, so an object path becomes
+# "obj/net/net/socks5_client_socket.obj\r" and ninja reports
+# "unknown target" for a target it produces -- which the first Windows run of
+# this gate hit, after the toolchain and the patch series were both fixed. The
+# gate correctly called itself broken rather than blaming the series, but it
+# was broken for this. Fixing it at the writer covers every consumer at once:
+# the object list, the #prefix line read by awk, and the absent log.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(newline="\n")
+
 units = []
 for line in open(sys.argv[1], encoding="utf-8"):
     path = line.partition("\t")[0].strip()
@@ -272,12 +284,16 @@ fi
 # Out-dir-relative spelling of a source path, as ninja itself writes it. Taken
 # from the compdb output rather than computed from the directory depth, so the
 # gate cannot disagree with ninja about the prefix.
-PREFIX="$(awk -F'\t' '$1=="#prefix"{print $2; exit}' "$MAP")"
+#
+# Both readers tolerate a trailing \r even though the writer no longer emits
+# one. The writer is the fix; this is so a future one cannot reintroduce the
+# same failure silently, and the cost is a character class.
+PREFIX="$(awk -F'\t' '$1=="#prefix"{sub(/\r$/, "", $2); print $2; exit}' "$MAP")"
 
 objects=()
 in_graph=()
 absent=()
-while IFS=$'\t' read -r path objs; do
+while IFS=$'\t\r' read -r path objs; do
   case "$path" in '#'*) continue ;; esac
   if [ -n "$objs" ]; then
     in_graph+=("$path")

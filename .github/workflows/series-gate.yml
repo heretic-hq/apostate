@@ -86,12 +86,18 @@ on:
 permissions:
   contents: read
 
-# Two gate runs syncing Chromium at once would double the bill for no new
-# information. Cancelling in progress is safe: the gate writes nothing outside
-# its own VM.
+# Two runs of the same gate syncing Chromium at once would double the bill for
+# no new information, so a push or the weekly cron still supersedes its own
+# predecessor. A manual dispatch does not, and the group carries the target
+# set, both learned the expensive way: dispatching a windows-x64 gate under a
+# flat group with cancel-in-progress killed a linux-x64 job at 1h07m, minutes
+# before it would have produced the first Linux verdict this project has ever
+# had. Cancelling is safe in the sense that the gate writes nothing outside its
+# own VM, which is what the previous version of this comment said and is not
+# the point: an hour of compute is the cost, and safety was never the risk.
 concurrency:
-  group: apostate-series-gate
-  cancel-in-progress: true
+  group: apostate-series-gate-${{ github.event_name }}-${{ github.event.inputs.targets || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   setup:

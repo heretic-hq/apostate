@@ -46,10 +46,15 @@ diff --git a/base/apostate/profile.h b/base/apostate/profile.h
 diff --git a/base/apostate/profile.cc b/base/apostate/profile.cc
 --- a/base/apostate/profile.cc
 +++ b/base/apostate/profile.cc
-@@ -74,7 +74,26 @@
+@@ -74,7 +74,31 @@
      return nullptr;
    }
  
++  // wiring-exempt: device_profile - the switch envelope, not a profile field.
++  // wiring-exempt: proxy_credentials - kept out of the device-profile schema.
++  // Credentials travel beside the profile rather than inside it so they stay
++  // out of diagnostics and persisted artifacts; docs/PROFILE_SPEC.md,
++  // "Selection precedence", is the contract.
 +  std::optional<ProxyCredentials> proxy_credentials;
 +  if (const DictValue* envelope = dict->FindDict("device_profile")) {
 +    if (const DictValue* proxy = dict->FindDict("proxy_credentials")) {

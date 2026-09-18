@@ -129,3 +129,11 @@
 # so both come ahead of it; it is only reachable because 0102 makes a GPU-less
 # host compose a hardware identity, so that comes ahead of it too.
 0105-webgpu-no-adapter-when-none-was-measured.patch
+
+# 0106 rewrites the early return 0081 introduced and the compose.h comments
+# 0081 wrote, so the whole compose.cc chain comes ahead of it (0081, 0083,
+# 0084, 0085, 0091, 0093, 0097, 0101, 0102); its profile.cc hunks sit in the
+# envelope block 0072 added, so that comes ahead of it too. It is last because
+# nothing else in the series touches base/apostate/profile.{h,cc} or
+# base/apostate/explain.{h,cc} after 0102, not because 0103-0105 are needed.
+0106-compose-credentials-are-not-a-device.patch

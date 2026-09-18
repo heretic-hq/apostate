@@ -214,6 +214,30 @@ jobs:
       - name: Fetch pinned Chromium
         shell: bash
         run: bash scripts/fetch-sources.sh
+      - name: Verify the checkout did not translate line endings
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Git for Windows defaults to core.autocrlf=true and the hosted
+          # Windows images set it globally. Without .gitattributes every patch
+          # arrives with CRLF while gclient's Chromium sources keep LF, and the
+          # series then fails to apply for a reason the apply error never
+          # names. This is that failure, named.
+          bad=0
+          while IFS= read -r p; do
+            if grep -q $'\r' "$p"; then
+              case "$p" in
+                patches/0042-audio-portable-neon-profile.patch) ;;
+                *) echo "CRLF in $p" >&2; bad=1 ;;
+              esac
+            fi
+          done < <(git ls-files 'patches/*.patch')
+          if [ "$bad" -ne 0 ]; then
+            echo "The checkout translated line endings. .gitattributes should" >&2
+            echo "prevent this; check it is present and the runner honoured it." >&2
+            exit 1
+          fi
+          echo "line endings intact"
       - name: Apply patch series without fuzz
         shell: bash
         run: bash scripts/apply-patches.sh

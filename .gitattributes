@@ -1,0 +1,33 @@
+# Line endings are part of the build contract here, not a formatting
+# preference. Two builds from the same pins must produce byte-identical
+# output, and a patch that applies on Linux and fails on Windows is the same
+# defect as a patch that does not apply at all.
+#
+# Without this file, Git for Windows checks out with core.autocrlf=true by
+# default: every file in this repository arrives with CRLF, while the Chromium
+# sources gclient fetches keep LF. `git apply` then sees patch context lines
+# ending in \r against source lines that do not, and the series fails to apply
+# before a single translation unit is compiled. That is exactly how the first
+# Windows run of the compile gate failed.
+
+# Everything this repository stores is LF, on every platform.
+* text=auto eol=lf
+
+# Patch files are byte-exact and must never be translated at all, not even to
+# LF. Some legitimately carry literal CRLF because the Chromium file they edit
+# does -- 0042-audio-portable-neon-profile.patch is one -- and normalising
+# those bytes would corrupt the patch rather than tidy it.
+*.patch -text
+patches/series -text
+
+# Captures and golden artifacts are compared by hash. Treat them as opaque.
+*.json -text
+*.jsonl -text
+*.lock -text
+
+# Binary assets, listed so nothing infers a text type for them.
+*.png binary
+*.ttf binary
+*.woff2 binary
+*.zip binary
+*.tar.xz binary

@@ -59,14 +59,45 @@ destination is ever emitted outside the proxy.
 
 ## Credential and identity model
 
-The public proxy endpoint remains credential-free:
+A credential reaches the launch through one of two channels, and exactly one
+per launch. Supplying both refuses the launch: they are two sources of truth
+for a store that holds one credential, and picking either would authenticate
+with a credential the operator did not name.
+
+**The proxy URL.** The syntax every other proxy tool accepts:
+
+```text
+--proxy-server=socks5://user:pass@proxy.example:1080
+```
+
+Chromium cannot read this. `ProxyUriToProxyServer` hands everything after
+`://` to `ParseHostAndPort`, which fails on the `@`, so the proxy is invalid,
+the chain is unusable and every request ends `ERR_NO_SUPPORTED_PROXIES`. So
+the credential is taken off the value at the boundary — `PreSandboxStartup` in
+`chrome/app/chrome_main_delegate.cc`, in the browser only, immediately ahead
+of the compositor and before any pref store, any child command line or any
+`Profile::Get()` exists — and what Chromium's proxy configuration receives is
+the credential-free endpoint it has always wanted:
 
 ```text
 --proxy-server=socks5://proxy.example:1080
 ```
 
-The Node launcher parses URL userinfo only for an ephemeral native launch
-envelope:
+The whole proxy-rules grammar is covered, not a single URL:
+`ProxyConfig::ProxyRules::ParseFromString` reads `;`-separated entries, each
+optionally `url_scheme=`-prefixed, each list `,`-separated, and userinfo comes
+off every URI in it. Splitting follows the URL Standard, so the last `@` and
+the first `:` delimit; both halves are percent-decoded per RFC 3986 §2.1,
+strictly, so a malformed escape refuses rather than decoding to a password
+nobody typed. Refusals: two URIs naming different credentials, a credential on
+`direct://` or `quic://` or an unknown scheme, and a decoded half over 4096
+bytes, containing a NUL, or not valid UTF-8. `docs/FLAGS.md`, "The proxy", is
+the operator-facing contract.
+
+**The profile envelope.** What the Node launcher sends, parsing the same URL
+userinfo with `new URL()` and `decodeURIComponent` — which is why the native
+split deliberately matches those semantics rather than inventing its own, so
+one proxy URL yields one credential whichever entry point receives it:
 
 ```json
 {
@@ -84,6 +115,47 @@ the network stack. It accepts the legacy profile-only payload when no proxy
 credentials are configured. The device-profile schema remains unchanged;
 credentials must not be persisted in profile files, resolver records, family
 manifests, acceptance metadata, diagnostics, or release artifacts.
+
+**Neither channel leaves a credential on the browser's command line.** The
+envelope's `proxy_credentials` block is lifted off at the same boundary as the
+URL's userinfo, so after adoption the browser's command line carries no secret
+at all. Six things serialize that command line verbatim, and closing them by
+construction is the point — redacting six call sites leaves a seventh to be
+remembered:
+
+| surface | call site |
+|---|---|
+| `chrome://version` | `version_ui.cc`, both the `GetCommandLineString()` and the argv-join branch |
+| `chrome://gpu` | `gpu_internals_ui.cc` |
+| `chrome://net-export` | `net_export_ui.cc` → `chrome_net_log.cc`, `clientInfo.command_line` |
+| `--log-net-log` | `ChromeContentBrowserClient::GetNetLogConstants` → the same field |
+| DevTools `SystemInfo.getInfo` | `system_info_handler.cc` |
+| `chrome://tracing` | `metadata_data_source.cc`, when privacy filtering is off |
+
+Plus the crash-key switch list (`chrome/common/crash_keys.cc`), which is set
+per process rather than once. The envelope form used to be visible in
+`chrome://version`, base64-encoded, for the whole session.
+
+Children still receive it, inside the envelope, appended at
+`ChromeContentBrowserClient::AppendExtraCommandLineSwitches` where patch `0005`
+already copies the profile. That is the only channel a child has:
+`--proxy-server` is not copied to children, and everything that spends the
+credential — `connect_job_params_factory.cc`,
+`SOCKS5DatagramClientSocket`, the WebRTC socket factory — runs in the network
+service. A child's argv is therefore visible to `ps` exactly as it has been
+since `0072`, and two of the surfaces above read a child's rather than the
+browser's: Perfetto metadata, which a trace captures per process, and the
+crash-key list. `--apostate-profile` is on the crash-key ignore list for that
+reason, rather than relying on the 64-byte crash-key bound happening to cut a
+base64 payload short of the username; a `chrome://tracing` capture taken while
+a proxy is configured is reported rather than mitigated, and should be treated
+as carrying the credential.
+
+`--fingerprint=host` with an authenticated proxy composes nothing and installs
+no profile switch, so `Profile::Get()` returns a profile carrying only the
+credential: every field absent, the host inherited on every axis. That is the
+same shape a `{"device_profile":{},"proxy_credentials":{…}}` envelope has
+always produced, so no consumer sees a new one.
 
 Credentials are deliberately separate from `ProxyServer` and `ProxyChain`.
 Chromium serializes proxy identity into NetLog, net-export, socket-pool group
@@ -112,10 +184,17 @@ proxy request / CONNECT
   -> Proxy-Authorization retry
 ```
 
-The launch-only credential path bypasses `HttpAuthCache`, so credentials do not
-become reusable persisted or shared auth state. Authenticated HTTP and HTTPS
-streams share the same native path; HTTPS is an HTTP `CONNECT` tunnel followed
-by the normal TLS stream.
+The launch-only credentials answer the challenge through
+`HttpAuthController::ResetAuth`, which records the entry in the in-memory
+`HttpAuthCache` before restarting the request -- Chromium adds it there for
+every identity source except `IDENT_SRC_NONE` and
+`IDENT_SRC_DEFAULT_CREDENTIALS`, and the launch path supplies
+`IDENT_SRC_EXTERNAL`. So the credentials do become reusable auth state for the
+life of the network context, which is what lets a later request authenticate
+without a second 407. That cache is in memory only and is never persisted to
+disk, so it does not outlive the browser. Authenticated HTTP and HTTPS streams
+share the same native path; HTTPS is an HTTP `CONNECT` tunnel followed by the
+normal TLS stream.
 
 Unauthenticated proxies continue through the ordinary Chromium path. A proxy
 that challenges without configured credentials retains Chromium's normal auth

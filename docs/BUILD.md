@@ -86,6 +86,45 @@ On Linux, `scripts/fetch-sources.sh` treats a failed Chromium build-dependency
 installation as fatal. A missing dependency otherwise tends to surface much
 later as a header or linker error.
 
+### Prove the binary contains your change before you measure it
+
+A built `Chromium.app` in the out directory can be arbitrarily older than the
+framework beside it, and ninja will not tell you. Measured on
+`out/macos-arm64` at 152.0.7977.83: the freshly linked
+`out/macos-arm64/Chromium Framework.framework/.../Chromium Framework` was three
+days newer than the copy inside
+`Chromium.app/Contents/Frameworks/Chromium Framework.framework/...`, and asking
+ninja for the app's copy by name answered `no work to do` against the stale
+file. Three headless runs and a net-log capture were produced from a binary
+that did not contain the patch under test, and nothing in their output said so
+— the patch's behaviour was simply absent, which reads exactly like the patch
+not working.
+
+So verify the binary before trusting anything it does. The cheapest check is a
+string only your change introduces:
+
+```sh
+strings -a "out/macos-arm64/Chromium.app/Contents/Frameworks/Chromium Framework.framework/Versions/$(
+  )152.0.7977.83/Chromium Framework" | grep -c 'some message only my patch adds'
+```
+
+`0` means you are measuring an older build. Recover by deleting the bundle and
+letting ninja reassemble it, which takes seconds because every input is already
+built:
+
+```sh
+rm -rf out/macos-arm64/Chromium.app
+( cd out/macos-arm64 && ninja chrome )
+```
+
+`scripts/package-artifact.sh` is not the cause: it only reads
+`out/$TARGET/Chromium.app` and copies it into a staging directory, and writes
+nothing into the out directory. The stale copy was left by something that
+overwrote the bundle after ninja recorded it as current, and ninja's freshness
+check for a `copy_bundle_data` directory output does not notice. Until that is
+tracked down, the string check above is the standard opening move for any local
+smoke test, and it is cheap enough that there is no reason to skip it.
+
 ### Configure through the script
 
 `scripts/configure.sh` combines `build/args/common.gni` with the target's GN

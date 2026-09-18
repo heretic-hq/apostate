@@ -14,6 +14,7 @@ import {
   ProfileResolutionError,
   UnpublishedArtifactError,
   ensureBinary,
+  expectedArtifactName,
   launch,
   launchProcess,
   launchContext,
@@ -26,7 +27,7 @@ import {
 } from "../dist/index.js";
 
 const target = "linux-x64";
-const artifactNameFor = (platform) => `apostate-${CHROMIUM_VERSION}-${platform}.${platform === "windows-x64" ? "zip" : "tar.zst"}`;
+const artifactNameFor = (platform) => expectedArtifactName(platform);
 function releaseManifest(archive, platform = target) {
   const artifact = artifactNameFor(platform);
   return {

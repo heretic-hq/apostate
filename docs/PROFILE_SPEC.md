@@ -151,9 +151,24 @@ Network localization has a separate precedence chain:
 ```text
 explicit locale/timezone
   > GeoIP-derived locale/timezone
-  > composed locale/timezone
   > host values
 ```
+
+There is no composed row in that chain. There used to be one, between GeoIP and
+the host, and it was the defect patch 0111 removed: the compositor drew a
+(language list, timezone) pair by seed from four catalogue policies, so a launch
+that named nothing and whose GeoIP lookup did not answer served a timezone
+chosen by the seed. A seed cannot see the connection's exit country, so that
+row did not merely fail to match the egress, it guaranteed a mismatch — and the
+host's own zone, which is what the row displaced, matches a direct egress
+exactly and is at worst wrong the way a traveller's is.
+
+The chain is per field, not per pair. A GeoIP lookup that resolves a timezone
+and no locale contributes the timezone and leaves the language list to the host,
+because `scripts/geoip.py` maps only countries it has a stated locale policy
+for and inventing `en-<COUNTRY>` for the rest would be synthesis. What the chain
+guarantees is that no field is ever filled in by something that cannot answer
+for where the connection comes out.
 
 **How a locale reaches the browser, and why it matters.** A resolved locale or
 timezone travels as the per-field switches `--fingerprint-locale` and
@@ -234,8 +249,11 @@ the strongest row of the chain above rather than a new mechanism.
 
 The Node adapter performs the built-in GeoIP request through the configured
 HTTP(S), SOCKS4, or SOCKS5 proxy. Chromium authentication is a separate native
-path: the credential-free `--proxy-server` endpoint does not authenticate by
-itself. When proxy credentials are supplied, the launcher carries them in an
+path with two channels: a credential in `--proxy-server`'s userinfo, which the
+browser strips off the switch before Chromium's proxy configuration sees it,
+and the envelope below, which is what the launcher sends. Supplying both
+refuses the launch; `docs/FLAGS.md`, "The proxy", is the operator-facing
+contract. When proxy credentials are supplied, the launcher carries them in an
 ephemeral `--apostate-profile` envelope beside the validated `device_profile`;
 the native loader keeps them out of the device-profile schema, diagnostics,
 and persisted artifacts. They do enter Chromium's in-memory `HttpAuthCache`,
@@ -372,7 +390,8 @@ The schema groups fields as follows:
 | Section | Examples | Native limitation |
 | --- | --- | --- |
 | `platform`, `browser` | Client Hints platform, platform version, architecture, bitness, WoW64, form factors, UA string | The UA browser version must match the Chromium binary. Brand fields are assert-only: the brand list is a build invariant and the loader fails closed on a mismatch instead of rewriting it. |
-| `cpu`, `memory`, `audio` | Logical cores, installed memory, audio buffer frames | Bucket values only, and clamped down to host capability, never up. |
+| `cpu`, `memory` | Logical cores, installed memory | Bucket values only, and clamped down to host capability, never up. |
+| `audio` | Output buffer frames | NOT clamped to the host, unlike the two above: patch 0019 clears the host device's own `min_frames_per_buffer` and `max_frames_per_buffer` alongside the override, because a backend advertising a 480-frame floor would otherwise clamp a claimed 256 straight back up and the override would silently do nothing. Accepted range is `[128, 8192]`, which is `kMinWebAudioBufferSize` to `kMaxWebAudioBufferSize`. The claim is not falsifiable by capacity the way cores and memory are — the browser really does run the buffer it reports — but the sample rate it is divided by stays the host's. |
 | `screen`, `window` | Panel geometry, DPR, gamut, HDR, work-area insets, window chrome deltas | Impossible display arrangements are rejected. `avail_*` is derived from the panel plus the furniture insets; insets exceeding the panel fail the launch. |
 | `gpu`, `gl_limits`, `gl_extensions`, `gl_precisions` | Renderer/vendor identity, WebGL limits, extensions and shader precision | These are native target inputs. Limits are capped by native capability on a backend that enforces what it reports, and served as claimed on one that does not (`0103`); five claimed extensions whose objects carry only constants are served from Blink's own classes (`0104`) and the rest cannot be added. Exact equality requires native behavior validation, not renderer identity alone, and the residuals are in [docs/LIMITATIONS.md](LIMITATIONS.md). |
 | `webgpu` | Adapter vendor, architecture, features, limits | Served from the same measured anchor member the WebGL cluster comes from, so the two surfaces cannot disagree: pinning `windows-d3d11-nvidia` on a Metal host returns `{nvidia, ampere}` and its 36 measured limits, where an unpinned launch on that host returns `{apple, metal-3}`. A member that recorded no adapter has nothing to serve and leaves the surface host-inherited; [docs/LIMITATIONS.md](LIMITATIONS.md) has that case. |

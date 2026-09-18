@@ -817,7 +817,22 @@ export function resolveProfile(options = {}) {
 
 function checkFingerprintSwitches(args) {
   for (const item of args) {
-    if (typeof item !== "string" || !item.startsWith("--fingerprint")) continue;
+    if (typeof item !== "string") continue;
+    // --proxy-server is the package's to emit, because a proxy URL has to be
+    // split: the endpoint goes on the command line and the credential travels
+    // in the profile envelope. One passed here used to be filtered out and
+    // dropped without a word, so a caller who configured their proxy this way
+    // launched with no proxy at all and nothing said so. The browser accepts a
+    // credential in that switch now, which makes this the syntax people will
+    // reach for, so it is named rather than swallowed.
+    if (item === "--proxy-server" || item.startsWith("--proxy-server=")) {
+      throw new ProfileResolutionError(
+        "--proxy-server cannot be passed in args; this package emits it itself. Pass proxy: \"socks5://user:pass@host:port\" instead, which sends the endpoint on the command line and the credential in the launch envelope. Passing it here used to be silently ignored, so a proxy configured this way was never applied.",
+        { switch: "--proxy-server" },
+        "APOSTATE_PROXY_SWITCH_IN_ARGS",
+      );
+    }
+    if (!item.startsWith("--fingerprint")) continue;
     const name = item.split("=", 1)[0];
     if (FINGERPRINT_SWITCHES[name] !== true) {
       throw new ProfileResolutionError(
@@ -1162,6 +1177,61 @@ function validateGeoipResult(result) {
   return { locale: geoipLocale(result), timezone: geoipTimezone(result.timezone ?? result.time_zone ?? result.timeZone), ip };
 }
 
+// The environment variables that decide Chromium's application locale, and
+// through it ICU's default locale and every Intl constructor's. All four,
+// because each moves it on its own: leaving one at the operator's value lets
+// the host decide through a variable nobody wrote.
+const LOCALE_ENV_VARS = ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"];
+
+// What a composed launch that resolved no locale gets. Not the host's, and not
+// nothing: absence of a resolved locale has to mean a defined default, or the
+// served locale becomes a property of the operator's shell. Mirrors
+// COMPOSED_DEFAULT_LOCALE in the Python package.
+const COMPOSED_DEFAULT_LOCALE = "en-US";
+
+// `de-DE` -> `de_DE.UTF-8`, for the three LC_* variables that expect it. A tag
+// with no region stays region-free rather than acquiring an invented one. If
+// the host has not generated the named locale, setlocale falls back to C and
+// LANGUAGE -- which takes the tag as written and needs nothing generated --
+// still decides the application locale. Either way the host's own value is
+// gone, which is the point of writing these at all.
+function posixLocale(tag) {
+  const [language, region] = tag.split("-");
+  return `${region ? `${language}_${region}` : language}.UTF-8`;
+}
+
+// The locale environment a launch is given, or nothing for host mode.
+//
+// Only host inheritance inherits the host's locale environment, because only
+// there is the host the thing being presented. A composed persona gets these
+// written explicitly, and the reason is a leak rather than tidiness: an
+// operator in Bangkok with LANG=th_TH.UTF-8, composing a Windows persona
+// through a Mexican exit, would otherwise serve Thai language preferences and
+// Thai date and number formatting from a Mexican IP under a synthetic Windows
+// identity. That is the host showing through a composed profile.
+//
+// Chromium resolves its application locale from these, sets ICU's default
+// locale from that, and every Intl constructor resolves its own default
+// against ICU's (v8/src/execution/isolate.cc:8123). So this is the only lever
+// that moves Intl.DateTimeFormat, Intl.NumberFormat, Intl.Collator and
+// toLocaleString together with navigator.languages; --lang moves none of them,
+// measured on stock Chrome as well as on ours. It has no effect on an artifact
+// that ships one locale pak -- see docs/FINGERPRINTS.md section 8 and
+// scripts/package-artifact.sh, which now ships the full set.
+function localeEnvironment(config, resolution) {
+  const seed = config.fingerprint;
+  if (seed !== null && seed !== undefined
+      && HOST_INHERITANCE_SEEDS[String(seed).trim().toLowerCase()] === true) {
+    return {};
+  }
+  const resolved = resolution?.locale ?? config.locale ?? COMPOSED_DEFAULT_LOCALE;
+  const tag = String(resolved).split(",")[0].trim() || COMPOSED_DEFAULT_LOCALE;
+  const posix = posixLocale(tag);
+  const out = {};
+  for (const name of LOCALE_ENV_VARS) out[name] = name === "LANGUAGE" ? tag : posix;
+  return out;
+}
+
 async function prepareLaunch(options = {}) {
   const canonical = toCanonicalLaunchConfig(options);
   const resolution = resolveProfile(options);
@@ -1196,20 +1266,24 @@ async function prepareLaunch(options = {}) {
       // envelope, where "send nothing" and "send en-US/UTC" were the same
       // thing, since an envelope suppresses composition either way. It now
       // travels as --fingerprint-locale/--fingerprint-timezone, so sending no
-      // override is a real state: the composed profile keeps the locale and
-      // timezone its own seed drew, which are coherent with the rest of that
-      // identity by construction. Inventing en-US/UTC instead overrode a
-      // coherent pair with a persona contradicting the proxy's exit country,
-      // which is the detection this package exists to prevent. The launch still
-      // does not crash. Do not restore the fallback.
+      // override is a real state: the browser's own precedence settles the
+      // surface, and since patch 0111 that means the host's own zone and
+      // language list. It used to mean a pair drawn from a four-entry
+      // catalogue pool, which was described here as "coherent with the rest of
+      // that identity by construction" -- true of the identity and false of
+      // the network, because a drawn zone cannot correlate with an exit IP the
+      // draw never saw. Inventing en-US/UTC was worse again for the same
+      // reason. The host's zone matches a direct egress and is at worst wrong
+      // the way a traveller's is. The launch still does not crash. Do not
+      // restore the fallback.
       const reason = error?.name === "AbortError"
         ? `timed out after ${timeoutMs} ms`
         : sanitizeErrorMessage(error?.message ?? error, canonical.proxy);
       geoipWarnings.push(
         `GeoIP lookup failed for ${redactProxy(canonical.proxy) ?? "the direct network"}: ${reason}. `
-        + "No locale or timezone override is sent and none is invented, so the composed profile "
-        + "keeps its own and it will not match the proxy's exit country. Pass locale and timezone "
-        + "explicitly to guarantee a match.",
+        + "No locale or timezone override is sent and none is invented, so the launch keeps the "
+        + "host's own locale and timezone. Behind a proxy that is the host's and not the exit's. "
+        + "Pass locale and timezone explicitly to guarantee a match.",
       );
       console.warn(`\x1b[33m[Apostate] ${geoipWarnings[geoipWarnings.length - 1]}\x1b[0m`);
     } finally {
@@ -1237,7 +1311,7 @@ async function prepareLaunch(options = {}) {
     if (unresolved.length > 0) {
       geoipWarnings.push(
         `the GeoIP lookup resolved no ${unresolved.join(" and no ")}. None is invented, so the `
-        + "composed profile keeps its own; pass it explicitly to guarantee a match.",
+        + "host's own is served for that field; pass it explicitly to guarantee a match.",
       );
       console.warn(`\x1b[33m[Apostate] ${geoipWarnings[geoipWarnings.length - 1]}\x1b[0m`);
     }
@@ -1319,7 +1393,10 @@ const NATIVE_SELECTION = { "host-inherited": true, "native-composed": true };
 // this branch was the inconsistency between the two implementations.
 function buildLaunchArguments(config, resolution, { driverOwnsProfile = false } = {}) {
   checkFingerprintSwitches(config.args);
-  const args = config.args.filter((arg) => !arg.startsWith("--apostate-profile=") && !arg.startsWith("--proxy-server=") && !arg.startsWith("--user-data-dir="));
+  // --proxy-server is not filtered here any more: checkFingerprintSwitches
+  // above refuses one rather than dropping it, so nothing reaches this point
+  // carrying it.
+  const args = config.args.filter((arg) => !arg.startsWith("--apostate-profile=") && !arg.startsWith("--user-data-dir="));
   // Captured before anything is pushed: from here on `args` also holds the
   // package's own selectors, so re-asking would see those instead of the user's.
   const userSuppliedSeed = hasSwitch(args, "--fingerprint");
@@ -1421,7 +1498,7 @@ function defaultCacheDir() {
   return join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "apostate");
 }
 
-function expectedArtifactName(target) {
+export function expectedArtifactName(target) {
   return TARGET_ARTIFACTS[target];
 }
 
@@ -2282,8 +2359,11 @@ export async function launch(options = {}) {
   const binary = explicitBinary ?? await ensureBinary(options);
   const args = buildLaunchArguments(prepared.config, prepared.resolution, { driverOwnsProfile: true });
   const env = {
-    ...(options.env ?? {}),
+    // Set, not inherited: only host mode inherits the host's locale
+    // environment. See localeEnvironment.
+    ...localeEnvironment(prepared.config, prepared.resolution),
     ...(prepared.config.timezone ? { TZ: prepared.config.timezone } : {}),
+    ...(options.env ?? {}),
   };
   // The seed and persona switches already carry the identity, so `headless` is
   // the only launch flag the driver owns; everything else is in `args`.
@@ -2331,8 +2411,11 @@ export async function launchProcess(options = {}) {
   const binary = options.executablePath ?? options.binaryPath ?? await ensureBinary(options);
   const args = buildLaunchArguments(prepared.config, prepared.resolution);
   const env = {
-    ...(options.env ?? {}),
+    // Set, not inherited: only host mode inherits the host's locale
+    // environment. See localeEnvironment.
+    ...localeEnvironment(prepared.config, prepared.resolution),
     ...(prepared.config.timezone ? { TZ: prepared.config.timezone } : {}),
+    ...(options.env ?? {}),
   };
   const child = await spawnBrowser(binary, args, { ...options, env });
   return new ApostateProcess(child, binary, prepared.config, prepared.diagnostics);

@@ -112,3 +112,8 @@
 # 0101 needs the whole compose.cc chain ahead of it, because DeriveWorkArea is
 # 0081's and the hunk's context is what 0085 and 0091 left behind.
 0101-compose-drops-the-absent-panel-origin.patch
+
+# 0102 needs the whole compose.cc chain ahead of it. Its anchor-draw hunk's
+# context is what 0091 and 0093 left behind, and its compose.h hunk sits in the
+# switch block 0085 extended.
+0102-compose-serves-a-hardware-gpu-identity.patch

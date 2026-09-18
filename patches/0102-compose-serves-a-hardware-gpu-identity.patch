@@ -1,0 +1,451 @@
+Subject: compose: the claimed OS selects the GPU cluster, and a GPU-less host gets one
+
+Two coupled defaults were wrong, and the second one made the first invisible.
+
+The claimed platform defaulted to the host's own, so a bare launch on a Linux
+server composed a Linux persona. And the anchor draw filtered the catalogue by
+the HOST's graphics backend, so on that server the GPU cluster came from
+whatever the host's driver was -- which, on a machine with no GPU, is the
+software rasteriser.
+
+The mechanism is a hard filter on the candidate set, not a preference and not a
+fallback. ProbeHostCapability reports graphics_backend "swiftshader" when the
+host has no DRM render node or when --disable-gpu was passed, which is patch
+0091. The draw then kept only anchors whose backend token equalled the host's,
+which on a software host removes every hardware anchor and leaves exactly one
+survivor, corpus/anchors/linux-swiftshader-google-6922d61bab83, so the weighted
+pick chose it with probability 1. gpu_identity is conditioned on the resolved
+anchor and filtered by Servability::kAnchorMember, and that anchor's option set
+has one member, so the page received "ANGLE (Google, Vulkan 1.3.0 (SwiftShader
+Device (Subzero) (0x0000C0DE)), SwiftShader driver)" with no per-seed entropy
+at all. The binary said so about itself: "anchor ... has one measured member, so
+no identity rotation is offered on its capability cluster".
+
+Patch 0093's inherit-the-host branch is dead for that case, which is worth
+stating because it is the natural guess: the candidate set is not empty, it has
+one element. The software identity was a positive selection, not a fallback.
+And because that one element was shared by every persona on every GPU-less
+host, two personas drawn from different seeds carried one GPU string -- the
+cross-seed linking property the GPU axis was widened to remove.
+
+The claimed OS is the axis a user is choosing, so it is what selects the
+cluster:
+
+  macos host    -> macos persona, Metal cluster. Coherent by construction: a
+                   macOS host natively serves any claimed macOS renderer.
+  windows host  -> windows persona, D3D11 cluster. Same argument.
+  linux host    -> WINDOWS persona, D3D11 cluster. The deliberate cross-OS
+                   default. A Linux server is the deployment target and a
+                   Windows persona is what most launches there want, so
+                   composing Linux would answer a question nobody asked. It is
+                   the least bad cross-OS pairing -- largely a font question,
+                   which the user can close by provisioning the Windows set --
+                   and --fingerprint-platform=linux overrides it.
+
+The host's graphics backend stops filtering entirely. It was answering the
+wrong question: which cluster the host's own driver could have produced matters
+only if the host's driver is what a page is being told about, and it is not,
+because the persona is.
+
+Nothing is lost by dropping it, and that is structural rather than a judgement.
+Within a platform every non-software anchor in the catalogue shares one backend
+-- macOS is Metal, Windows is D3D11, Linux is Vulkan -- so once the persona
+picks the platform the backend is determined and the comparison had nothing
+left to decide. What it did decide, it decided wrongly.
+
+The software anchor is never drawn on any host. Besides announcing itself in
+the one string every detector reads, it is the only anchor with a single
+member, so drawing it offered no rotation. It stays reachable for a user who
+asks: --fingerprint-anchor names it, and --fingerprint-gpu-renderer or
+--fingerprint-gpu-vendor narrow the identity draw onto its one member. The
+product no longer says "SwiftShader" on the user's behalf.
+
+Rotation is restored rather than merely enabled. The default Linux launch now
+draws a Windows persona, so the candidate set is windows-d3d11-intel-79dfeb5b4f99
+and windows-d3d11-nvidia-0947761dfbe9, offering fifteen identities between them
+-- six Intel UHD 630 device ids and nine NVIDIA boards -- weighted 4..30 and
+picked by High64(Draw(root, label, 0)), the same seed-derived draw every other
+axis uses. So it rotates across seeds and reproduces under a pinned one. A
+macos persona draws the Apple anchor's twelve identities and a linux persona
+the Vulkan anchor's eleven. The single-member pool is not reintroduced
+anywhere.
+
+A cross-OS launch now says what it costs. The GPU cluster follows the persona,
+so the identity and its limit table agree with each other; what does not follow
+is the host's font set, because fonts are files on disk and nothing here
+installs them. Patch 0097 made composition assume provisioning rather than gate
+on it, so this is a diagnostic and not a refusal -- the launch proceeds either
+way -- and it points at docs/FONTS.md and at the override. Windows-on-Linux
+gets that specific wording; any other cross-OS pairing gets the general form.
+Neither is page-visible: composition limitations are what --fingerprint-explain
+prints, and a page cannot read a command line or a report.
+
+This withdraws the reasoning in 0091 and 0093 that a GPU-less host should
+therefore receive a software identity. Those patches were right that a software
+rasteriser's throughput does not match a discrete-GPU claim, and that edge stays
+open and stays recorded. They were wrong about which side of it to take: the
+renderer string is read by every detector on every page load and the throughput
+ratio by almost none, so trading a universally-read string for an expensive
+benchmark nobody runs is the wrong way round. The reference product serves
+hardware renderer strings on a software backend, on a Linux host, and passes the
+suites that matter in production -- measured, not assumed -- which is the
+empirical form of the same argument.
+
+The §4 persona/cluster limitation now fires only for --fingerprint-anchor,
+because the drawn path selects on the persona's platform and a drawn anchor
+therefore always matches it. A pin is an explicit request and honouring it is
+better than refusing, so a pinned cross-platform anchor still composes and
+still records the contradiction.
+
+Measured before this change, through the shipped 152.0.7977.83 macOS artifact
+with --use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader:
+renderer "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0)
+(0x0000C0DE)), SwiftShader driver)", 36 WebGL1 and 30 WebGL2 extensions,
+MAX_TEXTURE_SIZE 16384. That artifact predates the software anchor, so the
+string is the host's own rather than the anchor's; both announce SwiftShader,
+which is the point. On its default Metal backend the same binary composes
+macos-metal-apple-850a91233555 and reports the Apple M4 Max identity with 39
+and 36 extensions.
+
+Every extension name and every capability parameter measured on this host's
+SwiftShader is identical to the Linux SwiftShader capture in
+corpus/anchors/linux-swiftshader-google-6922d61bab83.json except
+MAX_TEXTURE_SIZE and MAX_RENDERBUFFER_SIZE, where the capture says 8192 and
+this host says 16384 -- which is patch 0027's raise, not a platform difference.
+So the software backend's capability surface is portable and the Linux capture
+is a sound stand-in for the deployment target.
+
+Compile-unverified at the time of writing; V1 is the gate this is submitted to.
+What is established is that it applies, and that the selection mechanism it
+changes was read out of the applied tree rather than inferred.
+
+Ledger: gpuinfo.gl-renderer, webgl.unmasked-renderer, webgl.unmasked-vendor,
+gpu.angle-backend, headless.gpu-stack.
+--- a/base/apostate/compose.cc
++++ b/base/apostate/compose.cc
+@@ -57,6 +57,13 @@
+ // This project's subdirectory of the user data directory.
+ constexpr char kStateDirectoryName[] = "apostate";
+ 
++// The Anchor::backend and HostCapability::graphics_backend token for the
++// software rasteriser, spelled the same way host_capability.cc spells it.
++//
++// It is the one backend token that names no hardware, which is why the anchor
++// draw has to treat it as a special case rather than as one more backend.
++constexpr std::string_view kSoftwareBackend = "swiftshader";
++
+ constexpr std::string_view kLayerAnchor = "anchor";
+ constexpr std::string_view kLayerDispersion = "dispersion";
+ constexpr std::string_view kLayerHostInherited = "host-inherited";
+@@ -73,6 +80,41 @@
+   return platform == "windows" || platform == "macos" || platform == "linux";
+ }
+ 
++// The persona a launch composes when --fingerprint-platform named none.
++//
++// Not the host's own platform, which is what this used to be. The claimed OS is
++// the axis a user is actually choosing, and the honest default per host is not
++// uniform:
++//
++//   macos host    -> macos persona. The safe case, and coherent by
++//                    construction: a macOS host can natively serve any claimed
++//                    macOS renderer, so identity and capability agree without
++//                    anything having to be bridged.
++//   windows host  -> windows persona. Same argument.
++//   linux host    -> windows persona. This is the deliberate cross-OS default.
++//                    A Linux host is the deployment target and a Windows
++//                    persona is what most launches want, so composing Linux
++//                    there would be answering a question nobody asked. It is
++//                    the least bad cross-OS pairing -- largely a font question,
++//                    which the user can fix by provisioning the Windows set --
++//                    and it is still a risk, so it is recorded as a limitation
++//                    rather than left silent, and --fingerprint-platform=linux
++//                    overrides it.
++//
++// An unrecognised or empty host platform maps to nothing, so the caller's
++// IsKnownPlatform check refuses the launch exactly as it did before: composing
++// a persona for a platform with no corpus behind it would be worse than
++// inheriting the host.
++std::string_view DefaultPersonaForHost(std::string_view host_platform) {
++  if (host_platform == "macos") {
++    return "macos";
++  }
++  if (host_platform == "windows" || host_platform == "linux") {
++    return "windows";
++  }
++  return host_platform;
++}
++
+ // Parses one option's profile fragment.
+ //
+ // A fragment that does not parse is a defect in the compiled catalogue, not a
+@@ -766,8 +808,10 @@
+   composition.catalogue_digest = std::string(request.catalogue_digest);
+   composition.chromium_version = std::string(request.chromium_version);
+ 
+-  composition.platform = request.platform.empty() ? request.host.platform
+-                                                  : request.platform;
++  composition.platform =
++      request.platform.empty()
++          ? std::string(DefaultPersonaForHost(request.host.platform))
++          : request.platform;
+   if (!IsKnownPlatform(composition.platform)) {
+     LOG(ERROR) << "apostate: no platform persona for '" << composition.platform
+                << "'; this launch inherits the host";
+@@ -791,9 +835,8 @@
+ 
+   // ---- the anchor, before any axis that can be conditioned on it ----
+   //
+-  // The GPU cluster is selected from anchors the host can actually serve, and
+-  // --fingerprint-platform does not move it. Across backends nothing
+-  // transfers, so the host's backend is the filter and the persona is not.
++  // The GPU cluster follows the CLAIMED platform. The drawn path below does
++  // that; --fingerprint-anchor skips it and pins by id.
+   const Anchor* anchor = nullptr;
+   if (!request.pinned_anchor.empty()) {
+     anchor = FindAnchor(request.anchors, request.pinned_anchor);
+@@ -804,64 +847,68 @@
+       return std::nullopt;
+     }
+   } else {
++    // The claimed OS selects the anchor family and the host's graphics backend
++    // does not filter at all. Metal for a macOS persona, D3D11 for a Windows
++    // one, Vulkan for a Linux one.
++    //
++    // The backend comparison this replaces was answering the wrong question.
++    // It asked which cluster the host's own driver could have produced, which
++    // matters only if the host's driver is what a page is being told about --
++    // and it is not, because the persona is. On a Linux host it selected a
++    // Vulkan cluster under a Windows persona, and on a host with no GPU it
++    // selected the one anchor whose renderer string announces a software
++    // rasteriser and handed a page "SwiftShader Device". That was the common
++    // case, not a corner: the deployment target is a headless Linux server.
++    //
++    // Nothing is lost by dropping it, and that is structural rather than a
++    // judgement: within a platform every non-software anchor in the catalogue
++    // shares one backend -- macOS is Metal, Windows is D3D11, Linux is Vulkan
++    // -- so once the platform is chosen the backend is determined and the
++    // comparison had nothing left to decide.
++    //
++    // The software anchor is never drawn on any host. Besides announcing
++    // itself, it is the one anchor with a single member, so drawing it offered
++    // no per-seed entropy at all: every persona on every GPU-less host shared
++    // one GPU string, which links those personas to each other. It stays
++    // reachable for a user who asks -- --fingerprint-anchor names it, and
++    // --fingerprint-gpu-renderer or --fingerprint-gpu-vendor narrow the
++    // identity draw onto its one member.
+     std::vector<const Anchor*> servable;
+     for (const Anchor& candidate : request.anchors) {
+-      if (request.host.graphics_backend.empty() ||
+-          candidate.backend == request.host.graphics_backend) {
++      if (candidate.backend == kSoftwareBackend) {
++        continue;
++      }
++      if (candidate.platform == composition.platform) {
+         servable.push_back(&candidate);
+       }
+     }
+-    // Prefer an anchor captured on this host's own platform, but do not insist
+-    // on it: a backend match is the coherence requirement, and the platform is
+-    // only a tie-break within it.
+-    if (!request.host.platform.empty()) {
+-      std::vector<const Anchor*> same_platform;
+-      for (const Anchor* candidate : servable) {
+-        if (candidate->platform == request.host.platform) {
+-          same_platform.push_back(candidate);
+-        }
+-      }
+-      if (!same_platform.empty()) {
+-        servable = std::move(same_platform);
+-      }
+-    }
+ 
+     if (servable.empty()) {
+-      // No measured cluster fits this host. On a software rasteriser that is
+-      // the normal case and always will be: a capability cluster is a property
+-      // of a real driver, so nothing in the corpus was captured through
+-      // SwiftShader and nothing ever can be. Patch 0091 made that condition
+-      // detectable instead of guessed, which is what brings launches here.
++      // Reachable only when the compiled catalogue holds no hardware anchor for
++      // the claimed platform. That is a catalogue gap, not a host condition: a
++      // GPU-less host no longer arrives here, because the draw above asks about
++      // the persona rather than about a backend the host does not have.
+       //
+-      // The GPU surfaces are therefore left inherited, which is what every
+-      // other axis with no servable option already does a few dozen lines
+-      // below. Returning nullopt here instead discarded the entire profile --
++      // The GPU surfaces are left inherited, which is what every other axis
++      // with no servable option already does a few dozen lines below.
++      // Returning nullopt here instead discarded the entire profile --
+       // timezone, locale, accept-languages, fonts, screen geometry, core
+       // count, memory, media device topology, voices -- because one surface
+       // out of a dozen could not be served. A page reads all of them and only
+-      // some of them are GPU, so that trade was the wrong way round, and a
+-      // GPU-less Linux container is precisely the host this is built for.
+-      //
+-      // Inheriting is coherent and not merely safe. Real Chrome reports
+-      // SwiftShader whenever it runs in a VM, a container or an RDP session
+-      // over a perfectly real Windows or macOS install, so a persona above a
+-      // software rasteriser is a configuration that exists in the world by
+-      // the million. The alternative -- a discrete-GPU renderer string above
+-      // SwiftShader's own limits and extension list -- is a combination that
+-      // exists nowhere, and it is the one a WebGL hash catches first.
++      // some of them are GPU, so that trade was the wrong way round.
+       composition.limitations.push_back(
+-          "anchor: no compiled anchor was captured through this host's "
+-          "graphics backend (" +
+-          request.host.graphics_backend +
+-          "), so the GPU capability cluster is the host's own and every other "
+-          "surface is composed as usual");
++          "anchor: the compiled catalogue holds no hardware anchor for the " +
++          composition.platform +
++          " persona, so the GPU capability cluster is the host's own and every "
++          "other surface is composed as usual");
+       composition.surfaces.push_back({
+           .surface = "anchor",
+           .value = "(inherited)",
+           .layer = std::string(kLayerHostInherited),
+           .evidence = "host-inherited",
+-          .limitation = "no compiled anchor was captured through this host's "
+-                        "graphics backend",
++          .limitation = "the compiled catalogue holds no hardware anchor for "
++                        "the " +
++                        composition.platform + " persona",
+       });
+     } else {
+       std::vector<uint32_t> weights;
+@@ -878,42 +925,79 @@
+     resolved["anchor"] = std::string(anchor->id);
+   }
+ 
++  // The claimed OS is a real choice with a real cost, so a cross-OS launch says
++  // what the cost is instead of either refusing or staying quiet. None of this
++  // is page-visible: it is composition limitations, which --fingerprint-explain
++  // prints and a page cannot read.
++  if (!request.host.platform.empty() &&
++      composition.platform != request.host.platform) {
++    if (composition.platform == "windows" &&
++        request.host.platform == "linux") {
++      // The default pairing on the deployment target, and the one whose
++      // residual the user can actually close. The GPU cluster follows the
++      // persona, so the D3D11 identity and its limit table agree with each
++      // other; what does not follow is the host's font set, because fonts are
++      // files on disk and nothing here installs them. Patch 0097 made
++      // composition assume provisioning rather than gate on it, so this is a
++      // diagnostic and not a refusal: the launch proceeds either way.
++      composition.limitations.push_back(
++          "the persona is windows on a linux host, which is this project's "
++          "default pairing there and its least bad cross-OS one: the GPU "
++          "cluster follows the persona, but the Windows font set does not "
++          "install itself, and a Windows persona missing Windows faces is "
++          "measurable in text metrics -- install the full set (docs/FONTS.md) "
++          "or pass --fingerprint-platform=linux to compose the host's own OS");
++    } else {
++      composition.limitations.push_back(
++          "the persona is " + composition.platform + " on a " +
++          request.host.platform +
++          " host: a cross-OS persona is riskier than the host's own, because "
++          "the surfaces a fork cannot reach -- installed fonts, the kernel's "
++          "own timing behaviour -- stay the host's while everything composed "
++          "claims the persona; pass --fingerprint-platform to state the OS you "
++          "want");
++    }
++  }
+   std::string anchor_limitation;
+   if (anchor && anchor->platform != composition.platform) {
+-    // The §4 case, stated rather than hidden: on a macOS host a Windows
+-    // persona keeps an Apple GPU cluster. A coherent Windows fingerprint wants
+-    // a Windows or Linux host with the corresponding silicon, which is a
+-    // property of graphics drivers and not of this codebase.
++    // Only --fingerprint-anchor reaches this now: the drawn path selects on the
++    // persona's platform, so a drawn anchor always matches it. A pin is an
++    // explicit request and refusing it would be worse than honouring it, but
++    // presenting a Windows renderer string on an Apple Metal capability cluster
++    // is the §4 contradiction, so it is reported rather than hidden.
+     anchor_limitation = "anchor " + std::string(anchor->id) + " is a " +
+                         std::string(anchor->platform) + "/" +
+                         std::string(anchor->backend) +
+                         " cluster while the persona is " +
+                         composition.platform +
+-                        ": --fingerprint-platform does not move the GPU "
+-                        "cluster, and this mismatch is reported rather than "
+-                        "hidden";
++                        ": --fingerprint-anchor pinned it across platforms, "
++                        "and this mismatch is reported rather than hidden";
+     composition.limitations.push_back(anchor_limitation);
+   }
+   if (anchor && !request.host.graphics_backend.empty() &&
+       anchor->backend != request.host.graphics_backend) {
+-    // Only --fingerprint-anchor reaches this: the drawn path filters on the
+-    // backend and the pinned path deliberately does not, because a pin is an
+-    // explicit request and refusing to honour it would be worse than
+-    // honouring it.
++    // The ordinary state on the deployment target rather than a fault: the
++    // persona decides the cluster and the host's backend is whatever it is, so
++    // a Windows persona on a Linux host is a D3D11 cluster over Vulkan or over
++    // the software rasteriser.
++    //
++    // Recorded because the backend still decides one thing. An extension name
++    // is served if the host's GL stack can back it, or if it carries only
++    // constants and internal formats and the profile claims it, which patch
++    // 0104 enumerates by name. A method-bearing name the host lacks is not
++    // served, because a page calls getExtension() and then calls methods on
++    // the object it receives.
+     //
+-    // It still has to be said out loud, because the backend is what decides
+-    // which extensions exist and an extension the host lacks cannot be added.
+-    // A page calls getExtension() and then calls methods on the object it gets
+-    // back, so one claimed but unimplemented fails at first use; only removal
+-    // is safe. A pinned cross-backend anchor therefore advertises a shorter
+-    // list than the card it names, and detectors hash that list.
++    // Note what this does NOT say. It does not say the identity should
++    // therefore be the host's: the renderer string, the vendor string and the
++    // numeric limits are all served as the profile composed them.
+     composition.limitations.push_back(
+-        "anchor " + std::string(anchor->id) +
+-        " was pinned across backends: it is a " +
++        "anchor " + std::string(anchor->id) + " is a " +
+         std::string(anchor->backend) + " cluster on a " +
+         request.host.graphics_backend +
+-        " host, so its extension list is served only as far as this host's GL "
+-        "stack reaches and any name the host lacks is quietly absent");
++        " host: the identity and the capability limits are served as composed, "
++        "while a method-bearing extension name this host's GL stack lacks is "
++        "absent from the list");
+   }
+   if (anchor && anchor->members.size() == 1) {
+     composition.limitations.push_back(
+--- a/base/apostate/compose.h
++++ b/base/apostate/compose.h
+@@ -59,13 +59,25 @@
+ // seed would silently compose an identity when pass-through was asked for.
+ inline constexpr char kFingerprintHostValue[] = "host";
+ 
+-// Platform persona: windows | macos | linux. Defaults to the host's.
++// Platform persona: windows | macos | linux.
+ //
+-// This does not move the GPU cluster. Across graphics backends nothing
+-// transfers -- the same NVIDIA silicon produces a different capability digest
+-// through D3D11 than through Vulkan -- so the anchor is always selected from
+-// what the host can actually serve, and a persona/cluster mismatch is reported
+-// as a limitation instead of hidden.
++// The default is host-conditional and is not always the host's own: a macOS
++// host composes macos, a Windows host composes windows, and a Linux host
++// composes WINDOWS. The last is deliberate -- a Linux server is the deployment
++// target and a Windows persona is what most launches there want -- and it is
++// the way out of it as well: --fingerprint-platform=linux composes the host's
++// own OS.
++//
++// This selects the GPU cluster. The anchor is drawn from the anchors captured
++// on the claimed platform, so a macos persona carries a Metal cluster, a
++// windows persona a D3D11 one and a linux persona a Vulkan one, whatever the
++// host's own graphics backend happens to be. Within a platform the catalogue
++// has exactly one backend, so choosing the persona determines the backend and
++// there is nothing left for the host's to decide.
++//
++// A cross-OS persona costs what a fork cannot reach: installed fonts stay the
++// host's. That is recorded as a composition limitation, which
++// --fingerprint-explain prints, rather than refused.
+ inline constexpr char kFingerprintPlatform[] = "fingerprint-platform";
+ 
+ // Pin the GPU anchor by id instead of drawing one.

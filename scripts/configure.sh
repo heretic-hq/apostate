@@ -40,6 +40,24 @@ case "$(uname -s)" in
       python3 "$SRC/build/vs_toolchain.py" get_toolchain_dir >&2 2>&1 || true
       die "Chromium cannot resolve a Visual Studio toolchain (vs2022_install=${vs2022_install:-<unset>}); gn would fail at build/config/win/visual_studio_version.gni"
     fi
+
+    # build/WINDOWS_SDK_VERSION mirrors the SDK_VERSION that build/vs_toolchain.py
+    # hardcodes, so scripts/verify-host-tooling.sh can assert the SDK's Include
+    # and Lib trees before a checkout exists to read it from. A mirror nothing
+    # compares is a mirror that drifts, and this drift would be silent in the
+    # worst direction: the preflight would confirm an SDK version this build
+    # does not use and pass. This is the first step where both halves exist.
+    _want_sdk="$(tr -d '[:space:]' < "$REPO_ROOT/build/WINDOWS_SDK_VERSION")"
+    _have_sdk="$(sed -n "s/^SDK_VERSION = '\([^']*\)'.*/\1/p" \
+      "$SRC/build/vs_toolchain.py" | head -1)"
+    [ -n "$_have_sdk" ] ||
+      die "could not read SDK_VERSION out of $SRC/build/vs_toolchain.py; the preflight's SDK paths cannot be trusted"
+    [ "$_want_sdk" = "$_have_sdk" ] ||
+      die "build/WINDOWS_SDK_VERSION says $_want_sdk but build/vs_toolchain.py uses $_have_sdk.
+Chromium chooses this version, not us. Update build/WINDOWS_SDK_VERSION to
+$_have_sdk; scripts/verify-host-tooling.sh has been checking the wrong SDK trees."
+    say "windows sdk $_have_sdk (build/WINDOWS_SDK_VERSION agrees)"
+    unset _want_sdk _have_sdk
     ;;
 esac
 

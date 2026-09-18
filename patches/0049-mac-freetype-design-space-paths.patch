@@ -16,16 +16,23 @@ Reference: resources/fingerprints/raw/m4-max-chrome-20260908T163229Z.json and
 same-version native/candidate named-face diagnostics. Candidate requires
 integrated Skia V1, cache tests and native multi-size comparisons before V3.
 
-This patch deliberately does not carry the upstream change's own test update
-to third_party/skia/tests/FontTest.cpp, which extended the flag-coverage loop
-to the new kDesignSpacePaths bit. That file is in skia's test_lib("tests"),
-inside `if (skia_enable_tools)`, and skia.gni defines skia_enable_tools =
-is_skia_dev_build = is_skia_standalone && !is_official_build. Every target in
-build/args sets is_official_build = true, so no configuration this repository
-produces compiles it -- confirmed absent from the macos-arm64 ninja graph. A
-hunk nothing compiles can never be verified at any tier, and it is additive
-coverage rather than a compile fix: the four files that do build compile
-without it. The upstream test exists if anyone rebases against a dev build.
+This patch does not carry the upstream change's own test update to
+third_party/skia/tests/FontTest.cpp. That file is in skia's test_lib("tests")
+behind `if (skia_enable_tools)`, and skia.gni resolves skia_enable_tools
+through is_skia_dev_build to `is_skia_standalone && !is_official_build`, while
+every target in build/args sets is_official_build = true -- so no configuration
+this repository produces compiles it, confirmed absent from the macos-arm64
+ninja graph.
+
+Dropping it costs no coverage, which is the part worth stating rather than
+assuming. Patch 0053 adds skia/ext/design_space_paths_unittest.cc, registered
+in skia/BUILD.gn and not gated on skia_enable_tools, and it asserts the same
+three properties: the flag survives SkFontPriv::Flatten and Unflatten, it
+reaches fRec.fFlags on the design-space scaler and not the native one, and
+DescriptorGivenRecAndEffects produces different descriptors for the two, so
+the strike cache cannot alias a design-space font onto native-space metrics.
+That last one is the property the rest of this patch depends on, and it is
+checked by a test the tree can actually build.
 
 diff --git a/third_party/blink/renderer/platform/fonts/font_platform_data.cc b/third_party/blink/renderer/platform/fonts/font_platform_data.cc
 --- a/third_party/blink/renderer/platform/fonts/font_platform_data.cc

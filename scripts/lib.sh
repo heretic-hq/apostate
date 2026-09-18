@@ -70,6 +70,47 @@ case "$(uname -s)" in
   *) export PATH="$DEPOT_TOOLS:$PATH" ;;
 esac
 
+# With DEPOT_TOOLS_WIN_TOOLCHAIN=0, vs_toolchain.py looks for VS 2022 under
+# %ProgramFiles% -- see the MSVC_LOCATION table in build/vs_toolchain.py, where
+# 2022 maps to ProgramFiles while 2019 and 2017 map to ProgramFiles(x86).
+# The hosted Windows runners install Build Tools into the x86 tree instead, at
+# "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools", so every
+# candidate path misses and gn dies with "No supported Visual Studio can be
+# found" while the toolchain is sitting right there. That is what the first
+# Windows configure failed on, after the patch series applied cleanly.
+#
+# vs%YEAR%_install is vs_toolchain.py's own documented override and is checked
+# before the table, so resolving the real path with vswhere and exporting it
+# fixes the lookup without patching Chromium or assuming an edition. -products
+# '*' is required: without it vswhere ignores Build Tools, which is the only
+# edition these images have.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if [ -z "${vs2022_install:-}" ]; then
+      _vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+      if [ -x "$_vswhere" ]; then
+        # Ask for the C++ x64 toolset first, since an install without it
+        # cannot build anything here. Fall back to any install rather than
+        # leaving the variable unset: an unset variable returns to the broken
+        # table lookup, whereas a path that turns out to lack the toolset
+        # fails later with a message naming the missing component.
+        _vs_path="$("$_vswhere" -latest -products '*' \
+          -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 \
+          -property installationPath 2>/dev/null | tr -d '\r')"
+        if [ -z "$_vs_path" ]; then
+          _vs_path="$("$_vswhere" -latest -products '*' \
+            -property installationPath 2>/dev/null | tr -d '\r')"
+        fi
+        if [ -n "$_vs_path" ]; then
+          export vs2022_install="$_vs_path"
+        fi
+        unset _vs_path
+      fi
+      unset _vswhere
+    fi
+    ;;
+esac
+
 # Prefer the build tools the checkout pins through DEPS over depot_tools'
 # wrappers. Their versions are then fixed by CHROMIUM_VERSION rather than
 # floating with whatever depot_tools revision happens to be present, which is

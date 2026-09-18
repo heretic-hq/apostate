@@ -62,6 +62,7 @@ AXES = (
     "furniture",
     "font_packs",
     "media_topology",
+    "audio",
     "network",
     "battery",
     "voices",
@@ -680,6 +681,85 @@ def validate_catalogue(path: Path | str | None = None) -> bool:
 # --------------------------------------------------------------------------
 _HOST_BACKENDS = {"macos": "ANGLE/Metal", "windows": "ANGLE/D3D11", "linux": "ANGLE/Vulkan"}
 
+# The POSIX environment variables that name a language list, strongest first.
+# `C` and `POSIX` are not languages, so they name nothing.
+_HOST_LANGUAGE_VARS = ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG")
+_HOST_LANGUAGE_NONE = frozenset({"c", "posix", ""})
+
+
+def host_locale(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """The host's own timezone name and language list, probed as one fact.
+
+    Read together and reported together, because the locale surface falls back
+    to the host as a unit: a host zone beside a language list from anywhere
+    else is the same incoherence a seeded draw produced, in a smaller form.
+
+    Diagnostic only. Neither value is ever written into a composed profile --
+    the profile carries no `locale` section at all when this layer owns the
+    surface, which is what leaves the host's real zone in ICU (patch 0011) and
+    the host's real list in the Accept-Language pref (patch 0013). Reporting
+    them here is so an operator comparing a served timezone against an exit IP
+    can see what the fallback is without launching a browser.
+
+    The timezone comes from `/etc/localtime`, which is the same file ICU reads
+    on Linux and which macOS keeps symlinked into its own zoneinfo tree. The
+    language list comes from the POSIX environment, which is what Chromium
+    reads on Linux; macOS and Windows answer from `AppleLanguages` and
+    `GetUserPreferredUILanguages` instead, so the probe is labelled rather
+    than asserted and can be `None` on a host whose real list is not empty.
+    """
+    overrides = dict(overrides or {})
+    timezone = overrides.get("host_timezone")
+    if timezone is None:
+        timezone = _probe_host_timezone()
+    languages = overrides.get("host_languages")
+    if languages is None:
+        languages = _probe_host_languages()
+    return {"timezone": timezone, "languages": languages}
+
+
+def _probe_host_timezone() -> str | None:
+    """The host's IANA zone name, or None when nothing names one."""
+    env = os.environ.get("TZ", "").strip().lstrip(":")
+    if env and _TIMEZONE_RE.fullmatch(env):
+        return env
+    try:
+        link = os.readlink("/etc/localtime")
+    except OSError:
+        link = ""
+    # ".../zoneinfo/Asia/Bangkok" -> "Asia/Bangkok". The marker is the zoneinfo
+    # directory rather than a fixed prefix: Linux uses /usr/share/zoneinfo and
+    # macOS /var/db/timezone/zoneinfo.
+    marker = "zoneinfo/"
+    index = link.find(marker)
+    if index != -1:
+        name = link[index + len(marker):]
+        if name and _TIMEZONE_RE.fullmatch(name):
+            return name
+    try:
+        name = Path("/etc/timezone").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return name if name and _TIMEZONE_RE.fullmatch(name) else None
+
+
+def _probe_host_languages() -> str | None:
+    """The POSIX environment's language list as the pref stores it, or None."""
+    for name in _HOST_LANGUAGE_VARS:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            continue
+        tags: list[str] = []
+        for item in raw.replace(":", ",").split(","):
+            tag = item.strip().split(".", 1)[0].split("@", 1)[0].replace("_", "-")
+            if tag.lower() in _HOST_LANGUAGE_NONE or _LOCALE_RE.fullmatch(tag) is None:
+                continue
+            if tag not in tags:
+                tags.append(tag)
+        if tags:
+            return ",".join(tags)
+    return None
+
 
 def host_facts(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """What the host can serve. Absent facts disable the corresponding clamp."""
@@ -696,6 +776,10 @@ def host_facts(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
         "window_width": overrides.get("window_width"),
         "window_height": overrides.get("window_height"),
         "font_families": overrides.get("host_font_families"),
+        # The fallback the locale surface inherits when no launch layer names
+        # one. Read as a pair so a host zone can never end up beside a
+        # language list from somewhere else.
+        **host_locale(overrides),
     }
     facts["backend"] = overrides.get("host_backend") or (
         _HOST_BACKENDS.get(facts["platform"]) if facts["platform"] else None)
@@ -832,23 +916,175 @@ def _choose_anchor(catalogue: Mapping[str, Any], host: Mapping[str, Any],
     return chosen, warnings
 
 
-def _apply_locale_overrides(profile: dict[str, Any], config: Mapping[str, Any]) -> str:
+# The three layers that may own the locale surface, strongest first. There is
+# no fourth, and in particular the seed is not one of them.
+_LOCALE_SOURCES = ("command-line", "geoip", "host")
+
+
+def _accept_languages_for(locale: str) -> str:
+    """A bare tag becomes a list; a list is already one and is kept as given.
+
+    `en-GB` becomes `en-GB,en` because that is the shape the pref stores and
+    the shape the voices table is keyed on, and `scripts/geoip.py` derives the
+    same list from a country's locale the same way. A value that already
+    carries a comma is the caller's list and is passed through untouched.
+    """
+    if "," in locale:
+        return locale
+    fallback = locale.split("-", 1)[0]
+    return locale if fallback.lower() == locale.lower() else f"{locale},{fallback}"
+
+
+def _geoip_fields(value: Any) -> tuple[str | None, str | None]:
+    """The locale and timezone one GeoIP result contributed, or None each.
+
+    The shape is `scripts/geoip.py`'s `GeoIPResult.to_dict()` and the mapping
+    `python/apostate/resolver.py` already accepts, so one lookup feeds both
+    implementations. A field the lookup did not resolve is absent rather than
+    guessed: `_COUNTRY_LOCALES` deliberately names no locale for a country it
+    has no policy for, and the standing decision on a failed or partial lookup
+    is to proceed with no override, warn, and invent nothing.
+    """
+    if not isinstance(value, Mapping):
+        return None, None
+    locale = value.get("locale") or value.get("accept_languages")
+    if not isinstance(locale, str) or not locale.strip():
+        languages = value.get("languages")
+        if isinstance(languages, (list, tuple)) and languages:
+            locale = ",".join(str(item) for item in languages)
+        else:
+            locale = None
+    timezone = value.get("timezone")
+    if not isinstance(timezone, str) or not timezone.strip():
+        timezone = None
+    return (locale.strip() if isinstance(locale, str) else None,
+            timezone.strip() if isinstance(timezone, str) else None)
+
+
+def _resolve_locale_surface(profile: dict[str, Any], config: Mapping[str, Any],
+                            host: Mapping[str, Any],
+                            policy: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Settle locale.accept_languages and locale.timezone, and name each source.
+
+    FINGERPRINTS.md §6 conditions this surface on "launch precedence, GeoIP"
+    and gives it no option table. It is not a dispersion axis and a seed must
+    never reach it: a drawn timezone does not merely fail to match the egress,
+    it guarantees a mismatch, because the draw cannot see where the connection
+    comes out. An IP that geolocates to one country beside an
+    `Intl.DateTimeFormat().resolvedOptions().timeZone` naming another is a
+    first-line correlation check at every fraud vendor, and the host's own zone
+    is strictly better than a drawn one: on a direct egress it matches, and
+    behind a proxy it is at worst wrong in the same way a real traveller is.
+
+    Three sources, strongest first:
+
+    1. the command line. `--fingerprint-locale` / `--fingerprint-timezone` name
+       a field each, and `--locale-policy=<id>` names a catalogue policy, which
+       supplies both as one internally consistent pair -- `en-gb` is `en-GB,en`
+       with `Europe/London`, never one of those beside the other's country.
+       This is also where the Python and Node launchers put the answer from
+       their prelaunch GeoIP lookup, so from the browser's side layers 1 and 2
+       arrive as one;
+    2. GeoIP of the effective egress -- the proxy exit when one is configured,
+       the direct IP otherwise -- passed in as a result mapping rather than
+       looked up here, so composition stays a pure function of its inputs;
+    3. the host, expressed as *absence*. No `locale` section is written, which
+       leaves the host's real zone in ICU and the host's real list in the
+       Accept-Language pref. Absence is why the two fields cannot drift apart:
+       a field nobody named is not written, so the host serves it rather than a
+       second source that happens to agree today.
+
+    The seed is not on that list at any position. It is the whole point.
+
+    Called before the voices axis resolves rather than merged over the finished
+    profile, because the voices table is keyed on the resolved accept-languages
+    list: applying it later would leave a launch claiming en-GB while offering
+    the voice set measured for another list. That is patch 0085's reason, and
+    the reference path has to share it for the two implementations to agree.
+
+    Sole writer of the profile's `locale` section, so there is one place a
+    value can enter it and one place to check where it came from.
+    """
+    geo_locale, geo_timezone = _geoip_fields(config.get("geoip"))
+    named = (policy or {}).get("value") or {}
+    named = named.get("locale") or {}
+    policy_id = (policy or {}).get("id")
+
     locale = config.get("fingerprint_locale")
-    timezone = config.get("fingerprint_timezone")
     if locale is not None:
-        if not isinstance(locale, str) or _LOCALE_RE.fullmatch(locale) is None:
+        if not isinstance(locale, str) or _LOCALE_RE.fullmatch(locale.split(",", 1)[0]) is None:
             raise ResolverError(f"invalid locale {locale!r}")
-        current = str((profile.get("locale") or {}).get("accept_languages", ""))
-        fallback = locale.split("-", 1)[0]
-        accept_languages = f"{locale},{fallback}"
-        if current and current.split(",", 1)[0].lower() == locale.lower():
-            accept_languages = current
-        profile.setdefault("locale", {})["accept_languages"] = accept_languages
+        languages = {"value": _accept_languages_for(locale.strip()), "source": "command-line"}
+    elif isinstance(named.get("accept_languages"), str):
+        languages = {"value": named["accept_languages"], "source": "command-line",
+                     "policy": policy_id}
+    elif geo_locale is not None:
+        if _LOCALE_RE.fullmatch(geo_locale.split(",", 1)[0]) is None:
+            raise ResolverError(f"GeoIP returned an invalid locale {geo_locale!r}")
+        languages = {"value": _accept_languages_for(geo_locale), "source": "geoip"}
+    else:
+        languages = {"value": None, "source": "host", "host_value": host.get("languages")}
+
+    timezone = config.get("fingerprint_timezone")
     if timezone is not None:
         if not isinstance(timezone, str) or _TIMEZONE_RE.fullmatch(timezone) is None:
             raise ResolverError(f"invalid timezone {timezone!r}")
-        profile.setdefault("locale", {})["timezone"] = timezone
-    return "explicit" if locale is not None or timezone is not None else "profile-selected"
+        zone = {"value": timezone.strip(), "source": "command-line"}
+    elif isinstance(named.get("timezone"), str):
+        zone = {"value": named["timezone"], "source": "command-line", "policy": policy_id}
+    elif geo_timezone is not None:
+        if _TIMEZONE_RE.fullmatch(geo_timezone) is None:
+            raise ResolverError(f"GeoIP returned an invalid timezone {geo_timezone!r}")
+        zone = {"value": geo_timezone, "source": "geoip"}
+    else:
+        zone = {"value": None, "source": "host", "host_value": host.get("timezone")}
+
+    section = {name: field["value"]
+               for name, field in (("accept_languages", languages), ("timezone", zone))
+               if field["value"] is not None}
+    if section:
+        profile["locale"] = section
+    else:
+        profile.pop("locale", None)
+    return {"accept_languages": languages, "timezone": zone}
+
+
+def _locale_provenance_check(profile: Mapping[str, Any],
+                             sources: Mapping[str, Mapping[str, Any]]) -> None:
+    """A locale field the profile carries must name the layer that supplied it.
+
+    # coh: coh.timezone-network-position - the edge asks that the served
+    # timezone be plausible for the exit IP's geography. Plausibility itself
+    # needs the egress, which composition does not have; what composition owns
+    # is the necessary condition, and this is it: the value comes from the
+    # command line (where an operator's switch and the launchers' GeoIP answer
+    # both arrive) or from a GeoIP result, or it is not in the profile at all
+    # and the host serves it. A value with no such source is what the seeded
+    # pool draw produced -- a timezone uncorrelated with the egress by
+    # construction -- and it is a defect rather than a fallback, so it raises
+    # here instead of shipping.
+    """
+    carried = profile.get("locale") or {}
+    if set(carried) - {"accept_languages", "timezone"}:
+        raise ResolverError(
+            f"profile locale section carries unknown fields {sorted(set(carried) - {'accept_languages', 'timezone'})}"
+        )
+    for field in ("accept_languages", "timezone"):
+        source = sources[field]["source"]
+        if source not in _LOCALE_SOURCES:
+            raise ResolverError(
+                f"locale.{field} names source {source!r}, which is not one of {list(_LOCALE_SOURCES)}"
+            )
+        named = source != "host"
+        if named != (field in carried):
+            raise ResolverError(
+                f"locale.{field} is {'present in' if field in carried else 'absent from'} the "
+                f"composed profile while its source is {source!r}: a locale field is carried "
+                "exactly when the command line or a GeoIP result supplied it, and is absent "
+                "exactly when the host serves it. Any other combination means a value reached "
+                "this surface from a layer that cannot know where the connection comes out, "
+                "which is the seeded pool draw this precedence exists to remove"
+            )
 
 
 def _integral(value: Any) -> int | None:
@@ -860,6 +1096,111 @@ def _integral(value: Any) -> int | None:
     if isinstance(value, float) and value.is_integer():
         return int(value)
     return None
+
+
+#: A measured GL parameter that arrives as a two-element range, and the pair of
+#: scalar profile keys it decomposes into. Both the profile loader and ANGLE's
+#: cap lookup read scalars, so a range has to be stored as two of them, and the
+#: names on the right are the ones the C++ already asks for by string.
+GL_LIMIT_RANGE_KEYS: dict[str, tuple[str, str]] = {
+    "ALIASED_LINE_WIDTH_RANGE": (
+        "ALIASED_LINE_WIDTH_RANGE_MIN",
+        "ALIASED_LINE_WIDTH_RANGE_MAX",
+    ),
+    "ALIASED_POINT_SIZE_RANGE": (
+        "ALIASED_POINT_SIZE_RANGE_MIN",
+        "ALIASED_POINT_SIZE_RANGE_MAX",
+    ),
+    "MAX_VIEWPORT_DIMS": ("MAX_VIEWPORT_DIMS_WIDTH", "MAX_VIEWPORT_DIMS_HEIGHT"),
+}
+
+#: Servable scalar GL limits whose names are not MAX_-prefixed. D3D11 mandates
+#: UNIFORM_BUFFER_OFFSET_ALIGNMENT 256 where a software rasteriser reports 16,
+#: and MIN_PROGRAM_TEXEL_OFFSET is measured negative, so both are lookup-table
+#: contradictions against a discrete-GPU renderer string and both have to
+#: travel with the anchor.
+GL_LIMIT_SCALAR_KEYS: frozenset[str] = frozenset(
+    {"MIN_PROGRAM_TEXEL_OFFSET", "UNIFORM_BUFFER_OFFSET_ALIGNMENT"}
+)
+
+
+def gl_limit_entries(name: str, value: Any) -> list[tuple[str, int]]:
+    """The profile limit entries one measured GL parameter produces.
+
+    One function because three consumers have to agree on it: this resolver,
+    ``scripts/generate-dispersion-tables.py`` compiling the tables into the
+    binary, and through those the C++ that serves them. A capability that
+    reaches the binary but not the resolver, or the reverse, is the same class
+    of defect as serving none at all.
+
+    The filter this replaces accepted a scalar only when it was MAX_-prefixed
+    and at least 1, with one hardcoded case for ALIASED_POINT_SIZE_RANGE. That
+    silently discarded five measured parameters from every anchor:
+    MAX_VIEWPORT_DIMS because a two-element range is not an integer,
+    UNIFORM_BUFFER_OFFSET_ALIGNMENT and MIN_PROGRAM_TEXEL_OFFSET because they
+    carry no MAX_ prefix, ALIASED_LINE_WIDTH_RANGE for both reasons, and
+    MAX_SERVER_WAIT_TIMEOUT because its measured value is 0. Each is a
+    zero-GL-work lookup a page reads in one call, and a dropped one is served
+    from the host instead -- which is how an ANGLE Direct3D11 renderer string
+    came to sit beside a 16384x16384 viewport.
+
+    A range yields both endpoints or neither: half an interval is a fabricated
+    limit, and the schema says a nonintegral endpoint stays unrepresented and
+    inherited rather than truncated, which is what keeps the Linux/Vulkan
+    anchor's 2047.9375 point size out. A scalar yields any losslessly integral
+    value, including 0 and negative ones, because those are measurements too.
+
+    A ``_WEBGL``-suffixed name is a WebGL-specification constant rather than a
+    GL limit -- MAX_CLIENT_WAIT_TIMEOUT_WEBGL is answered by Blink, not by the
+    GL binding layer, and all four anchors measured it 0, which is what every
+    implementation reports. It is excluded because there is no contradiction
+    available in it and admitting it would declare a profile key that nothing
+    serves.
+    """
+    if not gl_limit_is_servable(name):
+        return []
+    endpoints = GL_LIMIT_RANGE_KEYS.get(name)
+    if endpoints is not None:
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            return []
+        low, high = _integral(value[0]), _integral(value[1])
+        if low is None or high is None or low < 1 or high < 1:
+            return []
+        return [(endpoints[0], low), (endpoints[1], high)]
+    exact = _integral(value)
+    if exact is None:
+        return []
+    return [(name, exact)]
+
+
+def gl_limit_is_servable(name: str) -> bool:
+    """Whether a measured GL parameter name is one a profile can carry.
+
+    Separate from ``gl_limit_entries`` because ``capture/derive/to_profile.py``
+    has to answer it before it has a value to convert: it validates a capture's
+    raw measurement and raises on a malformed one, and a name it does not
+    recognise has to be skipped rather than rejected.
+
+    Validation is deliberately NOT shared, and the next reader should resist
+    unifying it. A capture is untrusted input, so a recognised name with a
+    malformed value is an error that pipeline must raise. An anchor is
+    already-validated corpus data, so the same input is skipped and the
+    surface stays inherited. Those are different policies on purpose, and
+    sharing the validation would force one of them onto the other.
+
+    What was drifting between the two pipelines was never the validation. It
+    was which names are servable and what keys each becomes -- the capture
+    path and the anchor path each kept their own answer, and each silently
+    dropped five measured parameters the compiled tables were built to serve.
+    That answer is what lives here, and it is the only part that has to be
+    one implementation.
+    """
+    if name.endswith("_WEBGL"):
+        # A WebGL-specification constant, answered by Blink rather than the GL
+        # binding layer. See gl_limit_entries.
+        return False
+    return (name in GL_LIMIT_RANGE_KEYS or name.startswith("MAX_")
+            or name in GL_LIMIT_SCALAR_KEYS)
 
 
 def _anchor_capability_layer(record: Mapping[str, Any], renderer: str | None) -> dict[str, Any]:
@@ -890,22 +1231,13 @@ def _anchor_capability_layer(record: Mapping[str, Any], renderer: str | None) ->
             continue
         extensions.update(str(name) for name in section.get("extensions", []))
         for name, value in (section.get("parameters") or {}).items():
-            if name.startswith("MAX_"):
-                integral = _integral(value)
-                if integral is not None and integral >= 1:
-                    if limits.get(name, integral) != integral:
-                        raise ResolverError(
-                            f"anchor {record['anchor_id']} disagrees with itself on {name}: "
-                            "a single limit map cannot represent two contexts"
-                        )
-                    limits[name] = integral
-            elif name == "ALIASED_POINT_SIZE_RANGE" and isinstance(value, list) and len(value) == 2:
-                low, high = _integral(value[0]), _integral(value[1])
-                # A nonintegral endpoint stays unrepresented and inherited
-                # rather than truncated, per the schema.
-                if low is not None and high is not None and low >= 1 and high >= 1:
-                    limits["ALIASED_POINT_SIZE_RANGE_MIN"] = low
-                    limits["ALIASED_POINT_SIZE_RANGE_MAX"] = high
+            for key, exact in gl_limit_entries(name, value):
+                if limits.get(key, exact) != exact:
+                    raise ResolverError(
+                        f"anchor {record['anchor_id']} disagrees with itself on {key}: "
+                        "a single limit map cannot represent two contexts"
+                    )
+                limits[key] = exact
         for key, entry in (section.get("precision") or {}).items():
             if not isinstance(entry, Mapping):
                 continue
@@ -919,11 +1251,23 @@ def _anchor_capability_layer(record: Mapping[str, Any], renderer: str | None) ->
                 )
             precisions[key] = derived
 
+    # An anchor that produced no limits is the defect this guard exists for.
+    # The whole failure mode was that a profile could carry a discrete-GPU
+    # renderer string with no capability table behind it, and every consumer
+    # fell through to the host's own numbers -- which looks exactly like
+    # success until a detector reads one lookup value. Refusing here is what
+    # makes that loud instead of silent.
+    if not limits:
+        raise ResolverError(
+            f"anchor {record['anchor_id']} produced no GL capability limits, so a profile "
+            "built on it would present its renderer string over the host's own capability "
+            "table -- the contradiction the anchor exists to prevent"
+        )
+
     layer: dict[str, Any] = {}
     if extensions:
         layer["gl_extensions"] = sorted(extensions)
-    if limits:
-        layer["gl_limits"] = dict(sorted(limits.items()))
+    layer["gl_limits"] = dict(sorted(limits.items()))
     if precisions:
         layer["gl_precisions"] = dict(sorted(precisions.items()))
 
@@ -1000,9 +1344,15 @@ def _derive_work_area(profile: dict[str, Any]) -> None:
     # profile claims, which is the half the edge still carries.
     if left + right >= width or top + bottom >= height:
         raise ResolverError("furniture insets exceed the panel: that work area cannot exist")
-    # coh: coh.screen-avail-inset-vs-claimed-os - the arithmetic identity holds by
-    # construction below: avail_height is height minus the two insets and the
-    # insets are popped, so no profile can carry a contradictory pair.
+    # coh: coh.screen-avail-inset-vs-claimed-os - both arithmetic identities hold
+    # by construction below: avail_width is width minus its two insets and
+    # avail_height is height minus its two, and the insets are popped, so no
+    # profile can carry a contradictory pair in either axis. The edge's third
+    # clause -- that a visible dock must make the work area strictly smaller in
+    # the axis it occupies -- is not enforced here, because this function sees
+    # the insets and not the furniture option that supplied them, so it cannot
+    # tell an auto-hiding taskbar, for which an all-zero inset is correct, from
+    # a table entry that forgot one.
     screen["avail_left"] = left
     screen["avail_top"] = top
     screen["avail_width"] = width - left - right
@@ -1031,6 +1381,23 @@ def _coherence_check(profile: Mapping[str, Any], platform: str, browser_build: s
             actual = sum(1 for device in devices if device.get("kind") == kind)
             if declared is not None and declared != actual:
                 raise ResolverError(f"media.{kind}_count {declared} disagrees with {actual} devices")
+    # coh: coh.audio-hardware-vs-claimed-os - the buffer size half, which is the
+    # only half composition owns. An absent audio section is a defect and not a
+    # silence, for exactly the reason an absent UA is: patch 0019 built the
+    # consumer, config/profile.schema.json declared the field, no option ever
+    # supplied it, and the renderer went on serving the host's own buffer under
+    # every persona -- 2048 frames of Linux ALSA behind a macOS UA, readable from
+    # any page in one property access with no permission. The axis has an option
+    # set per platform and `servability: none`, so nothing can drop it; if this
+    # fires, a table is missing rather than a host is limited.
+    audio = profile.get("audio") or {}
+    if audio.get("hardware_buffer_frames") is None:
+        raise ResolverError(
+            f"composed profile claims platform {platform} but carries no "
+            "audio.hardware_buffer_frames: with the field absent AudioContext.baseLatency is "
+            "the host's own audio buffer over the host's own sample rate, which contradicts "
+            "the claimed platform on every host whose backend differs from it"
+        )
     wow64 = (profile.get("platform") or {}).get("wow64")
     if wow64 is True and platform != "windows":
         raise ResolverError("wow64 is a Windows-only fact")
@@ -1142,22 +1509,42 @@ def _load_explicit_file(value: Any) -> dict[str, Any]:
     return profile
 
 
-def _policy_pick(catalogue: Mapping[str, Any], kind: str, platform: str, root: bytes,
-                 requested: Any) -> tuple[Mapping[str, Any], str]:
+def _policy_candidates(catalogue: Mapping[str, Any], kind: str,
+                       platform: str) -> list[Mapping[str, Any]]:
+    """The catalogue policies this persona may use, id-sorted.
+
+    Id-sorted because selection is over the id-sorted candidate list on both
+    implementations, so a reordered catalogue cannot move a choice.
+    """
     candidates = sorted(
         (entry for entry in catalogue["policies"][kind] if entry["platform"] in ("all", platform)),
         key=lambda entry: entry["id"],
     )
     if not candidates:
         raise ResolverError(f"no {kind} policy supports platform {platform}")
-    if isinstance(requested, str):
-        matches = [entry for entry in candidates if entry["id"] == requested]
-        if len(matches) != 1:
-            raise ResolverError(f"unknown {kind} policy {requested!r}")
-        return matches[0], matches[0]["id"]
-    chosen = candidates[weighted_pick(root, f"policy.{kind}",
-                                      [dict(entry, weight=1) for entry in candidates])]
-    return chosen, chosen["id"]
+    return candidates
+
+
+def _policy_named(candidates: Sequence[Mapping[str, Any]], kind: str,
+                  requested: str) -> Mapping[str, Any]:
+    """The one policy a launch named by id."""
+    matches = [entry for entry in candidates if entry["id"] == requested]
+    if len(matches) != 1:
+        raise ResolverError(f"unknown {kind} policy {requested!r}")
+    return matches[0]
+
+
+def _policy_drawn(candidates: Sequence[Mapping[str, Any]], kind: str,
+                  root: bytes) -> Mapping[str, Any]:
+    """The policy the seed draws.
+
+    Only `theme` reaches this. Every candidate weighs the same: the catalogue
+    states no prevalence for them and inventing one would be synthesis dressed
+    as data. `locale` deliberately has no drawn form -- see
+    `_resolve_locale_surface` for why a seed must not reach that surface.
+    """
+    return candidates[weighted_pick(root, f"policy.{kind}",
+                                    [dict(entry, weight=1) for entry in candidates])]
 
 
 def _resolve_internal(config: Mapping[str, Any] | None = None, **overrides: Any) -> dict[str, Any]:
@@ -1228,10 +1615,21 @@ def _resolve_internal(config: Mapping[str, Any] | None = None, **overrides: Any)
     host_for_axes = dict(host, anchor=anchor["id"])
     profile: dict[str, Any] = {}
     chosen: dict[str, Any] = {}
+    locale_policy = cfg.get("locale_policy")
+    locale_entry = _policy_named(
+        _policy_candidates(catalogue, "locale", platform), "locale", locale_policy
+    ) if isinstance(locale_policy, str) else None
+    locale_sources: dict[str, dict[str, Any]] | None = None
 
     for axis in AXES:
         table = tables[axis]
         if axis == "voices":
+            # The locale surface is settled first, because this key is a
+            # projection of the resolved accept-languages list. It is settled
+            # from launch precedence, GeoIP and the host -- never from the
+            # seed -- so unlike every axis below it, nothing about its value
+            # depends on where in this loop it happens.
+            locale_sources = _resolve_locale_surface(profile, cfg, host, locale_entry)
             parents["languages"] = _language_key(
                 (profile.get("locale") or {}).get("accept_languages"), table)
         options = _option_set(axis, table, parents)
@@ -1303,19 +1701,32 @@ def _resolve_internal(config: Mapping[str, Any] | None = None, **overrides: Any)
                     "be an unmeasured assertion"
                 )
 
-        if axis == "media_topology":
-            # Locale drives the voices key, so pick the locale policy before it.
-            locale_entry, locale_id = _policy_pick(
-                catalogue, "locale", platform, root, cfg.get("locale_policy"))
-            profile = _merge(profile, locale_entry["value"])
-            chosen["locale"] = {"options": [locale_id],
-                                "evidence": [locale_entry["evidence_class"]],
-                                "offered": len(catalogue["policies"]["locale"])}
+    # The voices axis is the only thing that needed the locale settled mid-loop.
+    # A catalogue without that axis would leave it unsettled, so settle it here
+    # too rather than leaving the surface undecided, which is what the compiled
+    # compositor does with its own `locale_resolved` flag.
+    if locale_sources is None:
+        locale_sources = _resolve_locale_surface(profile, cfg, host, locale_entry)
+    chosen["locale"] = {
+        "options": [locale_entry["id"]] if locale_entry is not None else [],
+        "evidence": [locale_entry["evidence_class"]] if locale_entry is not None
+        else ["launch-precedence" if any(field["source"] != "host"
+                                        for field in locale_sources.values())
+              else "host-inherited"],
+        # The four options are the set `--locale-policy` selects from, not a
+        # pool anything draws from. Reported so the count is not read as a
+        # dispersion width it never was.
+        "offered": len(catalogue["policies"]["locale"]),
+    }
 
-    theme_entry, theme_id = _policy_pick(catalogue, "theme", platform, root,
-                                         cfg.get("theme_policy"))
+    theme_candidates = _policy_candidates(catalogue, "theme", platform)
+    theme_requested = cfg.get("theme_policy")
+    theme_entry = (_policy_named(theme_candidates, "theme", theme_requested)
+                   if isinstance(theme_requested, str)
+                   else _policy_drawn(theme_candidates, "theme", root))
     profile = _merge(profile, theme_entry["value"])
-    chosen["theme"] = {"options": [theme_id], "evidence": [theme_entry["evidence_class"]],
+    chosen["theme"] = {"options": [theme_entry["id"]],
+                       "evidence": [theme_entry["evidence_class"]],
                        "offered": len(catalogue["policies"]["theme"])}
 
     # The loader reads `id` into source_id_ for diagnostics (patch 0004), so it
@@ -1333,7 +1744,11 @@ def _resolve_internal(config: Mapping[str, Any] | None = None, **overrides: Any)
             composed_browser["user_agent"], browser_build)
 
     _derive_work_area(profile)
-    locale_source = _apply_locale_overrides(profile, cfg)
+    # Last, so that nothing merged after the locale surface was settled can
+    # leave a value in it whose source nobody can name. That is the state the
+    # seeded draw produced, and it is the one this precedence exists to make
+    # unreachable rather than merely unlikely.
+    _locale_provenance_check(profile, locale_sources)
     validate_profile(profile)
     _coherence_check(profile, platform, browser_build)
 
@@ -1381,8 +1796,17 @@ def _resolve_internal(config: Mapping[str, Any] | None = None, **overrides: Any)
             },
             "axes": chosen,
             "host": {key: host[key] for key in ("platform", "backend", "logical_cores",
-                                                "total_bytes")},
-            "locale_source": locale_source,
+                                                "total_bytes", "timezone", "languages")},
+            # Per field, the value the profile carries and the layer that
+            # decided it: "command-line", "geoip" or "host". A null value with
+            # source "host" is the surface staying host-inherited, which is
+            # what an absent `locale` section means. An operator debugging a
+            # timezone that does not match their exit IP needs to know whether
+            # GeoIP answered or was never consulted, and this is where that is
+            # written down.
+            "locale": locale_sources,
+            "locale_source": locale_sources["accept_languages"]["source"],
+            "timezone_source": locale_sources["timezone"]["source"],
             "timezone": (profile.get("locale") or {}).get("timezone"),
             "warnings": warnings,
         },
@@ -1471,6 +1895,14 @@ def _cli(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--host-backend")
     parser.add_argument("--host-logical-cores", type=int)
     parser.add_argument("--host-total-bytes", type=int)
+    parser.add_argument("--host-timezone",
+                        help="the host zone the locale surface inherits; probed when omitted")
+    parser.add_argument("--host-languages",
+                        help="the host language list the locale surface inherits")
+    parser.add_argument("--geoip", type=Path,
+                        help="a JSON GeoIP result for the effective egress, as "
+                             "scripts/geoip.py emits; supplies locale and timezone "
+                             "below the command line and above the host")
     parser.add_argument("--runtime-only", action="store_true",
                         help="emit only the native profile payload")
     args = parser.parse_args(argv)
@@ -1480,6 +1912,7 @@ def _cli(argv: Sequence[str] | None = None) -> int:
         elif args.list:
             value = list_catalogue(args.catalogue_path)
         else:
+            geoip = _read_object(args.geoip, "geoip result") if args.geoip else None
             envelope = resolve_with_diagnostics({
                 "fingerprint": args.fingerprint,
                 "fingerprint_platform": args.fingerprint_platform,
@@ -1494,6 +1927,9 @@ def _cli(argv: Sequence[str] | None = None) -> int:
                 "host_backend": args.host_backend,
                 "host_logical_cores": args.host_logical_cores,
                 "host_total_bytes": args.host_total_bytes,
+                "host_timezone": args.host_timezone,
+                "host_languages": args.host_languages,
+                "geoip": geoip,
                 "catalogue_path": args.catalogue_path,
             })
             value = envelope["profile"] if args.runtime_only else envelope

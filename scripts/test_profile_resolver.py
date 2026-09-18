@@ -347,6 +347,59 @@ class CompositionTests(unittest.TestCase):
                     self.assertGreaterEqual(profile["screen"]["width"], 1024)
                     self.assertLessEqual(profile["cpu"]["logical_cores"], 16)
 
+    def test_every_persona_serves_its_own_audio_buffer(self) -> None:
+        """The defect the audio axis exists for: baseLatency was the host's.
+
+        Patch 0019 built the emitter and no table supplied the field, so the
+        shipped binary reported 0.042666666666666665 under all three personas —
+        2048 frames of Linux ALSA, the build host's own, identical to stock.
+        The assertion is on what a page reads rather than on the field: Blink
+        computes max(framesPerBuffer, 128) / sampleRate, and on a 48 kHz device
+        each persona must land on the value its reference capture measured.
+        """
+        expected = {
+            # resources/fingerprints/raw/m4-max-chrome-20260908T163229Z.json
+            "macos": (256, 0.005333333333333333),
+            # resources/fingerprints/raw/windows-chrome-20260910T140813Z.json
+            "windows": (480, 0.01),
+            # Authored: Chromium's Pulse floor. No admitted Linux reference has
+            # an audio device, so this one is not a capture and says so.
+            "linux": (512, 0.010666666666666666),
+        }
+        for persona in sorted(resolver.PLATFORMS):
+            frames, base_latency = expected[persona]
+            for seed in range(8):
+                audio = resolver.resolve_profile(dict(
+                    BASE_CONFIG, fingerprint=seed, fingerprint_platform=persona))["audio"]
+                self.assertEqual(frames, audio["hardware_buffer_frames"], persona)
+                self.assertEqual(base_latency,
+                                 max(audio["hardware_buffer_frames"], 128) / 48000, persona)
+
+    def test_a_profile_with_no_audio_buffer_does_not_compose(self) -> None:
+        """An absent audio surface is a defect, not a silence.
+
+        The field was declared and consumed for ninety-odd patches while
+        nothing produced it, and composition said nothing. Two layers refuse
+        it now. A whole platform missing from the table is caught where every
+        axis is, by exact-and-total option-set matching. The subtler shape is
+        the one that actually shipped: an audio section that composes and
+        carries nothing, which is indistinguishable from the old silence at
+        the emitter and is what this exercises.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            catalogue_path = _mirror_catalogue(Path(tmp))
+            table = catalogue_path.parent / "dispersion" / "audio.json"
+            doc = json.loads(table.read_text(encoding="utf-8"))
+            for option_set in doc["option_sets"]:
+                if option_set["key"]["platform"] == "windows":
+                    for option in option_set["options"]:
+                        option["value"] = {"audio": {}}
+            table.write_text(json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n",
+                             encoding="utf-8")
+            with self.assertRaises(resolver.ResolverError) as caught:
+                resolver.resolve_profile(dict(BASE_CONFIG, catalogue_path=catalogue_path))
+            self.assertIn("audio.hardware_buffer_frames", str(caught.exception))
+
     def test_work_area_is_derived_from_the_panel_and_the_furniture_insets(self) -> None:
         for seed in range(25):
             screen = resolver.resolve_profile(dict(BASE_CONFIG, fingerprint=seed))["screen"]
@@ -535,6 +588,65 @@ class CompositionTests(unittest.TestCase):
         resolved = resolver.resolve_profile(dict(BASE_CONFIG, locale_policy="en-au"))
         self.assertNotIn("speech", resolved)
 
+    def test_locale_follows_launch_precedence_geoip_then_the_host_and_never_a_draw(self) -> None:
+        """The seed must not reach the locale surface, at any seed.
+
+        It used to. Four catalogue policies were drawn by seed, so a bare
+        launch on an Asia/Bangkok host served America/New_York, Europe/London
+        or Australia/Sydney depending on the seed -- a timezone uncorrelated
+        with the exit IP by construction, which is a first-line correlation
+        check at every fraud vendor. FINGERPRINTS.md section 6 conditions this
+        surface on "launch precedence, GeoIP" and gives it no option table.
+        """
+        host = {"host_timezone": "Asia/Bangkok", "host_languages": "th-TH,th"}
+        # No layer names a locale: the surface is absent, which is what leaves
+        # the host's real zone in ICU and its real list in the pref. Every
+        # seed, because the defect was a per-seed draw.
+        for seed in range(40):
+            envelope = resolver.resolve_with_diagnostics(
+                dict(BASE_CONFIG, **host, fingerprint=seed))
+            self.assertNotIn("locale", envelope["profile"], seed)
+            sources = envelope["diagnostics"]["locale"]
+            self.assertEqual(("host", "host"),
+                             (sources["accept_languages"]["source"],
+                              sources["timezone"]["source"]), seed)
+            self.assertEqual("Asia/Bangkok", sources["timezone"]["host_value"], seed)
+
+        # Each named layer owns both fields it supplies, and the stronger one
+        # wins field by field. A locale policy supplies the pair as a unit.
+        geoip = {"locale": "de-DE", "timezone": "Europe/Berlin"}
+        for config, expected in (
+            ({"geoip": geoip},
+             {"accept_languages": ("de-DE,de", "geoip"), "timezone": ("Europe/Berlin", "geoip")}),
+            ({"geoip": geoip, "fingerprint_timezone": "Europe/Tirane"},
+             {"accept_languages": ("de-DE,de", "geoip"),
+              "timezone": ("Europe/Tirane", "command-line")}),
+            ({"locale_policy": "en-gb"},
+             {"accept_languages": ("en-GB,en", "command-line"),
+              "timezone": ("Europe/London", "command-line")}),
+            # A partial GeoIP answer contributes the field it resolved and
+            # leaves the other to the host. scripts/geoip.py names no locale
+            # for a country its policy table does not carry, and inventing one
+            # is what this precedence refuses.
+            ({"geoip": {"timezone": "Europe/Tirane"}},
+             {"accept_languages": (None, "host"), "timezone": ("Europe/Tirane", "geoip")}),
+        ):
+            envelope = resolver.resolve_with_diagnostics(dict(BASE_CONFIG, **host, **config))
+            sources = envelope["diagnostics"]["locale"]
+            carried = envelope["profile"].get("locale") or {}
+            for field, (value, source) in expected.items():
+                self.assertEqual(value, sources[field]["value"], (config, field))
+                self.assertEqual(source, sources[field]["source"], (config, field))
+                self.assertEqual(value, carried.get(field), (config, field))
+
+        # And the guard: a value in the section whose source is the host is the
+        # shape a draw produced, so it raises instead of shipping.
+        with self.assertRaises(resolver.ResolverError):
+            resolver._locale_provenance_check(
+                {"locale": {"timezone": "Australia/Sydney"}},
+                {"accept_languages": {"value": None, "source": "host"},
+                 "timezone": {"value": None, "source": "host"}})
+
     def test_explicit_profile_file_is_validated_and_marked_as_a_bypass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             good = Path(tmp) / "good.json"
@@ -610,6 +722,13 @@ class CompositionTests(unittest.TestCase):
         browser process. macOS is the load-bearing one: its speech.voices table
         carries non-ASCII names, so that digest is what proves the two writers
         agree on escaping rather than merely on field values.
+
+        The voices table is keyed on the resolved accept-languages list, and
+        that list now comes from launch precedence, GeoIP or the host rather
+        than from a seeded draw, so a bare composition has no measured language
+        set and therefore no speech section at all. The escaping check below
+        names a locale to get one, which is the only composition shape that
+        still carries the non-ASCII the check is about.
         """
         stale = []
         for persona, (profile_id, sections, digest) in self.GOLDEN_PROFILES.items():
@@ -626,7 +745,7 @@ class CompositionTests(unittest.TestCase):
                 stale.append(str(skipped))
         macos = resolver.resolve_profile(dict(
             self.GOLDEN_HOST, fingerprint=12345, fingerprint_platform="macos",
-            browser_build="152.0.7977.83"))
+            browser_build="152.0.7977.83", locale_policy="en-us"))
         self.assertTrue(any(ord(char) > 127 for voice in macos["speech"]["voices"]
                             for char in voice["name"]),
                         "the macOS digest only proves escaping agreement if it has non-ASCII")

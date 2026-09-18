@@ -45,10 +45,18 @@ convenience, WebRTC in particular, assume it has not taken effect.
 
 ## The persona chooses the GPU, and the persona is a real choice
 
-`--fingerprint-platform` sets OS identity, client hints, fonts, voices, locale,
-screen geometry, hardware buckets — and the GPU. The claimed operating system
-selects the capability cluster, on every host, whatever the host's own graphics
-stack is running.
+`--fingerprint-platform` sets OS identity, client hints, fonts, screen geometry,
+hardware buckets — and the GPU. The claimed operating system selects the
+capability cluster, on every host, whatever the host's own graphics stack is
+running.
+
+It does not set the locale or the timezone. Those follow the launch, then GeoIP
+of the effective egress, then the host, and a persona has no say in any of the
+three: a machine's country is a property of its network and not of its
+operating system. Nor does it settle the voice list on its own, because the
+voices table is keyed on the resolved language list as well as the OS release,
+so a launch that names no locale keeps the host's real speech providers whatever
+persona it claims.
 
 That works because a capability cluster belongs to a backend rather than to a
 machine, and the catalogue holds exactly one backend per platform. Choosing the
@@ -312,8 +320,12 @@ and the graphics surfaces report the drawn anchor's renderer and vendor strings.
 Under that host's default persona, which is Windows, that means one of the
 fifteen Direct3D 11 identities the two Windows anchors offer, rotated by seed;
 `--fingerprint-platform=linux` gets the eleven Vulkan NVIDIA ones instead.
-Timezone, locale, Accept-Language, fonts, screen geometry, core count, memory,
-media topology and voices compose as normal beside it.
+Fonts, screen geometry, core count, memory and media topology compose as normal
+beside it. Timezone and Accept-Language do not compose at all: they follow the
+launch, then GeoIP of the effective egress, then the host, so a server launch
+that names neither and whose lookup does not answer serves that server's own
+zone and language list. Voices follow from the resolved language list, so on
+that launch they stay the host's too.
 
 The alternative was to report the host's own software rasteriser, and it is
 worse on the axis that decides the outcome. `ANGLE (Google, Vulkan 1.3.0
@@ -380,9 +392,47 @@ because it reports what it can do.
 
 `MAX_RENDERBUFFER_SIZE` is not measured. The renderbuffer arm of the probe
 reported `FRAMEBUFFER_UNSUPPORTED` at 8192 as well as above it, so it does not
-discriminate and no number for it belongs here. `MAX_VIEWPORT_DIMS` shows no
-residual: SwiftShader reports 32767 by 32767 and a viewport at 32767 raises no
-error.
+discriminate and no number for it belongs here.
+
+### A Windows persona on a Metal host reports the host's viewport
+
+`MAX_VIEWPORT_DIMS` shows no residual on a software backend: SwiftShader
+reports 32767 by 32767, which is what the Windows anchors measured, and a
+viewport at 32767 raises no error. On ANGLE/Metal it is different, and this is
+the one place where an honest number is served in preference to the anchor's.
+
+The Windows D3D11 anchors measure 32767 by 32767, which Direct3D shader model
+5 mandates. An Apple GPU reports 16384. Metal enforces what it reports, so the
+limit is served at the host's 16384 and a Windows persona on a Mac reports a
+viewport maximum no Direct3D device has. That is a readable contradiction and
+it is not being hidden.
+
+Serving the anchor's 32767 there was considered and rejected on measurement,
+not on principle. `glViewport` is specified to clamp rather than fail, so the
+obvious objection — that an over-claim breaks on first use — does not apply,
+and the exemption looked free. It is not. Measured through the shipped
+152.0.7977.83 macOS artifact on an Apple M4 Max, on both the WebGL1 and WebGL2
+paths:
+
+| Call | Result |
+| --- | --- |
+| `getParameter(MAX_VIEWPORT_DIMS)` | `[16384, 16384]` |
+| `viewport(0, 0, 32767, 32767)` | no GL error |
+| `getParameter(VIEWPORT)` | `[0, 0, 16384, 16384]` |
+| `scissor(0, 0, 32767, 32767)` | no GL error |
+| `getParameter(SCISSOR_BOX)` | `[0, 0, 32767, 32767]` |
+
+The viewport state is silently clamped to the driver's real maximum and the
+clamped value is readable. So a page that read a 32767 claim, set a viewport to
+exactly that, and read the viewport back would get 16384 and a contradiction in
+two calls, with no allocation and no rendering — cheaper than the contradiction
+the claim was meant to remove. The `SCISSOR_BOX` row is the control: it is not
+clamped, so the clamp tracks `MAX_VIEWPORT_DIMS` specifically rather than being
+a generic bound on integer state, and a page can compare the two to isolate it.
+
+An honest 16384 beats a claim a page can break in two calls. The pairing is
+what carries the cost: on a Windows or Linux host with the corresponding
+silicon the anchor's 32767 is both claimed and real.
 
 ### Pinning across platforms
 
@@ -702,6 +752,108 @@ lands on the claimed delta, and neither the Python nor the Node launcher does
 that yet. Until one of them does, the two fields record the reference
 measurement and change nothing a page can read.
 
+## The window rect is the host's and the work area is the profile's
+
+They are never reconciled, and on most compositions they contradict each other.
+
+Measured on the shipped `linux-x64` artifact, headed under Xvfb at 1920x1080,
+with a composed 1920x1080 panel and the `taskbar-bottom` furniture option:
+`screen.availHeight` is 1032 — the panel less the 48 px taskbar the profile
+claims — while `outerHeight` is 1060 at `screenY` 10. The window's bottom edge
+is therefore at 1070, which is 38 px inside the taskbar the same profile says is
+there. Stock Chromium on the same host reports the identical 1060 at 10 and no
+violation at all, because its `availHeight` is the full 1080. Apostate creates
+the contradiction by deducting the furniture from one of the two rects.
+
+The mechanism is a single unpatched read. `WindowSizer::GetDefaultWindowBounds`
+sizes the first window from `display.work_area()` — the browser-side
+`display::Display`, filled in by the platform screen — as
+`work_area.height() - 2 * kWindowTilePixels` tall, half the work area less
+`1.5 * kWindowTilePixels` wide on a 16:9 screen, offset by `kWindowTilePixels`
+from the origin. On a 1920x1080 host that is exactly 945x1060 at (10,10), which
+is what was measured. The profile is applied somewhere else entirely:
+`DisplayUtil::DisplayToScreenInfo` builds the renderer-facing `ScreenInfo`, and
+that is where patches 0010, 0016 and 0018 write the claimed screen and work
+area. The browser sizes its window against the host's rect and the page reads
+the profile's, and nothing in Chromium relates the two — they arrive in the
+renderer over different mojo channels from different sources.
+
+**It is not one furniture option.** Against that measured window rect, over
+every furniture option in the catalogue and every panel its platform offers,
+131 of 171 combinations break at least one clause of
+`coh.window-within-avail-rect`:
+
+| Persona | Combinations breaking a clause | `screenX >= availLeft` | `screenY >= availTop` | right edge | bottom edge |
+| --- | --- | --- | --- | --- | --- |
+| macOS | 84 of 84 | 21 | 84 | 0 | 33 |
+| Windows | 31 of 63 | 7 | 7 | 0 | 21 |
+| Linux | 16 of 24 | 6 | 12 | 0 | 6 |
+
+Sixteen of the twenty-five furniture options break on every panel their platform
+offers, and not one holds on all of them. A further 46 combinations compose a
+panel *smaller* than the real window, so `outerHeight` exceeds `screen.height`
+outright rather than merely the work area; the panel axis only filters on window
+bounds when the launch passes `--window-size`, and a bare launch passes none.
+The right-edge clause survives only because Chrome's default window is half the
+screen wide.
+
+**The bottom edge the sweep found is the mild half.** Of the 22 captures in
+`resources/fingerprints/raw`, 21 satisfy all four clauses and the one that does
+not is a real GNOME desktop whose window overhangs the work area's right edge by
+7 px, so a small overhang is something real machines do. The clauses no
+reference ever breaks are the origin ones: every macOS capture reports
+`screenX == availLeft == 0` and `screenY == availTop == 33`, the window sitting
+exactly under the menu bar. A macOS persona here reports `screenY` 10 against
+`availTop` 33 — a window 23 px *above* a menu bar that is always on top — on
+every panel and every dock option. That is the unmistakable version of the same
+defect, and it is the one to fix first.
+
+No target detector charges for any of it today: sannysoft's
+`PHANTOM_WINDOW_HEIGHT` passes on these exact numbers, CreepJS leaves its Screen
+section unflagged, and browserscan does not deduct. It shows up under
+Playwright's default window size, which is the common automation path.
+
+**Why it is not fixed rather than fixed badly.** Two repairs suggest
+themselves and both are worse than the defect.
+
+Serving `outerWidth`, `outerHeight`, `screenX` and `screenY` from the profile
+satisfies the arithmetic and introduces a sharper tell: `MouseEvent.screenX` is
+the real screen coordinate of a real event, so one `mousemove` recovers the
+true window origin and catches the browser disagreeing with itself. That is the
+argument to remember before anyone "fixes" this by writing values, and it is
+why `window.outer-dimensions` and `window.screen-position` are `inherit` rather
+than `spoof` in the ledger.
+
+Filtering the furniture axis against the host window — offering only insets
+whose work area can contain the real window, the way `cpu` and `memory` are
+filtered against host capacity — trades one fatal violation for another. On
+Windows 11 the catalogue offers exactly two options, and dropping
+`taskbar-bottom` leaves `taskbar-autohide` as the only survivor — so every
+Windows persona on that host would claim an auto-hidden taskbar, a
+configuration no capture in this tree measures, presented uniformly. Its zero
+insets also make the work area the whole panel, which is the one case
+`coh.screen-avail-inset-vs-claimed-os` has to carve out rather than assert. It
+also cannot work on a bare launch at all: the compositor learns the window
+bounds only from `--window-size`, which is absent, and the window does not
+exist yet when composition runs.
+
+The repair that works is the one the ledger has always named: place and size the
+real OS window inside the work area the profile claims, so `screenY` and
+`outerHeight` stay the window's own true values and the relation holds because
+it is true. That means the browser-side `display::Display` work area has to
+carry the profile, not just the renderer-facing `ScreenInfo`, and it brings a
+second requirement with it — the claimed panel must then fit inside the host's
+real screen, or the browser places windows the window manager immediately moves,
+which breaks the same relation from the other side. Neither the Python nor the
+Node launcher sizes the window either, and a launcher-side `--window-size` would
+leave the bare binary — the headline case, a fingerprint with no arguments —
+unfixed.
+
+So it is a display-placement change in a subsystem the profile does not
+currently touch, and it is only verifiable headed, with a window on a screen.
+Until that lands, treat window geometry as the host's: a page that compares the
+window rect against the claimed work area can tell.
+
 ## The keyboard layout map is replayed, not composed
 
 `navigator.keyboard.getLayoutMap()` is served from `keyboard.layout_map` when a
@@ -740,16 +892,36 @@ the host libm, so it differs between arm64 and x86-64 hosts. Profiles are
 partitioned by instruction set for that reason, and a profile does not move an
 audio render across architectures.
 
-**The audio device's own numbers are the host's.** `AudioContext.sampleRate` and
-`destination.maxChannelCount` come out of the audio service from the real output
-device, and the schema declares no key for either, so a profile cannot move them.
-`audio.hardware_buffer_frames` IS served, and `baseLatency` is
-`framesPerBuffer / sampleRate`, so the numerator follows the profile while the
-denominator follows the host: a claimed 256 frames on a 44100 Hz host reports
-0.005805 where the reference machine measured 0.005333. That is a different
-value rather than a closer one, and 44100 against 48000 is itself a coarse
-hint about the operating system. Both surfaces are recorded as unresolved in the
-ledger rather than as served.
+**The audio device's own numbers are the host's, except the buffer.**
+`AudioContext.sampleRate` and `destination.maxChannelCount` come out of the
+audio service from the real output device, and the schema declares no key for
+either, so a profile cannot move them. `audio.hardware_buffer_frames` is served,
+and since the audio dispersion axis exists it is also populated on every
+composed profile: 256 frames under a macOS persona, 480 under Windows, 512 under
+Linux. Until that axis existed the field was declared, consumed by patch 0019
+and supplied by nothing, so `baseLatency` was the build host's own buffer under
+every persona — 0.042666 on the shipped linux-x64 artifact, identical to stock
+Chrome, which is 2048 frames of Linux ALSA behind whatever OS the rest of the
+profile claimed.
+
+`baseLatency` is `max(framesPerBuffer, 128) / sampleRate`, so the numerator now
+follows the profile while the denominator still follows the host. On a 48 kHz
+host that is exact: a macOS persona reports 0.005333333333333333 and a Windows
+persona 0.01, both equal to their reference captures. On a 44.1 kHz host it is
+not, and the error is not the same shape on every platform — CoreAudio and
+PulseAudio pin the frame count, while WASAPI shared mode pins a 10 ms period, so
+a real Windows machine at 44.1 kHz reports 441 frames and this build would
+report 480. The sample rate is recorded as unresolved in the ledger
+(`audio.context-sample-rate`, verdict `escalate`), and closing it means deciding
+per platform which of the two is pinned rather than declaring one rate.
+
+The Linux number is authored rather than measured, and is the one value here
+that a capture would replace. It is Chromium's own Pulse floor
+(`kMinimumOutputBufferSize`, 512). Every admitted Linux reference in the corpus
+enumerates zero audio devices, so their 44100 Hz / 441 frames is the
+no-sound-card path rather than a Linux desktop, and the only Linux capture in
+the tree holding a real output device is a non-admissible v1 file reporting
+ALSA's compiled default of 2048 — which is also this project's build host.
 
 ## Platform support
 

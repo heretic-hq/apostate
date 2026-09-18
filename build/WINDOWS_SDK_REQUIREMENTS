@@ -41,17 +41,31 @@
 #   edges on SDK 10.0.26100.4654 and failed with
 #   "error: unknown type name 'IUIAutomationClientInfo'".
 #
-# EXPERIMENTAL_IDCompositionDevice6 is used unconditionally by
-#   ui/gl/direct_composition_support.cc:788, ui/gl/dc_layer_tree.cc:147 and
-#   ui/gl/dc_layer_tree.h:486, with no guard, and is declared nowhere in the
-#   checkout -- searched ui, gpu, media, base, build and
-#   third_party/win_build_output for a declaration and found none -- so it comes
-#   from the SDK's dcomp.h. Microsoft ships experimental DirectComposition
-#   interfaces under that prefix and adds them in servicing revisions. Unlike
-#   the UIA row this one has not been observed failing: the series gate may not
-#   reach ui/gl/direct_composition_support.cc, but a full Windows build does.
-#   It is asserted because the dependency is real and asserting it is free, not
-#   because a run has proved it missing.
+#   Both are confirmed present in 10.0.26100.7705 and confirmed absent from an
+#   earlier 26100 revision, by reading the official Microsoft.Windows.SDK.CPP
+#   NuGet packages for each -- the same headers the installer lays down, so the
+#   pin is verified against the bytes rather than against the release notes, and
+#   without a Windows runner. Both live in um/UIAutomationCore.h, which is why
+#   these rows name the `um` DIRECTORY: a row pinned to um/UIAutomationClient.h,
+#   the header the interface names, would have failed on a correct SDK.
+#
+# EXPERIMENTAL_IDCompositionDevice6 WAS listed here and should not have been.
+#   It is used unconditionally by ui/gl/direct_composition_support.cc:788,
+#   ui/gl/dc_layer_tree.cc:147 and ui/gl/dc_layer_tree.h:486, and searching the
+#   checkout for a declaration found none, so it looked like an SDK symbol. It
+#   is not in any Windows SDK: checked 26100.4188, .7705, .8249, .9169 and
+#   28000.2705, absent from all five. It comes from a vendored header,
+#   third_party/microsoft_dxheaders/src/include/experimental-composition/
+#   experimental-dcomp.h, included by name at direct_composition_support.cc:20.
+#
+#   The search missed it because third_party/microsoft_dxheaders/src is a
+#   nested DEPS sub-repository that this mapping checkout has not synced, so the
+#   directory is empty here and present on any runner that ran gclient sync.
+#   THE LESSON, because it will recur: a negative result from searching a
+#   partial checkout is not evidence of absence. The row would have failed on a
+#   correct 10.0.26100.7705 SDK and broken the gate for a reason that did not
+#   exist. Rows here must name a symbol the SDK owns; a symbol the checkout
+#   supplies belongs to the checkout's pins, not to this table.
 #
 # IDCompositionDevice2, IDCompositionDevice3 and IDCompositionDevice4 are used
 #   unconditionally in the same files and are NOT listed: all three predate
@@ -64,6 +78,9 @@
 # revision and presence cannot tell you. Cite the consumer and, if it exists,
 # the run that found it. Prefer a `version` row when a version resource exists,
 # because a number that can be compared beats a symbol that has to be chosen.
+# Confirm the symbol IS in the pinned SDK before adding it -- the NuGet package
+# above makes that a 30-second check from any host -- because an assertion that
+# fails on a correct toolchain is worse than no assertion at all.
 #
 # The list cannot be completed by reading. An unconditional use of a too-new
 # interface is a compile error in whichever translation unit uses it, so the
@@ -72,5 +89,4 @@
 
 symbol	Include/<version>/um	IUIAutomationClientInfoSource
 symbol	Include/<version>/um	IUIAutomationClientInfo
-symbol	Include/<version>/um	EXPERIMENTAL_IDCompositionDevice6
 version	Debuggers/x64/dbghelp.dll	10.0.26100.3323

@@ -23,9 +23,21 @@ import json
 import pathlib
 import sys
 
-# A compiler input, i.e. something that produces an object file. Headers are
-# excluded deliberately: a header has no object of its own, and it is covered
-# by compiling the translation units that include it.
+# A compiler input, i.e. something that produces an object file.
+#
+# Headers are excluded, and the reason usually given for that -- "a header has
+# no object of its own, and it is covered by compiling the translation units
+# that include it" -- is an assumption rather than a check. Nothing verifies
+# that any compiled unit includes a given patched header. The ffmpeg codec list
+# falsified the same assumption for .c files: it has no object either, and
+# until scripts/series_absences.py started resolving such a file to its
+# includer and reading ninja's recorded dependencies, patch 0061's
+# registration was compiled by nothing the gate checked. At 152.0.7977.83 the
+# series patches 52 files outside this tuple -- 49 headers and 3 .asm, two of
+# the .asm include-only in exactly that way -- so they are neither verified
+# nor visible as absences. docs/BUILD.md records that gap; closing it means
+# putting each includer's object into a paid compile set, which is a coverage
+# decision rather than a bug fix.
 #
 # .m is listed although the series contains no Objective-C file today. The
 # point of deriving this list is that it keeps up with the series without

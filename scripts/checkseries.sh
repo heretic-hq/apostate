@@ -15,17 +15,27 @@
 # absent from the macOS build graph, so no per-file run on this host could ever
 # have covered them.
 #
-# Three outcomes per translation unit, and the third is why this script exists:
+# Six outcomes per translation unit, and the last four are why this script has
+# the shape it has:
 #
-#   compiles   ninja produced every object the graph derives from the file
-#   fails      an object was not produced; the error is reported and the gate
-#              exits non-zero
-#   absent     this platform's build graph produces no object from the file
+#   compiles        ninja produced every object the graph derives from the file
+#   fails           an object was not produced; the error is reported and the
+#                   gate exits non-zero
+#   include-only    the file is no translation unit of its own, and an object
+#                   this run compiled recorded reading it. Verified, not skipped
+#   absent-platform declared in scripts/series-absences.tsv as scoped away
+#                   from this target by a GN condition
+#   absent-config   declared there as excluded by this build's configuration
+#   unexplained     none of the above; the gate exits non-zero
 #
-# "absent" is legitimate — font_cache_linux.cc is Linux-only, sys_info_win.cc
-# is Windows-only — but it is never folded into a pass. It is named, counted,
-# and written to the report, so that merging the per-platform reports can tell
-# an honestly platform-specific file from one that nothing compiles anywhere.
+# "absent" used to be one word for the last four, and that folded two unlike
+# claims into one passing badge. font_cache_linux.cc is Linux-only and skipping
+# it on Windows is correct; the ffmpeg config's libavcodec/codec_list.c was
+# skipped on every platform because it is never a translation unit at all --
+# libavcodec/allcodecs.c includes it textually -- so patch 0061's codec
+# registration was compiled by nothing this gate checked while the gate
+# reported 129 compiles, 3 absent and a green badge. An absence nothing
+# accounts for now fails the run.
 source "$(dirname "$0")/lib.sh"
 
 GATE_ARGV=("$@")
@@ -50,7 +60,7 @@ while (($#)); do
     -j) JOBS="${2:?-j needs a job count}"; shift ;;
     -j*) JOBS="${1#-j}" ;;
     --merge) MODE="merge"; shift; MERGE_REPORTS=("$@"); break ;;
-    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
     -*) die "unknown option: $1" ;;
     *) [ -z "$TARGET" ] || die "target given twice: $TARGET and $1"; TARGET="$1" ;;
   esac
@@ -59,6 +69,12 @@ done
 
 TU_TOOL="$REPO_ROOT/scripts/series-translation-units.py"
 [ -f "$TU_TOOL" ] || die "missing $TU_TOOL"
+ABSENCES="$REPO_ROOT/scripts/series-absences.tsv"
+[ -f "$ABSENCES" ] || die "missing $ABSENCES; the gate cannot tell a declared absence from an unchecked one without it"
+ABSENCE_TOOL="$REPO_ROOT/scripts/series_absences.py"
+[ -f "$ABSENCE_TOOL" ] || die "missing $ABSENCE_TOOL"
+REPORT_TOOL="$REPO_ROOT/scripts/series-gate-report.py"
+[ -f "$REPORT_TOOL" ] || die "missing $REPORT_TOOL"
 
 # Linux compiles inside the pinned container, exactly as build.sh and
 # checkfile.sh do. Compiling against the host's libraries would answer a
@@ -79,15 +95,34 @@ fi
 # and it is only visible with the per-platform reports side by side.
 if [ "$MODE" = "merge" ]; then
   [ "${#MERGE_REPORTS[@]}" -ge 2 ] || die "--merge needs at least two report files"
-  python3 - "${MERGE_REPORTS[@]}" <<'PY'
+  python3 - "$REPO_ROOT" "${MERGE_REPORTS[@]}" <<'PY'
 import json, pathlib, sys
 
+repo_root = sys.argv[1]
+sys.path.insert(0, str(pathlib.Path(repo_root, "scripts")))
+import series_absences
+
+# The status vocabulary comes from the module the per-platform runs classify
+# with, so the merge cannot fall behind it. It did once: this step filtered on
+# the literal string "absent", and splitting that one word into
+# absent-platform, absent-config, include-only and unexplained would have left
+# the filter matching nothing and the cross-platform coverage question
+# silently answering "all clear" for every file.
+SCHEMA = "apostate-v1-series-gate/2"
+
 reports = []
-for arg in sys.argv[1:]:
+for arg in sys.argv[2:]:
     path = pathlib.Path(arg)
     if not path.is_file():
         raise SystemExit(f"error: no report at {path}")
-    reports.append(json.loads(path.read_text(encoding="utf-8")))
+    report = json.loads(path.read_text(encoding="utf-8"))
+    schema = report.get("schema")
+    if schema != SCHEMA:
+        raise SystemExit(
+            f"error: {path} is schema {schema!r}, not {SCHEMA!r}. Its statuses mean\n"
+            "something else, and merging it would compare two different vocabularies."
+        )
+    reports.append(report)
 
 targets = [report["target"] for report in reports]
 if len(set(targets)) != len(targets):
@@ -104,16 +139,26 @@ for report in reports:
     for unit in report["units"]:
         status.setdefault(unit["path"], {})[report["target"]] = unit["status"]
 
+# "Compiled somewhere" now includes include-only, because a file compiled as
+# part of its includer is compiled: the object that read it is named in the
+# report. Everything else -- a declared platform or config absence, or an
+# unexplained one -- is not coverage.
 dead = [
     path
     for path, per_target in status.items()
-    if len(per_target) == len(targets) and set(per_target.values()) == {"absent"}
+    if len(per_target) == len(targets)
+    and not (set(per_target.values()) & series_absences.COVERED_STATUSES)
 ]
 failures = sorted(
-    (target, path)
+    (target, path, state)
     for path, per_target in status.items()
     for target, state in per_target.items()
-    if state == "fails"
+    if state in series_absences.FAILING_STATUSES
+)
+stale = sorted(
+    (report["target"], row["path"], row["why"])
+    for report in reports
+    for row in report.get("stale_declarations", [])
 )
 
 print(f"merged {len(reports)} reports: {', '.join(targets)}")
@@ -123,15 +168,20 @@ for path, per_target in status.items():
     print(f"  {path}\n      {states}")
 
 if failures:
-    print("\nfails to compile:")
-    for target, path in failures:
-        print(f"  {target}  {path}")
+    print("\nunresolved on at least one platform:")
+    for target, path, state in failures:
+        print(f"  {target}  {state:12} {path}")
 
-exit_code = 1 if failures else 0
+if stale:
+    print("\nstale declared absences:")
+    for target, path, why in stale:
+        print(f"  {target}  {path}\n      {why}")
+
+exit_code = 1 if failures or stale else 0
 if not dead:
     print("\nevery translation unit is compiled on at least one merged platform")
 elif uncovered:
-    print(f"\nabsent from every merged platform ({len(dead)}):")
+    print(f"\nnot compiled on any merged platform ({len(dead)}):")
     for path in dead:
         print(f"  {path}")
     print(
@@ -139,7 +189,7 @@ elif uncovered:
         ". Add one and merge again before calling these dead."
     )
 else:
-    print(f"\nIN NO PLATFORM'S BUILD GRAPH ({len(dead)}):")
+    print(f"\nCOMPILED BY NO PLATFORM ({len(dead)}):")
     for path in dead:
         print(f"  {path}")
     print("A patch edits each of these and nothing compiles it.")
@@ -157,7 +207,12 @@ REPORT="${REPORT:-$OUT/apostate-v1-$TARGET.json}"
 
 [ -f "$OUT/build.ninja" ] || die "no build graph for $TARGET; run scripts/configure.sh $TARGET"
 [ -x "$NINJA" ] || die "no ninja at $NINJA; the checkout is incomplete"
-JOBS="${JOBS:-$(python3 -c 'import os;print(max(1,int(os.cpu_count()*0.75)))')}"
+# Command substitution strips trailing newlines but not a trailing carriage
+# return, and Windows Python writes one, so a bare $(python3 -c 'print(...)')
+# yields "10\r" here and ninja is then invoked as `-j 10\r`. Same defect class
+# as the object paths, one line earlier in the run, and it would have been the
+# next thing a Windows run failed on. end="" removes the newline at the source.
+JOBS="${JOBS:-$(python3 -c 'import os;print(max(1,int(os.cpu_count()*0.75)),end="")')}"
 
 # nice is not guaranteed off Linux and macOS, and a missing nice must not be
 # the reason the gate cannot run on a Windows runner.
@@ -171,7 +226,12 @@ MAP="$WORK/map.tsv"
 BUILD_LOG="$WORK/build.log"
 DRY_LOG="$WORK/dry.log"
 ABSENT_LOG="$WORK/absent.tsv"
+SOURCE_INDEX="$WORK/compdb-sources.tsv"
+INCLUDERS="$WORK/includers.tsv"
+DEPS_LOG="$WORK/deps.txt"
 : > "$ABSENT_LOG"
+: > "$INCLUDERS"
+: > "$DEPS_LOG"
 
 python3 "$TU_TOOL" --root "$REPO_ROOT" --with-patches > "$UNITS"
 total="$(grep -c . "$UNITS" || true)"
@@ -221,6 +281,8 @@ for line in open(sys.argv[1], encoding="utf-8"):
     if path:
         units.append(path)
 objects = {path: [] for path in units}
+# Every compiled source in the graph, keyed the same way.
+index = collections.defaultdict(list)
 
 field = re.compile(rb'^\s*"(file|output)": "(.*?)",?\s*$')
 depths = collections.Counter()
@@ -247,8 +309,10 @@ for raw in sys.stdin.buffer:
         depths[depth] += 1
     # An object output is the whole question: not "does ninja know this path"
     # but "does this platform compile it".
-    if source in objects and output.endswith((".o", ".obj")):
-        objects[source].append(output)
+    if output.endswith((".o", ".obj")):
+        index[source].append(output)
+        if source in objects:
+            objects[source].append(output)
 
 if records == 0:
     raise SystemExit("error: ninja -t compdb listed no edges; the build graph is unreadable")
@@ -263,13 +327,28 @@ if mapped == 0:
 print(f"#prefix\t{'../' * (depths.most_common(1)[0][0] if depths else 0)}")
 for path in units:
     print(f"{path}\t{' '.join(objects[path])}")
-print(f"  {records} graph edges read, {mapped}/{len(units)} units produce objects", file=sys.stderr)
+
+# The whole graph's source-to-object mapping, not just the series'. Phase 1d
+# needs the objects of an includer that is not itself a series unit --
+# libavcodec/allcodecs.c is nobody's patch target -- and one compdb stream is
+# already in hand, so resolving it here spends nothing. A second ninja
+# invocation for the same answer costs a manifest load, measured at about ten
+# seconds warm.
+with open(sys.argv[2], "w", encoding="utf-8", newline="\n") as index_file:
+    for path in sorted(index):
+        index_file.write(f"{path}\t{' '.join(index[path])}\n")
+print(
+    f"  {records} graph edges read, {mapped}/{len(units)} units produce objects,"
+    f" {len(index)} sources indexed",
+    file=sys.stderr,
+)
 PY
 )"
 say "phase 1: build-graph membership (ninja -t compdb)"
 COMPDB_ERR="$WORK/compdb.err"
 set +e
-( cd "$OUT" && "$NINJA" -t compdb ) 2>"$COMPDB_ERR" | python3 -c "$PHASE1_PY" "$UNITS" > "$MAP"
+( cd "$OUT" && "$NINJA" -t compdb ) 2>"$COMPDB_ERR" \
+  | python3 -c "$PHASE1_PY" "$UNITS" "$SOURCE_INDEX" > "$MAP"
 phase1=("${PIPESTATUS[@]}")
 set -e
 if [ "${phase1[0]}" -ne 0 ]; then
@@ -328,9 +407,43 @@ else
   done
 fi
 
-while IFS=$'\t' read -r path reason; do
-  printf '  absent    %s\n            %s\n' "$path" "$reason"
+while IFS=$'\t' read -r path probe; do
+  printf '  no object %s\n            %s\n' "$path" "$probe"
 done < "$ABSENT_LOG"
+
+# Phase 1d -- account for the files that produce no object.
+#
+# Some of them are not translation units at all. A file with no object of its
+# own can still be compiled, textually, as part of another one, and patch 0061
+# edits two such files: allcodecs.c and parsers.c include the generated codec
+# and parser lists. The gate called them absent on every platform, so 0061's
+# registration was compiled by nothing the gate checked while the gate
+# reported 129 compiles and a green badge.
+#
+# The includer is discovered by searching the file's own module for an
+# #include naming it, so the next such file is found by the same pass and no
+# filename is special-cased here or in the module. Its objects join the
+# compile set -- the real consumer gets compiled, which is the point -- and
+# phase 4 then asks ninja whether those objects actually read the file.
+includer_objects=()
+if [ "${#absent[@]}" -gt 0 ]; then
+  say "phase 1d: searching for includers of ${#absent[@]} unit(s) with no object"
+  python3 "$ABSENCE_TOOL" discover \
+    --root "$SRC" --source-index "$SOURCE_INDEX" -- "${absent[@]}" > "$INCLUDERS"
+  while IFS=$'\t\r' read -r unit includer line operand _objs; do
+    [ -n "$unit" ] || continue
+    printf '  includes  %s\n            %s:%s  include "%s"\n' "$unit" "$includer" "$line" "$operand"
+  done < "$INCLUDERS"
+  # sort -u because two units can share an includer, and because an includer
+  # can already be a series unit whose object is in the compile set.
+  while IFS= read -r obj; do
+    [ -n "$obj" ] || continue
+    includer_objects+=("$obj")
+    objects+=("$obj")
+  done < <(awk -F'\t' 'NF>=5{n=split($5,a," "); for(i=1;i<=n;i++) print a[i]}' "$INCLUDERS" | sort -u)
+  [ "${#includer_objects[@]}" -eq 0 ] ||
+    say "phase 1d: ${#includer_objects[@]} includer object(s) join the compile set"
+fi
 
 ninja_exit=0
 if [ "$MODE" = "list" ]; then
@@ -387,134 +500,43 @@ else
   set -e
 fi
 
-python3 - "$UNITS" "$MAP" "$ABSENT_LOG" "$BUILD_LOG" "$DRY_LOG" "$REPORT" \
-  "$TARGET" "$MODE" "$ninja_exit" "$JOBS" "$REPO_ROOT" <<'PY'
-import hashlib, json, os, pathlib, platform, sys, time
+# Phase 4 -- did the includer actually read the include-only file?
+#
+# The includer being compiled is not the question. allcodecs.c is compiled on
+# every platform, and on each one it reads a different
+# chromium/config/.../libavcodec/codec_list.c, because
+# third_party/ffmpeg/BUILD.gn puts the per-target config directory on the
+# include path. So the proof that a patched fragment reached a compiler is the
+# compiler's own dependency record, which ninja keeps and hands back verbatim.
+#
+# One invocation for every includer object. `ninja -t deps` aborts on the first
+# name it does not recognise and prints nothing else, so a bad name would lose
+# the evidence for every other unit at once: that case is a broken gate and
+# says so, rather than being read as "nothing verified this".
+if [ "${#includer_objects[@]}" -gt 0 ]; then
+  say "phase 4: recorded dependencies of ${#includer_objects[@]} includer object(s)"
+  ( cd "$OUT" && "$NINJA" -t deps "${includer_objects[@]}" ) > "$DEPS_LOG" 2>&1 || true
+  if grep -q '^ninja: error:' "$DEPS_LOG"; then
+    cat "$DEPS_LOG" >&2
+    die "ninja -t deps refused an object name that came out of ninja -t compdb; the gate is broken, not the series"
+  fi
+fi
 
-units_file, map_file, absent_file, build_log, dry_log, report_path, target, mode, ninja_exit, jobs, repo_root = sys.argv[1:12]
-
-patches = {}
-order = []
-for line in pathlib.Path(units_file).read_text(encoding="utf-8").splitlines():
-    path, _, names = line.partition("\t")
-    if path:
-        order.append(path)
-        patches[path] = [n for n in names.split(",") if n]
-
-objects = {}
-for line in pathlib.Path(map_file).read_text(encoding="utf-8").splitlines():
-    path, _, objs = line.partition("\t")
-    if path.startswith("#"):
-        continue
-    objects[path] = objs.split()
-
-reasons = {}
-for line in pathlib.Path(absent_file).read_text(encoding="utf-8").splitlines():
-    path, _, reason = line.partition("\t")
-    if path:
-        reasons[path] = reason
-
-log_text = pathlib.Path(build_log).read_text(encoding="utf-8", errors="replace")
-log_lines = log_text.splitlines()
-
-# ninja prints "FAILED: <output> [<output>...]" and then the command and the
-# compiler's diagnostics. The outputs are ninja's own spelling of the edge, so
-# they map back to a translation unit exactly.
-failed_objects = set()
-excerpts = {}
-for index, line in enumerate(log_lines):
-    if not line.startswith("FAILED: "):
-        continue
-    outs = line[len("FAILED: "):].split()
-    failed_objects.update(outs)
-    body = []
-    for follow in log_lines[index + 1:]:
-        if follow.startswith("FAILED: ") or follow.startswith("ninja: "):
-            break
-        if follow.startswith("[") and "] " in follow[:12]:
-            break
-        body.append(follow)
-        if len(body) >= 40:
-            break
-    for out in outs:
-        excerpts[out] = "\n".join(body).strip()
-
-# Anything ninja would still build is not up to date, so it was not produced.
-dry_tokens = set()
-for line in pathlib.Path(dry_log).read_text(encoding="utf-8", errors="replace").split():
-    dry_tokens.add(line)
-
-units = []
-counts = {"compiles": 0, "fails": 0, "absent": 0, "unchecked": 0}
-for path in order:
-    objs = objects.get(path, [])
-    unit = {"path": path, "patches": patches[path], "objects": objs}
-    if not objs:
-        unit["status"] = "absent"
-        unit["reason"] = reasons.get(path, "not in this platform's build graph")
-    elif mode == "list":
-        unit["status"] = "unchecked"
-        unit["reason"] = "membership only; --list did not compile"
-    else:
-        failed = [o for o in objs if o in failed_objects]
-        residual = [o for o in objs if o in dry_tokens]
-        if failed or residual:
-            unit["status"] = "fails"
-            unit["failed_objects"] = sorted(set(failed) | set(residual))
-            if failed and not residual:
-                unit["reason"] = "ninja reported FAILED for an object that is now up to date; re-run the gate"
-            elif residual and not failed:
-                unit["reason"] = "object not produced and no FAILED line names it; a prerequisite failed"
-            else:
-                unit["reason"] = "compile failed"
-            unit["error"] = "\n".join(excerpts.get(o, "") for o in failed).strip()
-        else:
-            unit["status"] = "compiles"
-    counts[unit["status"]] += 1
-    units.append(unit)
-
-series = pathlib.Path(repo_root, "patches", "series").read_bytes()
-report = {
-    "schema": "apostate-v1-series-gate/1",
-    "target": target,
-    "mode": mode,
-    "host": f"{platform.system()}-{platform.machine()}",
-    "chromium_version": pathlib.Path(repo_root, "build", "CHROMIUM_VERSION").read_text(encoding="utf-8").strip(),
-    "series_sha256": hashlib.sha256(series).hexdigest(),
-    "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    "jobs": int(jobs),
-    "ninja_exit": int(ninja_exit),
-    "counts": counts,
-    "units": units,
-}
-pathlib.Path(report_path).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-
-for unit in units:
-    if unit["status"] == "fails":
-        print(f"  FAIL      {unit['path']}")
-        print(f"            {unit['reason']}")
-        # The first line after "FAILED:" is the compile command, which for
-        # Chromium is a few thousand characters. It stays whole in the report
-        # so a failure can be reproduced by hand, and is cut here so the
-        # diagnostics after it are the part a reader sees.
-        for line in unit.get("error", "").splitlines()[:12]:
-            print(f"            {line[:200]}")
-
-print()
-print(f"==> V1 series gate  {target}  ({report['generated_at']})")
-print(f"  compiles              {counts['compiles']:4d}")
-print(f"  fails                 {counts['fails']:4d}")
-print(f"  not in build graph    {counts['absent']:4d}")
-if counts["unchecked"]:
-    print(f"  unchecked (--list)    {counts['unchecked']:4d}")
-print(f"  total                 {len(units):4d}")
-print(f"  report                {report_path}")
-
-# A non-zero ninja exit with nothing attributed means the gate cannot say what
-# broke. That is a gate failure, not a pass.
-if int(ninja_exit) != 0 and counts["fails"] == 0:
-    print("\nninja exited non-zero but no translation unit was attributed a failure;")
-    print("treat this run as inconclusive and read the log above.")
-    raise SystemExit(1)
-raise SystemExit(1 if counts["fails"] else 0)
-PY
+# Not exec: the EXIT trap that removes $WORK has to run, and this is the last
+# command either way, so its status is the gate's.
+python3 "$REPORT_TOOL" \
+  --units "$UNITS" \
+  --map "$MAP" \
+  --probes "$ABSENT_LOG" \
+  --build-log "$BUILD_LOG" \
+  --dry-log "$DRY_LOG" \
+  --includers "$INCLUDERS" \
+  --deps "$DEPS_LOG" \
+  --absences "$ABSENCES" \
+  --prefix "$PREFIX" \
+  --report "$REPORT" \
+  --target "$TARGET" \
+  --mode "$MODE" \
+  --ninja-exit "$ninja_exit" \
+  --jobs "$JOBS" \
+  --root "$REPO_ROOT"

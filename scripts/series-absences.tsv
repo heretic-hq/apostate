@@ -1,0 +1,85 @@
+# Declared absences: series files a target legitimately builds no object from.
+#
+# scripts/checkseries.sh compiles every translation unit the patch series
+# touches. A unit that produces no object on a target is not automatically a
+# pass any more -- "this file does not apply here" and "nobody checked this
+# file" were the same word until the ffmpeg codec list showed what that costs,
+# so an absence has to be accounted for or the gate fails as `unexplained`.
+#
+# Two of the four accounts are derived and never appear here:
+#
+#   compiles      an object was produced from the file.
+#   include-only  the file is no translation unit of its own, and an object
+#                 this gate compiled recorded reading it. Verified from the
+#                 compiler's own dependencies, so it is not a declaration
+#                 anyone can get wrong.
+#
+# The other two are human statements about a build configuration, which no
+# build graph can distinguish from an oversight, so they are written down here
+# and reviewed:
+#
+#   platform      the GN condition that selects the file excludes this target.
+#   config        this build's configuration excludes it, e.g. a GN arg.
+#
+# FORMAT  path <TAB> target-globs <TAB> category <TAB> evidence
+#
+#   target-globs  comma-separated fnmatch patterns over the gate target name
+#                 ("windows-*", "linux-arm64"). List only the targets the
+#                 absence is expected on: a declaration matching a target that
+#                 does compile the file is stale and fails the gate, which is
+#                 what stops this file from rotting into a blanket exemption.
+#   evidence      the GN condition or patch that scopes the file. It must be
+#                 something a reader can open and check.
+#
+# Checked in both directions: a missing row fails the run as unexplained, and
+# a row this run disproves fails it as stale.
+
+# ---------------------------------------------------------------- base, content
+base/system/sys_info_posix.cc	windows-*	platform	base/BUILD.gn:1710 adds it under `if (is_posix)`
+base/system/sys_info_win.cc	linux-*,macos-*	platform	base/BUILD.gn:1834 adds it under `if (is_win)`
+content/browser/speech/tts_linux.cc	windows-*,macos-*	platform	content/browser/BUILD.gn:2563 adds it under `if (is_linux)`
+
+# ------------------------------------------------------------------ gpu, skia
+gpu/apostate_dawn_software_check.cc	windows-*,macos-*	platform	patches/0051-safe-software-webgpu-check.patch declares the executable under `if (is_linux && use_dawn && !is_component_build)`
+skia/ext/design_space_paths_unittest.cc	windows-*,macos-*	platform	patches/0053-design-space-paths-gtests.patch adds it to skia_unittests under `if (is_linux)`
+skia/ext/fontations_design_space_unittest.cc	windows-*,macos-*	platform	patches/0058-fontations-static-design-precision.patch adds it to skia_unittests under `if (is_linux)`
+skia/ext/fontations_emoji_control.cc	windows-*,macos-*	platform	patches/0062-fontations-emoji-diagnostics.patch declares the executable under `if (is_linux && use_blink)`
+
+# ----------------------------------------------------------------------- angle
+third_party/angle/src/tests/apostate_large_index_tests_main.cpp	windows-*,macos-*	platform	patches/0063-validated-software-element-indices.patch declares the angle_test under `if (is_linux && angle_enable_vulkan && angle_has_rapidjson)`
+third_party/angle/src/tests/apostate_parallel_shader_tests_main.cpp	windows-*,macos-*	platform	patches/0057-angle-static-parallel-shader-tests.patch declares the angle_test under `if (is_linux && angle_enable_vulkan && angle_has_rapidjson)`
+third_party/angle/src/tests/gl_tests/ApostateLargeElementIndexTest.cpp	windows-*,macos-*	platform	patches/0063-validated-software-element-indices.patch declares the angle_test under `if (is_linux && angle_enable_vulkan && angle_has_rapidjson)`
+
+# ----------------------------------------------------------------------- blink
+third_party/blink/renderer/core/layout/layout_theme_font_provider_default.cc	windows-*	platform	third_party/blink/renderer/core/layout/build.gni:715 adds it in the `else` of `if (is_win)`, which takes layout_theme_font_provider_win.cc instead
+third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc	windows-*,macos-*	platform	third_party/blink/renderer/platform/BUILD.gn:1769 adds it under `if (is_linux || is_chromeos)`
+third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc	macos-*	platform	third_party/blink/renderer/platform/BUILD.gn:1929 removes it with `sources -=` under `if (is_mac)`, which uses FontCacheMac instead
+
+# ---------------------------------------------------------------------- ffmpeg
+# The list files are include-only, and they are verified as such on linux-x64,
+# where allcodecs.c and parsers.c read exactly these two. They cannot be
+# verified anywhere else, because they are not the files anyone else reads:
+# third_party/ffmpeg/BUILD.gn:14 puts chromium/config/$ffmpeg_branding/
+# $os_config/$ffmpeg_arch on the include path, ffmpeg_options.gni:63 sets
+# `os_config = current_os` and only overrides it for msan, ChromeOS/Fuchsia,
+# and `is_win && !is_clang`, and ffmpeg_arch follows current_cpu. So each
+# target reads its own config directory's copy: windows-x64 reads win/x64, not
+# win-msvc/x64, because build/args/windows-x64.gn:5 sets `is_clang = true`.
+# Confirmed empirically on the macos-arm64 graph, where `ninja -t deps` for
+# allcodecs.o names config/Chrome/mac/arm64/libavcodec/codec_list.c.
+#
+# Measured across all 44 config directories at this revision: Chrome/linux/x64
+# is the ONLY one whose codec_list.c and parser_list.c carry an HEVC entry.
+third_party/ffmpeg/chromium/config/Chrome/linux/x64/libavcodec/codec_list.c	linux-arm64,windows-*,macos-*	platform	only linux-x64 puts chromium/config/Chrome/linux/x64 on the ffmpeg include path (third_party/ffmpeg/BUILD.gn:14 with os_config/ffmpeg_arch from ffmpeg_options.gni); every other target reads its own config directory's codec_list.c
+third_party/ffmpeg/chromium/config/Chrome/linux/x64/libavcodec/parser_list.c	linux-arm64,windows-*,macos-*	platform	only linux-x64 puts chromium/config/Chrome/linux/x64 on the ffmpeg include path (third_party/ffmpeg/BUILD.gn:14 with os_config/ffmpeg_arch from ffmpeg_options.gni); every other target reads its own config directory's parser_list.c
+third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_cabac.c	linux-arm64,windows-*,macos-*	platform	patches/0061-software-hevc-decoder.patch adds it to ffmpeg_c_sources under `if (ffmpeg_branding == "Chrome" && current_cpu == "x64" && os_config == "linux")`
+third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_parse.c	linux-arm64,windows-*,macos-*	platform	patches/0061-software-hevc-decoder.patch adds it to ffmpeg_c_sources under `if (ffmpeg_branding == "Chrome" && current_cpu == "x64" && os_config == "linux")`
+third_party/ffmpeg/libavcodec/hevc/autorename_libavcodec_hevc_parser.c	linux-arm64,windows-*,macos-*	platform	patches/0061-software-hevc-decoder.patch adds it to ffmpeg_c_sources under `if (ffmpeg_branding == "Chrome" && current_cpu == "x64" && os_config == "linux")`
+
+# ----------------------------------------------------------------------- ozone
+# //ui/ozone asserts use_ozone at BUILD.gn:12 and build/config/ozone.gni:11
+# sets `use_ozone = is_chromeos || is_fuchsia || is_linux`, so on Windows and
+# macOS the platform/headless subtree is never instantiated at all.
+ui/ozone/platform/headless/headless_screen.cc	windows-*,macos-*	platform	ui/ozone/BUILD.gn:12 asserts use_ozone, which build/config/ozone.gni:11 sets to `is_chromeos || is_fuchsia || is_linux`
+ui/ozone/platform/headless/headless_window.cc	windows-*,macos-*	platform	ui/ozone/BUILD.gn:12 asserts use_ozone, which build/config/ozone.gni:11 sets to `is_chromeos || is_fuchsia || is_linux`
+ui/ozone/platform/headless/headless_window_unittest.cc	windows-*,macos-*	platform	ui/ozone/platform/headless/BUILD.gn:65 declares headless_unittests under `if (enable_vulkan && (is_linux || is_fuchsia))`

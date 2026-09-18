@@ -75,7 +75,10 @@ The build scripts share workspace and tool paths through `scripts/lib.sh`.
 | `scripts/package-artifact.sh` | Stage the runtime payload and write the archive and release manifest |
 | `scripts/checkfile.sh` | Recompile one translation unit using generated compilation commands |
 | `scripts/series-translation-units.py` | List every translation unit the patch series touches, in series order |
-| `scripts/checkseries.sh` | Compile all of them for one target and classify each as compiling, failing or absent from that build graph |
+| `scripts/checkseries.sh` | Compile all of them for one target and account for every one it produces no object from |
+| `scripts/series-gate-report.py` | Classify one gate run's results and decide its verdict |
+| `scripts/series_absences.py` | Resolve an include-only file to its includer, and classify a declared absence |
+| `scripts/series-absences.tsv` | Declared absences: the files a target legitimately builds no object from, with the GN condition as evidence |
 | `scripts/verify-reproducible.sh` | Compare clean-build output hashes |
 
 On Linux, `scripts/fetch-sources.sh` treats a failed Chromium build-dependency
@@ -268,7 +271,24 @@ file `base/BUILD.gn` compiles on every platform, and it was found by reading.
 translation units, de-duplicated, in series order. It is derived rather than
 maintained because a list that has to be updated by hand stops covering files
 silently, which is the failure this gate exists to remove. At Chromium
-152.0.7977.83 the series touches 130 translation units.
+152.0.7977.83 the series touches 132 translation units.
+
+The filter is `.c`, `.cc`, `.cpp`, `.mm`, `.m`, so the gate's coverage stops
+at files that produce an object of their own. **The series also patches 52
+files that do not: 49 headers and 3 `.asm`.** None of them is in the unit list,
+so none is verified and none can appear as an absence either — including two
+that are include-only in exactly the way `codec_list.c` is, the ffmpeg
+config's `config.asm` and `config_components.asm`, which asm sources such as
+`libavcodec/x86/h264_chromamc.asm` pull in with `%include`. The third,
+`libavcodec/x86/autorename_libavcodec_x86_bswapdsp.asm`, patch `0061` adds to
+`ffmpeg_asm_sources`, so it does produce an object and is simply outside the
+suffix filter. Headers are the old assumption stated plainly in
+`series-translation-units.py`: "covered by compiling the translation units
+that include it", which is an assumption rather than a check, and it is the
+same assumption `codec_list.c` falsified. Extending the include-only
+mechanism over those 52 files is a coverage change with a bill attached — each
+includer's object joins a paid compile set — so it is recorded here rather
+than made quietly.
 
 `scripts/checkseries.sh` compiles them for one target and classifies each
 result. Membership comes from `ninja -t compdb`, a query against the build
@@ -281,16 +301,43 @@ same exit status.
 | --- | --- |
 | `compiles` | ninja produced every object the graph derives from the file |
 | `fails` | an object was not produced; the gate reports the error and exits non-zero |
-| `absent` | this platform's build graph produces no object from the file |
+| `include-only` | the file is no translation unit of its own, and an object this run compiled recorded reading it — verified, not skipped |
+| `absent-platform` | declared in `scripts/series-absences.tsv` as scoped away from this target by a GN condition |
+| `absent-config` | declared there as excluded by this build's configuration |
+| `unexplained` | none of the above; the gate exits non-zero |
 
-`absent` is legitimate and is never folded into a pass: on `macos-arm64`, 20 of
-the 130 are absent, including
-`third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc`. Each run
-writes a JSON report, and `scripts/checkseries.sh --merge` puts the
-per-platform reports side by side. A file absent from every platform is a
-defect rather than a platform fact — a patch edits it and nothing compiles it —
-and the merge reports that only once the reports it was given cover Linux,
-macOS and Windows.
+The last four used to be one word, `absent`, and that folded two unlike claims
+into one passing badge. `font_cache_linux.cc` is Linux-only and skipping it on
+Windows is correct. But
+`third_party/ffmpeg/chromium/config/Chrome/linux/x64/libavcodec/codec_list.c`
+was skipped on *every* platform, because it is never a translation unit at
+all — `libavcodec/allcodecs.c` includes it textually — so patch `0061`'s codec
+and parser registration was compiled by nothing the gate checked while the
+gate reported 129 compiles, 3 absent and green.
+
+An include-only file is now resolved to its includer by searching that file's
+GN module for an `#include` naming it, the includer's objects join the compile
+set, and `ninja -t deps` then has to name the file among what those objects
+read. That last step is the one that discriminates: `allcodecs.c` is compiled
+on every platform and reads a *different* `codec_list.c` on each, because
+`third_party/ffmpeg/BUILD.gn` puts
+`chromium/config/$ffmpeg_branding/$os_config/$ffmpeg_arch` on the include path.
+Verifying through the includer merely existing would move the unearned badge
+one level out instead of removing it.
+
+The two declared categories are human statements, because no build graph can
+tell a platform-scoped file from an overlooked one, and they are checked in
+both directions: a file nothing accounts for fails the run as `unexplained`,
+and a declaration the run disproves fails it as stale. Measured at
+152.0.7977.83: `linux-x64` reports 129 compiles, 2 include-only and 1 declared
+absence; `windows-x64` 113 and 19; `macos-arm64` 113 and 19.
+
+Each run writes a JSON report, and `scripts/checkseries.sh --merge` puts the
+per-platform reports side by side. `compiles` and `include-only` are coverage;
+the declared absences are not. A file covered by no merged platform is a defect
+rather than a platform fact — a patch edits it and nothing compiles it — and
+the merge reports that only once the reports it was given cover Linux, macOS
+and Windows.
 
 `.github/workflows/series-gate.yml` runs the gate on `linux-x64` and
 `windows-x64` by default, weekly and on dispatch. It needs bootstrap, sync,

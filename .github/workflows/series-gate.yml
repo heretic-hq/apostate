@@ -224,12 +224,22 @@ jobs:
             scripts/bootstrap.sh scripts/fetch-sources.sh scripts/apply-patches.sh \
             scripts/configure.sh scripts/checkseries.sh \
             scripts/series-translation-units.py \
+            scripts/series-gate-report.py scripts/series_absences.py \
+            scripts/series-absences.tsv \
             patches/series "build/args/$APOSTATE_TARGET.gn"; do
             test -f "$path" || { echo "missing gate input: $path" >&2; exit 1; }
           done
           # The derived list is the gate's coverage. Printing it before any
           # money is spent makes a silent shrink visible in the log.
           python3 scripts/series-translation-units.py --with-patches
+          # The declared absences are the other half of the verdict: a file
+          # this list does not account for, and nothing includes, fails the
+          # run. Printing it makes an exemption someone added visible in the
+          # same place, before the compile is paid for.
+          echo "--- declared absences ---"
+          # awk, not grep: under `set -e` a grep that matches nothing exits 1,
+          # and a series with no declared absences is a legitimate state.
+          awk -F'\t' '!/^[[:space:]]*(#|$)/ {print $1"\t"$2"\t"$3}' scripts/series-absences.tsv
       - name: Bootstrap pinned toolchain
         shell: bash
         run: bash scripts/bootstrap.sh

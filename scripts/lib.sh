@@ -286,6 +286,31 @@ say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m warn:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# The four targets disagree on which coreutils hash binary exists. macOS ships
+# shasum, a Perl script, and no sha256sum. Git Bash on Windows ships
+# sha256sum.exe and no shasum. Linux usually has both. Resolved once into a
+# word-split variable rather than a function, because `find -exec` needs a real
+# command and cannot call a shell function.
+#
+# A three-hour Windows Chromium build completed all 58187 edges and then died
+# at exit 127 on `shasum: command not found`, so this is not hypothetical.
+#
+# Only these two, and openssl deliberately excluded. The manifest hashes a
+# directory by hashing the `hash  path` lines of its files, so the tool's
+# output format is part of the digest. sha256sum and shasum agree on it to
+# the byte; `openssl dgst -sha256 -r` writes `hash *path` and would produce a
+# different manifest on a host that fell back to it. A build is required to
+# be byte-reproducible, so a fallback that silently is not would be worse
+# than failing here.
+if command -v sha256sum >/dev/null 2>&1; then
+  SHA256="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+  SHA256="shasum -a 256"
+else
+  printf '\033[31merror:\033[0m no sha256 tool: need sha256sum or shasum\n' >&2
+  exit 1
+fi
+
 target_default() {
   case "$(uname -s)-$(uname -m)" in
     Darwin-arm64) echo "macos-arm64" ;;

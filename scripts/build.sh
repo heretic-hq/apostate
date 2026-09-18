@@ -42,7 +42,7 @@ else
   build_mode="incremental"
 fi
 if [ -f "$manifest" ]; then
-  parent_manifest_sha256="$(shasum -a 256 "$manifest" | cut -d' ' -f1)"
+  parent_manifest_sha256="$($SHA256 "$manifest" | cut -d' ' -f1)"
 else
   parent_manifest_sha256="none"
 fi
@@ -70,7 +70,7 @@ PY
 )"
 
 built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-args_sha256="$(shasum -a 256 "$OUT/args.gn" | cut -d' ' -f1)"
+args_sha256="$($SHA256 "$OUT/args.gn" | cut -d' ' -f1)"
 patch_contents_sha256="$(python3 - "$REPO_ROOT" <<'PY'
 import hashlib, pathlib, sys
 root = pathlib.Path(sys.argv[1])
@@ -124,9 +124,9 @@ case "$(uname -s)" in
       "msvc_toolset_version = \"$([ -n "$_toolset" ] && basename "$_toolset" || echo unknown)\""
       "windows_sdk_version  = \"${_sdk_version:-unknown}\""
       "windows_sdk_revision = \"${_sdk_revision:-unknown}\""
-      "vs_components_sha256 = \"$(shasum -a 256 "$REPO_ROOT/build/WINDOWS_VS_COMPONENTS" | cut -d' ' -f1)\""
-      "sdk_requirements_sha256 = \"$(shasum -a 256 "$REPO_ROOT/build/WINDOWS_SDK_REQUIREMENTS" | cut -d' ' -f1)\""
-      "sdk_packages_sha256 = \"$(shasum -a 256 "$REPO_ROOT/build/WINDOWS_SDK_PACKAGES" | cut -d' ' -f1)\""
+      "vs_components_sha256 = \"$($SHA256 "$REPO_ROOT/build/WINDOWS_VS_COMPONENTS" | cut -d' ' -f1)\""
+      "sdk_requirements_sha256 = \"$($SHA256 "$REPO_ROOT/build/WINDOWS_SDK_REQUIREMENTS" | cut -d' ' -f1)\""
+      "sdk_packages_sha256 = \"$($SHA256 "$REPO_ROOT/build/WINDOWS_SDK_PACKAGES" | cut -d' ' -f1)\""
     )
     unset _vs_version _toolset _sdk_version _sdk_revision
     ;;
@@ -148,7 +148,7 @@ trap 'rm -f "$manifest_tmp"' EXIT
   echo "chromium_commit      = \"$(git -C "$SRC" rev-parse HEAD)\""
   echo "depot_tools_revision = \"$DEPOT_TOOLS_REVISION\""
   echo "build_container_image = \"${APOSTATE_BUILD_IMAGE_ID:-native}\""
-  echo "patch_series_sha256  = \"$(shasum -a 256 "$REPO_ROOT/patches/series" | cut -d' ' -f1)\""
+  echo "patch_series_sha256  = \"$($SHA256 "$REPO_ROOT/patches/series" | cut -d' ' -f1)\""
   echo "patch_contents_sha256 = \"$patch_contents_sha256\""
   echo "args_sha256          = \"$args_sha256\""
   echo "build_mode           = \"$build_mode\""
@@ -176,9 +176,9 @@ trap 'rm -f "$manifest_tmp"' EXIT
     [ -e "$OUT/$f" ] || continue
     hashed=$((hashed + 1))
     if [ -d "$OUT/$f" ]; then
-      echo "\"$f\" = \"dir:$(find "$OUT/$f" -type f -exec shasum -a 256 {} + | sort | shasum -a 256 | cut -d' ' -f1)\""
+      echo "\"$f\" = \"dir:$(find "$OUT/$f" -type f -exec $SHA256 {} + | sort | $SHA256 | cut -d' ' -f1)\""
     else
-      echo "\"$f\" = \"$(shasum -a 256 "$OUT/$f" | cut -d' ' -f1)\""
+      echo "\"$f\" = \"$($SHA256 "$OUT/$f" | cut -d' ' -f1)\""
     fi
   done
   [ "$hashed" -gt 0 ] || die "no build outputs found in $OUT for $TARGET"

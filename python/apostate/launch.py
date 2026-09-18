@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, NamedTuple
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from .binary import ensure_binary
+from .binary import BinaryManager, ensure_binary
 from .config import LaunchConfig, check_fingerprint_switches, translate_options
 from .errors import ConfigurationError, LaunchError, ProfileError
 from .geoip import GeoIPResult, resolve_geoip
@@ -499,6 +499,23 @@ def _resolve_executable(binary_path: Any, *, cache_dir: Any = None, manifest: An
     return binary
 
 
+def _assert_published(binary_path: Any, *, cache_dir: Any = None, manifest: Any = None,
+                      target: str | None = None) -> None:
+    """Ask the publication question before anything expensive happens.
+
+    Publication is a local manifest lookup, so it comes before the driver
+    check: on a release that ships no binary for this target, loading the
+    driver first told the user to install Patchright or Playwright when the
+    real blocker was that there is nothing to download yet. That is a
+    first-run experience no developer machine can reproduce, because a driver
+    is always already importable by the time anyone looks. The driver check
+    still precedes acquisition, which is the ~150 MB download.
+    """
+    if binary_path is not None or os.environ.get("APOSTATE_BINARY"):
+        return
+    BinaryManager(cache_dir=cache_dir, manifest=manifest).assert_published(target=target)
+
+
 def launch(*, fingerprint: int | str | None = None, fingerprint_platform: str | None = None,
            profile: Any = None, locale: str | None = None, timezone: str | None = None,
            geoip: bool = True, proxy: str | Mapping[str, Any] | None = None,
@@ -516,9 +533,9 @@ def launch(*, fingerprint: int | str | None = None, fingerprint_platform: str | 
                                proxy=proxy, headless=headless, user_data_dir=user_data_dir, args=args)
     plan = _resolve_plan(config, resolver=resolver, catalogue=catalogue,
                          geoip_provider=geoip_provider, geoip_timeout=geoip_timeout)
-    # The driver check comes first on purpose. Acquisition is a ~150 MB
-    # download; failing afterwards with "no driver installed" spends the
-    # user's bandwidth to tell them something knowable up front.
+    # Publication before the driver, driver before acquisition. See
+    # _assert_published for why the order is load-bearing in both places.
+    _assert_published(binary_path, cache_dir=cache_dir, manifest=manifest)
     selection = _load_sync_backend(driver)
     binary = _resolve_executable(binary_path, cache_dir=cache_dir, manifest=manifest,
                                  downloader=downloader)
@@ -604,13 +621,15 @@ def launch_persistent_context(user_data_dir: str | Path, *, context_options: Map
                          catalogue=options.pop("catalogue", None),
                          geoip_provider=options.pop("geoip_provider", None),
                          geoip_timeout=options.pop("geoip_timeout", 10.0))
-    # Driver first: see launch(). A missing driver is knowable before spending
-    # a ~150 MB download to discover it.
+    binary_path = options.pop("binary_path", None)
+    cache_dir = options.pop("cache_dir", None)
+    manifest = options.pop("manifest", None)
+    downloader = options.pop("downloader", None)
+    # Publication before the driver, driver before acquisition: see launch().
+    _assert_published(binary_path, cache_dir=cache_dir, manifest=manifest)
     selection = _load_sync_backend(options.pop("driver", None))
-    binary = _resolve_executable(options.pop("binary_path", None),
-                                 cache_dir=options.pop("cache_dir", None),
-                                 manifest=options.pop("manifest", None),
-                                 downloader=options.pop("downloader", None))
+    binary = _resolve_executable(binary_path, cache_dir=cache_dir, manifest=manifest,
+                                 downloader=downloader)
     options.pop("_async", None)
     if options.get("user_data_dir") is not None:
         raise ConfigurationError("user_data_dir is the positional persistent-context path")
@@ -646,12 +665,15 @@ async def launch_async(**options: Any) -> Any:
                                user_data_dir=options.pop("user_data_dir", None), args=options.pop("args", None))
     plan = _resolve_plan(config, resolver=options.pop("resolver", None), catalogue=options.pop("catalogue", None),
                          geoip_provider=options.pop("geoip_provider", None), geoip_timeout=options.pop("geoip_timeout", 10.0))
-    # Driver first: see launch().
+    binary_path = options.pop("binary_path", None)
+    cache_dir = options.pop("cache_dir", None)
+    manifest = options.pop("manifest", None)
+    downloader = options.pop("downloader", None)
+    # Publication before the driver, driver before acquisition: see launch().
+    _assert_published(binary_path, cache_dir=cache_dir, manifest=manifest)
     selection = _load_async_backend(options.pop("driver", None))
-    binary = _resolve_executable(options.pop("binary_path", None),
-                                 cache_dir=options.pop("cache_dir", None),
-                                 manifest=options.pop("manifest", None),
-                                 downloader=options.pop("downloader", None))
+    binary = _resolve_executable(binary_path, cache_dir=cache_dir, manifest=manifest,
+                                 downloader=downloader)
     playwright = await selection.factory().start()
     launch_options = dict(options)
     launch_options.update(executable_path=str(binary), headless=config.headless, args=_native_args(plan))
@@ -719,12 +741,15 @@ async def launch_persistent_context_async(user_data_dir: str | Path, *, context_
                                user_data_dir=path, args=options.pop("args", None))
     plan = _resolve_plan(config, resolver=options.pop("resolver", None), catalogue=options.pop("catalogue", None),
                          geoip_provider=options.pop("geoip_provider", None), geoip_timeout=options.pop("geoip_timeout", 10.0))
-    # Driver first: see launch().
+    binary_path = options.pop("binary_path", None)
+    cache_dir = options.pop("cache_dir", None)
+    manifest = options.pop("manifest", None)
+    downloader = options.pop("downloader", None)
+    # Publication before the driver, driver before acquisition: see launch().
+    _assert_published(binary_path, cache_dir=cache_dir, manifest=manifest)
     selection = _load_async_backend(options.pop("driver", None))
-    binary = _resolve_executable(options.pop("binary_path", None),
-                                 cache_dir=options.pop("cache_dir", None),
-                                 manifest=options.pop("manifest", None),
-                                 downloader=options.pop("downloader", None))
+    binary = _resolve_executable(binary_path, cache_dir=cache_dir, manifest=manifest,
+                                 downloader=downloader)
     playwright = await selection.factory().start()
     launch_options = dict(context_options or {})
     launch_options.update(options)

@@ -1702,6 +1702,20 @@ async function replaceTree(staged, destination) {
 }
 
 
+// The publication question on its own: does this release carry a binary for
+// this target. Every branch here is a local manifest lookup with no
+// acquisition behind it, which is what lets it run before the driver check.
+async function resolvePublishedArtifact(options, target) {
+  const manifest = await readOrDownloadManifest(options);
+  if (manifest.status === "unpublished") throw unpublishedArtifactError(manifest);
+  const artifact = artifactFromManifest(manifest, target);
+  if (!artifact) {
+    if (manifestDeclaresUnpublished(manifest)) throw unpublishedArtifactError(manifest);
+    throw new UnpublishedArtifactError(`Apostate binary for ${target} is not published for this release.`, { target });
+  }
+  return { manifest, artifact };
+}
+
 export async function ensureBinary(options = {}) {
   if (typeof options === "string") options = { binaryPath: options };
   if (!isObject(options)) throw new TypeError("ensureBinary options must be an object.");
@@ -1714,13 +1728,7 @@ export async function ensureBinary(options = {}) {
   const target = normalizeTarget(options.target);
   const cacheDir = options.cacheDir ?? options.cache_dir ?? defaultCacheDir();
   const paths = cachePaths(cacheDir, target);
-  const manifest = await readOrDownloadManifest(options);
-  if (manifest.status === "unpublished") throw unpublishedArtifactError(manifest);
-  const artifact = artifactFromManifest(manifest, target);
-  if (!artifact) {
-    if (manifestDeclaresUnpublished(manifest)) throw unpublishedArtifactError(manifest);
-    throw new UnpublishedArtifactError(`Apostate binary for ${target} is not published for this release.`, { target });
-  }
+  const { manifest, artifact } = await resolvePublishedArtifact(options, target);
   if (!options.force) {
     const cached = await validCachedInstall(paths, target, artifact);
     if (cached) return cached;
@@ -2046,11 +2054,26 @@ function contextOwnsBrowser(context, browser) {
 export async function launch(options = {}) {
   if (!isObject(options)) throw new TypeError("Launch options must be an object.");
   const prepared = await prepareLaunch(options);
-  // Driver first on purpose. Acquisition is a ~150 MB download; failing
-  // afterwards with "no driver installed" spends the user's bandwidth to tell
-  // them something knowable up front.
+  // Three checks, cheapest first, and the order is the whole point.
+  //
+  // Publication is a local manifest lookup, so it comes first: on a release
+  // that ships no binary for this target, loading the driver first told the
+  // user to `npm install puppeteer-core` when the real blocker was that
+  // there is nothing to install yet. That is a first-run experience no
+  // developer machine can reproduce, because a driver is always lying around
+  // in node_modules by the time anyone looks.
+  //
+  // The driver check still precedes acquisition, which is the ~150 MB
+  // download: failing after that with "no driver installed" spends the
+  // user's bandwidth to tell them something knowable up front.
+  const explicitBinary = options.executablePath ?? options.binaryPath;
+  // APOSTATE_BINARY is resolved inside ensureBinary, so a configured binary
+  // by any route means there is no publication question to ask.
+  if (!(explicitBinary ?? process.env.APOSTATE_BINARY)) {
+    await resolvePublishedArtifact(options, normalizeTarget(options.target));
+  }
   const driver = await loadDriver(options.driver, options._driverModule);
-  const binary = options.executablePath ?? options.binaryPath ?? await ensureBinary(options);
+  const binary = explicitBinary ?? await ensureBinary(options);
   const args = buildLaunchArguments(prepared.config, prepared.resolution, { driverOwnsProfile: true });
   const env = {
     ...(options.env ?? {}),

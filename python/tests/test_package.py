@@ -363,6 +363,22 @@ print(catalogue['browser_build'])
                 manager.ensure(target="macos-arm64")
         self.assertEqual(calls, [])
 
+    def test_launch_reports_the_unpublished_package_before_the_missing_driver(self) -> None:
+        """The true blocker first, not whichever check happened to run first.
+
+        Nothing is published yet, so every launch hits this. Loading the
+        driver first sent a new user to install Patchright when the real
+        answer was that there is no binary to drive, and no developer machine
+        could reproduce it because a driver is always already importable.
+        This is asserted through launch(), not through BinaryManager: the
+        ordering is what broke, and only a caller can see it.
+        """
+        launch_module = importlib.import_module("apostate.launch")
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(UnpublishedArtifactError):
+                launch_module.launch(cache_dir=temporary, geoip=False, fingerprint="host",
+                                     driver="a-driver-that-is-not-installed")
+
     def test_unpublished_platform_refuses_other_platform_artifacts(self) -> None:
         records = [{
             "platform": target,

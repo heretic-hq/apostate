@@ -587,6 +587,15 @@ class BinaryManager:
             return None
         return executable
 
+    def assert_published(self, *, target: str | None = None) -> None:
+        """Raise unless this release publishes an artifact for *target*.
+
+        The publication question on its own. Reading the manifest and looking
+        up the record are both local, with no acquisition behind them, which
+        is what lets a caller ask it before paying for anything else.
+        """
+        _artifact_record(self._manifest(), target_platform(target))
+
     def ensure(self, *, target: str | None = None,
                artifact: Mapping[str, Any] | str | Path | None = None,
                keep_archive: bool | None = None, force: bool = False) -> Path:

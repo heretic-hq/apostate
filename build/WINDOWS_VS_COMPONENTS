@@ -1,0 +1,65 @@
+# Visual Studio components the windows-x64 build requires, and the files that
+# prove each one is installed.
+#
+# Two columns, whitespace separated: a Visual Studio component id, and one path
+# relative to the resolved MSVC toolset root -- <VS install>/VC/Tools/MSVC/<ver>
+# -- that exists if and only if that component is installed. A component may
+# have several rows. Lines starting with # are comments.
+#
+# This file is the single source of truth for both directions:
+# scripts/provision-windows-toolchain.sh adds any component whose probes are
+# missing, and scripts/verify-host-tooling.sh asserts every probe and names the
+# component id when one is absent. Neither side keeps its own list, so they
+# cannot drift apart -- the failure where a build provisions one set and checks
+# another is not expressible here.
+#
+# WHY THESE AND NOT OTHERS
+#
+# Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+#   The C++ toolset. Chromium compiles with its own clang-cl but uses MSVC's
+#   headers, libraries and some tools; docs/windows_build_instructions.md calls
+#   for Microsoft.VisualStudio.Workload.NativeDesktop, whose Build Tools
+#   equivalent is Microsoft.VisualStudio.Workload.VCTools, and this component is
+#   that workload's C++ toolset. Both host arches are probed because
+#   build/toolchain/win/win_toolchain_data.gni runs setup_toolchain.py for x86
+#   AND x64 even when the target is x64 alone, and each run asserts
+#   "cl.exe is not found in PATH" (build/toolchain/win/setup_toolchain.py:221).
+#
+# Microsoft.VisualStudio.Component.VC.ATL
+#   ATL headers and libraries. base/win/atl_throw.h includes <atldef.h> and
+#   base/BUILD.gn compiles base/win/atl_throw.cc into every Windows build;
+#   base/win/atl.h pulls in eight more ATL headers from the same directory; and
+#   third_party/dawn's DXC includes <atlbase.h> from
+#   src/include/dxc/Support/WinIncludes.h. ATL ships only with Visual Studio,
+#   never with the Windows SDK, and it is not part of the C++ toolset component,
+#   which is why a runner with a complete compiler and SDK still fails at
+#   "'atldef.h' file not found".
+#
+# NOT REQUIRED, DELIBERATELY
+#
+# Microsoft.VisualStudio.Component.VC.ATLMFC (MFC)
+#   docs/windows_build_instructions.md asks for this one, because the IDE
+#   checkbox it names is "MFC/ATL support" and MFC depends on ATL, so adding it
+#   is how a human gets ATL through the installer UI. The build does not use
+#   MFC: no file Chromium compiles includes an afx*.h header. remoting's
+#   atlapp.h and atlcrack.h are WTL, vendored at third_party/wtl, and WTL needs
+#   ATL rather than MFC. Installing MFC as well would be a larger download and
+#   more disk on the target with the least of it, to satisfy a requirement that
+#   is documented rather than real. If that judgement is ever wrong the symptom
+#   is a named assertion here, in seconds, on a $0.16 probe run.
+#
+# Microsoft.VisualStudio.Component.VC.Tools.ARM64, ...VC.MFC.ARM64
+#   docs/windows_build_instructions.md requires these only "if you want to
+#   build for ARM64 Win32". build/args/windows-x64.gn sets target_cpu = "x64"
+#   and there is no windows-arm64 target.
+#
+# The Windows SDK and its "Debugging Tools for Windows" feature are also
+# required but are not Visual Studio components, so they are not listed here;
+# scripts/provision-windows-toolchain.sh installs the Debuggers feature from the
+# separately pinned build/WINDOWS_SDK_INSTALLER_* files.
+
+Microsoft.VisualStudio.Component.VC.Tools.x86.x64	bin/Hostx64/x64/cl.exe
+Microsoft.VisualStudio.Component.VC.Tools.x86.x64	bin/Hostx64/x86/cl.exe
+Microsoft.VisualStudio.Component.VC.ATL	atlmfc/include/atldef.h
+Microsoft.VisualStudio.Component.VC.ATL	atlmfc/include/atlbase.h
+Microsoft.VisualStudio.Component.VC.ATL	atlmfc/lib/x64

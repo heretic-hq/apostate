@@ -116,6 +116,40 @@ case "$(uname -s)" in
     ;;
 esac
 
+# Where the C++ toolset payload lands: <VS>/VC/Tools/MSVC/<version>. Every
+# component that ships headers or libraries -- the toolset itself, ATL, MFC --
+# unpacks under here, so it is the one directory a preflight check has to
+# resolve before it can assert anything about them. "Highest version wins"
+# matches build/vs_toolchain.py FindVCComponentRoot, which globs 14.* and takes
+# the top of _SortByHighestVersionNumberFirst; picking differently would check a
+# toolset the build does not use. Prints nothing and returns 1 when there is
+# none, so callers report that themselves rather than asserting against "".
+windows_msvc_toolset_root() {
+  local vs="${vs2022_install:-}" root candidate best=""
+  [ -n "$vs" ] || return 1
+  root="$(cygpath -u "$vs" 2>/dev/null || printf '%s' "$vs")/VC/Tools/MSVC"
+  [ -d "$root" ] || return 1
+  for candidate in "$root"/14.*; do
+    [ -d "$candidate" ] || continue
+    if [ -z "$best" ] || [ "$(printf '%s\n%s\n' "$(basename "$best")" "$(basename "$candidate")" | sort -V | tail -1)" = "$(basename "$candidate")" ]; then
+      best="$candidate"
+    fi
+  done
+  [ -n "$best" ] || return 1
+  printf '%s' "$best"
+}
+
+# The pinned component list, comments and blank lines removed, as
+# "<component-id> <probe-path>" pairs. build/WINDOWS_VS_COMPONENTS explains why
+# it is one file: the provisioner installs what the verifier asserts, and a
+# second copy of the list is how those two stop agreeing.
+windows_vs_component_probes() {
+  local file="$REPO_ROOT/build/WINDOWS_VS_COMPONENTS"
+  [ -f "$file" ] || die "missing build/WINDOWS_VS_COMPONENTS"
+  sed -e 's/#.*//' -e 's/[[:space:]]\{1,\}/ /g' -e 's/^ //' -e 's/ $//' "$file" |
+    awk 'NF == 2 { print }'
+}
+
 # Prefer the build tools the checkout pins through DEPS over depot_tools'
 # wrappers. Their versions are then fixed by CHROMIUM_VERSION rather than
 # floating with whatever depot_tools revision happens to be present, which is

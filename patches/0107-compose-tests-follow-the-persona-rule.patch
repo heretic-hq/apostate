@@ -1,0 +1,350 @@
+Subject: compose: test the rule 0102 inverted, instead of the one it replaced
+
+Four ApostateComposeTest cases fail against the applied series. The compile gate
+cannot see them, because it compiles a translation unit without linking or
+running one, so these were found by running base_unittests. Three are 0102's
+blast radius and one is 0101's.
+
+TheGpuClusterDoesNotFollowThePersona and
+AnAnchorIsRequiredToBeServableByTheHostBackend assert, by name, the rule 0102
+reversed: that --fingerprint-platform leaves the GPU cluster alone, and that an
+anchor must match the host's graphics backend or composition declines.
+docs/METHODOLOGY.md §9 already notes that patch commentary written against that
+rule is still in the tree. These are the tests written against it, which is the
+same problem in a stronger form: prose that contradicts the code is confusing,
+a test that contradicts the code is a failing gate.
+
+Both are rewritten rather than deleted, because the invariant they pin is still
+wanted -- it inverted, it did not disappear. Deleting them would leave 0102's
+central behaviour untested in the only place it can be tested without a browser.
+
+  TheGpuClusterFollowsThePersona asserts a windows persona on a macOS host with
+  a live Metal backend draws the Windows/D3D11 anchor, that the D3D11 cluster
+  arrives with it rather than the id alone, that the §4 mismatch limitation does
+  NOT fire because a drawn anchor always matches the persona, and that a macos
+  persona on the same host draws the Metal anchor -- so the anchor is a function
+  of the persona and not of the host or the seed.
+
+  AnAnchorIsNotRequiredToMatchTheHostBackend asserts the D3D11 cluster is served
+  over Metal, that it is served on a host whose backend is the software
+  rasteriser -- the case that previously selected the software anchor -- and that
+  the cross-backend limitation is still recorded, because the backend continues
+  to decide which extension names the host's GL stack can back.
+
+A third case is added, because 0102's most important rule had no test at all.
+TheSoftwareAnchorIsNeverDrawn pins the exclusion across twenty-four seeds rather
+than one, since it is a property of the candidate set and a single seed could
+pass by luck, and it pins that --fingerprint-anchor still serves the software
+anchor when it names it: un-defaulted, not removed. The fixture weights that
+anchor 1000 against the others' 1, so a draw that considered it at all would
+pick it.
+
+WebGpuComesFromTheResolvedMemberNotTheAnchor was a stale fixture, not a stale
+assertion, and its assertions are kept verbatim. The two members it needs -- one
+that measured a WebGPU adapter and one that measured none -- hang off the
+macOS/Metal anchor, and RequestFor() composes a windows persona, so after 0102
+that anchor is no longer resolved and the gpu_identity axis is skipped
+altogether. The request now names the macos persona. The behaviour it describes
+is still correct and is the structural-coherence property worth keeping
+prominent: WebGPU comes from the resolved member, which is the same member the
+GL cluster comes from, so the two cannot disagree.
+
+WorkAreaOriginFollowsThePanelOrigin is deleted. It sets screen.left=1920 and
+expects avail_left==1920, but config/profile.schema.json declares no screen.left
+and sets additionalProperties false under screen, so no admissible profile can
+carry it -- which is exactly why 0101 removed the lookup. A test asserting an
+input the schema rejects cannot pass, and re-pinning it to zero would pin the
+behaviour of an impossible input instead. The coverage is retained: the sibling
+case WorkAreaIsDerivedFromThePanelAndTheInsets exercises the same derivation on
+an admissible input and passes.
+
+The fixture gains two anchors, because the persona is now what selects among
+them and one macOS anchor cannot serve three personas. Within a platform the
+catalogue holds exactly one backend -- which is the property that let 0102 drop
+the host-backend filter -- so each persona's candidate set here is a single
+anchor and every draw below stays deterministic. RequestFor() also states its
+persona explicitly with a comment, so a later change to DefaultPersonaForHost()
+cannot silently move every test's anchor.
+
+One test was encoding the old rule without naming it, which is why the sweep
+mattered. AddingAnAxisDoesNotShiftAnotherAxisChoice compares
+ChosenId(before, "anchor") with ChosenId(after, "anchor"), and between 0102 and
+this patch both sides were "(absent)": the windows persona had no anchor to
+resolve, so the line compared two absences and passed while testing nothing. The
+new windows anchor restores it, and an EXPECT_NE against "(absent)" now stops it
+going vacuous again quietly -- the same guard the case already had on its new
+axis.
+
+dispersion_table.h's comment on Anchor::backend said the field is "what host
+servability is decided on -- not the platform persona", which is the withdrawn
+rule stated in a header. Corrected to say what the field is still read for: the
+"swiftshader" value that names the one anchor the draw must never choose, and
+the limitation recording a cluster served over a backend that did not produce
+it.
+
+Run, not inferred. Before: base_unittests --gtest_filter='ApostateCompose*'
+reported 26 tests with 4 failures, at compose_unittest.cc:562, :578, :594 and
+:794. After: --gtest_filter='Apostate*' reports 33 tests, SUCCESS, all passed,
+which is the compose suite plus the host-capability suite. The count is
+unchanged at 26 for the compose suite because two were renamed, one added and
+one deleted.
+
+Ledger: webgl.unmasked-renderer, gpu.angle-backend, screen.availLeft.
+--- a/base/apostate/compose_unittest.cc
++++ b/base/apostate/compose_unittest.cc
+@@ -171,11 +171,33 @@
+      R"({"webgpu":{"info":{"architecture":"test-3","vendor":"test"}}})"},
+     {"no-adapter", "Google Inc. (Test)", "ANGLE (Test, Renderer No Adapter)",
+      ""},
++};
++// Three anchors, because the persona is what selects among them: one per
++// platform the personas use, plus a software one that must never be drawn.
++//
++// Within a platform the catalogue holds one backend, which is the property that
++// let patch 0102 drop the host-backend filter, so each persona's candidate set
++// here is exactly one anchor and every draw below is deterministic.
++constexpr AnchorMember kD3d11Members[] = {
++    {"d3d11-only", "Google Inc. (Test)", "ANGLE (Test, Renderer D3D11)", ""},
++};
++constexpr AnchorMember kSoftwareMembers[] = {
++    {"software-only", "Google Inc. (Google)",
++     "ANGLE (Google, SwiftShader Device)", ""},
+ };
+ constexpr Anchor kAnchors[] = {
+     {"test-metal", "macos", "metal", "Test", "physical-ground-truth", "aa",
+      "bb", "cc", 1, span<const AnchorMember>(kAnchorMembers),
+      R"({"gl_limits":{"MAX_TEXTURE_SIZE":16384}})"},
++    {"test-d3d11", "windows", "d3d11", "Test", "physical-ground-truth", "dd",
++     "ee", "ff", 1, span<const AnchorMember>(kD3d11Members),
++     R"({"gl_limits":{"MAX_TEXTURE_SIZE":8192}})"},
++    // Weighted far above the others so that a draw which considers it at all
++    // would pick it. It must still never be chosen.
++    {"test-swiftshader", "windows", "swiftshader", "Google",
++     "compatibility-capture", "gg", "hh", "ii", 1000,
++     span<const AnchorMember>(kSoftwareMembers),
++     R"({"gl_limits":{"MAX_TEXTURE_SIZE":4096}})"},
+ };
+ 
+ // ---- gpu_identity: single / anchor-member, conditioned on anchor ----
+@@ -247,6 +269,10 @@
+                           const HostCapability& host) {
+   ComposeRequest request;
+   request.seed = std::move(seed);
++  // Stated rather than left to the host-conditional default, so that a change
++  // to DefaultPersonaForHost() cannot silently move every test's anchor. A
++  // windows persona on this macOS host is also the cross-OS case, which is
++  // what most of these tests want to exercise.
+   request.platform = "windows";
+   request.host = host;
+   request.axes = axes;
+@@ -488,6 +514,11 @@
+   EXPECT_EQ(ChosenId(*before, "theme"), ChosenId(*after, "theme"));
+   // And the new axis did resolve, so this is not passing by doing nothing.
+   EXPECT_NE("(absent)", ChosenId(*after, "extra"));
++  // Nor is the anchor comparison above two absences. It was exactly that
++  // between patches 0102 and this fixture gaining a windows anchor: the
++  // persona selects the anchor now, so a fixture with no anchor for the
++  // persona makes that line compare "(absent)" with itself and pass.
++  EXPECT_NE("(absent)", ChosenId(*after, "anchor"));
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -557,33 +588,102 @@
+   EXPECT_EQ(4096u, ClampMemoryBytes(4096, 0));
+ }
+ 
+-// §4: --fingerprint-platform does not move the GPU cluster, and the mismatch is
+-// reported rather than hidden.
+-TEST(ApostateComposeTest, TheGpuClusterDoesNotFollowThePersona) {
++// Patch 0102's central rule, and the inverse of what this file asserted before
++// it: the claimed OS selects the GPU cluster. A windows persona on a macOS
++// host with a live Metal backend draws the Windows/D3D11 anchor, not the
++// host's own, and no persona/cluster mismatch is left to report.
++TEST(ApostateComposeTest, TheGpuClusterFollowsThePersona) {
+   constexpr DispersionAxis kAxes[] = {kOsReleaseAxis};
+   const std::optional<Composition> composition =
+       Compose(RequestFor("persona-seed", kAxes, CapableHost()));
+   ASSERT_TRUE(composition.has_value());
+ 
+-  // The persona is windows and the only servable anchor is a macOS/Metal one.
+   EXPECT_EQ("windows", composition->platform);
+-  EXPECT_EQ("test-metal", ChosenId(*composition, "anchor"));
++  EXPECT_EQ("test-d3d11", ChosenId(*composition, "anchor"));
++  // The cluster came with it, so this is not passing on the id alone.
++  EXPECT_EQ(8192, composition->profile.FindDict("gl_limits")
++                      ->FindInt("MAX_TEXTURE_SIZE"));
+ 
+   const SurfaceRecord* record = Record(*composition, "anchor");
+   ASSERT_TRUE(record);
+-  EXPECT_NE(std::string::npos, record->limitation.find("does not move the GPU"))
+-      << "actual limitation: " << record->limitation;
++  EXPECT_TRUE(record->limitation.empty())
++      << "a drawn anchor always matches the persona, so the §4 mismatch "
++         "limitation must not fire: "
++      << record->limitation;
++
++  // A macos persona on the same host draws the Metal anchor, so the anchor is
++  // a function of the persona and not of the seed or the host. No axes here:
++  // the anchor is resolved before any axis, and this fixture's option sets are
++  // keyed on the windows persona alone.
++  ComposeRequest macos =
++      RequestFor("persona-seed", span<const DispersionAxis>(), CapableHost());
++  macos.platform = "macos";
++  const std::optional<Composition> apple = Compose(macos);
++  ASSERT_TRUE(apple.has_value());
++  EXPECT_EQ("test-metal", ChosenId(*apple, "anchor"));
+ }
+ 
+-TEST(ApostateComposeTest, AnAnchorIsRequiredToBeServableByTheHostBackend) {
++// The other half of 0102, and the reason the old assertion was withdrawn: a
++// backend match is not a coherence requirement, because the host's backend is
++// not what a page is being told about. The persona is.
++TEST(ApostateComposeTest, AnAnchorIsNotRequiredToMatchTheHostBackend) {
+   constexpr DispersionAxis kAxes[] = {kOsReleaseAxis};
+-  HostCapability host = CapableHost();
+-  host.graphics_backend = "d3d11";
+ 
+-  // The only compiled anchor is Metal. Presenting its cluster through D3D11 is
+-  // the retired catalogue's exact failure, so there is nothing to fall back to
+-  // and composition declines rather than inventing a cluster.
+-  EXPECT_FALSE(Compose(RequestFor("no-anchor", kAxes, host)).has_value());
++  // A windows persona on a Metal host: the D3D11 cluster is served over a
++  // backend that did not produce it, and composition proceeds.
++  const std::optional<Composition> cross =
++      Compose(RequestFor("cross-backend", kAxes, CapableHost()));
++  ASSERT_TRUE(cross.has_value());
++  EXPECT_EQ("test-d3d11", ChosenId(*cross, "anchor"));
++
++  // Including when the host has no hardware backend at all, which is the
++  // deployment target. Before 0102 this selected the software anchor.
++  HostCapability gpuless = CapableHost();
++  gpuless.graphics_backend = "swiftshader";
++  gpuless.platform = "linux";
++  const std::optional<Composition> software =
++      Compose(RequestFor("gpuless", kAxes, gpuless));
++  ASSERT_TRUE(software.has_value());
++  EXPECT_EQ("test-d3d11", ChosenId(*software, "anchor"));
++
++  // And the mismatch is recorded rather than hidden, because the backend still
++  // decides which extension names the host's GL stack can back.
++  bool reported = false;
++  for (const std::string& limitation : software->limitations) {
++    reported = reported ||
++               limitation.find("cluster on a swiftshader host") !=
++                   std::string::npos;
++  }
++  EXPECT_TRUE(reported) << "a cross-backend cluster must say so";
++}
++
++// The software anchor is excluded by its own rule at the top of the candidate
++// loop, not as a side effect of the absent backend filter, so re-adding any
++// backend preference cannot make it drawable. It is weighted 1000 against the
++// others' 1 here, so a draw that considered it at all would pick it.
++TEST(ApostateComposeTest, TheSoftwareAnchorIsNeverDrawn) {
++  constexpr DispersionAxis kAxes[] = {kOsReleaseAxis};
++  HostCapability gpuless = CapableHost();
++  gpuless.graphics_backend = "swiftshader";
++  gpuless.platform = "linux";
++
++  // Every seed, because this is a property of the candidate set rather than of
++  // one draw, and a single seed could pass by luck.
++  for (int seed = 0; seed < 24; ++seed) {
++    ComposeRequest request =
++        RequestFor("software-" + NumberToString(seed), kAxes, gpuless);
++    const std::optional<Composition> composition = Compose(request);
++    ASSERT_TRUE(composition.has_value()) << "seed " << seed;
++    EXPECT_EQ("test-d3d11", ChosenId(*composition, "anchor")) << "seed " << seed;
++  }
++
++  // Naming it explicitly still serves it, because a pin is an explicit
++  // request: un-defaulted, not removed.
++  ComposeRequest pinned = RequestFor("software-pinned", kAxes, gpuless);
++  pinned.pinned_anchor = "test-swiftshader";
++  const std::optional<Composition> composition = Compose(pinned);
++  ASSERT_TRUE(composition.has_value());
++  EXPECT_EQ("test-swiftshader", ChosenId(*composition, "anchor"));
+ }
+ 
+ // WebGPU is the one part of a capability cluster that is not anchor-wide.
+@@ -592,9 +692,20 @@
+ // the adapter-less members a sibling's adapter would be an unmeasured
+ // assertion, so it stays host-inherited.
+ TEST(ApostateComposeTest, WebGpuComesFromTheResolvedMemberNotTheAnchor) {
++  // A macos persona, because the two members with and without an adapter hang
++  // off the macOS/Metal anchor and patch 0102 made the persona select the
++  // anchor. The assertions below are about WebGPU and are unchanged; only the
++  // persona that reaches those members moved.
++  const auto RequestOnTestMetal = [](std::string seed,
++                                     span<const DispersionAxis> axes) {
++    ComposeRequest request = RequestFor(std::move(seed), axes, CapableHost());
++    request.platform = "macos";
++    return request;
++  };
++
+   constexpr DispersionAxis kWithAdapter[] = {kGpuIdentityWithAdapterAxis};
+   const std::optional<Composition> present =
+-      Compose(RequestFor("webgpu-seed", kWithAdapter, CapableHost()));
++      Compose(RequestOnTestMetal("webgpu-seed", kWithAdapter));
+   ASSERT_TRUE(present.has_value());
+   const DictValue* webgpu = present->profile.FindDict("webgpu");
+   ASSERT_TRUE(webgpu);
+@@ -605,7 +716,7 @@
+ 
+   constexpr DispersionAxis kNoAdapter[] = {kGpuIdentityNoAdapterAxis};
+   const std::optional<Composition> absent =
+-      Compose(RequestFor("webgpu-seed", kNoAdapter, CapableHost()));
++      Compose(RequestOnTestMetal("webgpu-seed", kNoAdapter));
+   ASSERT_TRUE(absent.has_value());
+   EXPECT_FALSE(absent->profile.contains("webgpu"));
+   // The same anchor, so the same GL cluster: it is the WebGPU section alone
+@@ -787,29 +898,6 @@
+   // The insets are an input to the derivation, not a profile field.
+   EXPECT_FALSE(result->contains("avail_inset_left"));
+   EXPECT_FALSE(result->contains("avail_inset_bottom"));
+-}
+-
+-// availLeft is panel-relative: the Windows reference capture ran on a second
+-// monitor at x=1920 and reported availLeft 1920 with a zero inset.
+-TEST(ApostateComposeTest, WorkAreaOriginFollowsThePanelOrigin) {
+-  DictValue profile;
+-  DictValue screen;
+-  screen.Set("left", 1920);
+-  screen.Set("top", 0);
+-  screen.Set("width", 1920);
+-  screen.Set("height", 1080);
+-  screen.Set("avail_inset_left", 0);
+-  screen.Set("avail_inset_top", 0);
+-  screen.Set("avail_inset_right", 0);
+-  screen.Set("avail_inset_bottom", 48);
+-  profile.Set("screen", std::move(screen));
+-
+-  DeriveWorkArea(profile, /*panel_resolved=*/true, nullptr);
+-
+-  const DictValue* result = profile.FindDict("screen");
+-  ASSERT_TRUE(result);
+-  EXPECT_EQ(1920, result->FindInt("avail_left"));
+-  EXPECT_EQ(1032, result->FindInt("avail_height"));
+ }
+ 
+ TEST(ApostateComposeTest, AnInheritedPanelDropsTheEmptyScreenSection) {
+--- a/base/apostate/dispersion_table.h
++++ b/base/apostate/dispersion_table.h
+@@ -136,8 +136,16 @@
+   std::string_view id;
+   std::string_view platform;
+   // Normalised graphics backend: "metal", "d3d11", "d3d9", "vulkan", "gl" or
+-  // "swiftshader". Across backends nothing transfers, so this is what host
+-  // servability is decided on -- not the platform persona.
++  // "swiftshader". Across backends nothing transfers, so a cluster is atomic
++  // per backend and no two are ever mixed.
++  //
++  // It is NOT what host servability is decided on. Patch 0102 made the claimed
++  // platform select the anchor, because the host's own backend is not what a
++  // page is being told about; within a platform the catalogue holds exactly one
++  // backend, so choosing the persona determines this field anyway. What it is
++  // still read for is the "swiftshader" value, which names the one anchor the
++  // draw must never choose, and for the limitation that records a cluster
++  // served over a backend that did not produce it.
+   std::string_view backend;
+   std::string_view vendor;
+   std::string_view evidence;

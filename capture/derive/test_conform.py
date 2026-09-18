@@ -74,6 +74,59 @@ class ConformTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("ERROR webrtc.ice", output)
 
+    def test_render_surface_contradicting_its_own_repeat_read_fails(self):
+        # coh.render-determinism. The field diff itself passes here: both sides
+        # report the same first read, and only the subject's SECOND read of a
+        # render surface differs. Before DETERMINISM_REQUIRED that made the
+        # probe volatile and skipped it, so the run reported conformance.
+        reference, subject = capture(), capture()
+        reference["probes"]["canvas.2d"] = {"ok": True, "value": {"pixels_sha256": "a"}}
+        subject["probes"]["canvas.2d"] = {"ok": True, "value": {"pixels_sha256": "a"}}
+        subject["repeat"] = {"canvas.2d": {"ok": True, "value": {"pixels_sha256": "b"}}}
+        status, output = self.compare(reference, subject)
+        self.assertEqual(status, 1)
+        self.assertIn("coh.render-determinism", output)
+        self.assertIn("1 non-deterministic", output)
+
+    def test_non_render_probe_still_earns_the_volatility_exemption(self):
+        # The escape hatch is not removed, only withdrawn from the five render
+        # surfaces: a probe that really does move between reads on real
+        # hardware must still not hold the subject to a value the hardware
+        # does not reproduce.
+        reference, subject = capture(), capture()
+        for one in (reference, subject):
+            one["probes"]["speech.voices"] = {"ok": True, "value": 1}
+            one["repeat"] = {"speech.voices": {"ok": True, "value": 2}}
+        subject["probes"]["speech.voices"]["value"] = 99
+        self.assertEqual(self.compare(reference, subject)[0], 0)
+
+
+class LedgerClaimTests(unittest.TestCase):
+    """The ledger claim that these five probes enforce coh.render-determinism.
+
+    ledger/coherence.jsonl names five `v3-probe` sites for that edge, and the
+    schema's assignment rule permits that kind only where a V3 run decides the
+    edge. Here, it does so only because DETERMINISM_REQUIRED withdraws the
+    volatility exemption from exactly those five probes. That dependency runs
+    across two files and check-schema-wiring.py deliberately never reads this
+    one, so without this test the rule is prose in two places and a control in
+    neither: deleting DETERMINISM_REQUIRED would leave the ledger asserting an
+    enforcement that had stopped existing, which is the same shape of stale
+    claim the row was opened about.
+    """
+
+    def sites(self):
+        ledger = pathlib.Path(__file__).resolve().parents[2] / "ledger" / "coherence.jsonl"
+        for line in ledger.read_text(encoding="utf-8").splitlines():
+            row = json.loads(line)
+            if row.get("id") == "coh.render-determinism":
+                return {entry["site"].split(":", 1)[1]
+                        for entry in row["enforced_by"] if entry["kind"] == "v3-probe"}
+        self.fail("ledger/coherence.jsonl has no coh.render-determinism row")
+
+    def test_cited_probes_are_exactly_the_probes_held_to_their_repeat_read(self):
+        self.assertEqual(self.sites(), conform.DETERMINISM_REQUIRED)
+
 
 class IceTests(unittest.TestCase):
     def sample(self, foundations=("15", "20", "15")):

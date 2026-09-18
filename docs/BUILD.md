@@ -79,6 +79,7 @@ The build scripts share workspace and tool paths through `scripts/lib.sh`.
 | `scripts/series-gate-report.py` | Classify one gate run's results and decide its verdict |
 | `scripts/series_absences.py` | Resolve an include-only file to its includer, and classify a declared absence |
 | `scripts/series-absences.tsv` | Declared absences: the files a target legitimately builds no object from, with the GN condition as evidence |
+| `scripts/series-symbol-closure.py` | Prove the symbol closure of every library a patch adds GN sources to |
 | `scripts/verify-reproducible.sh` | Compare clean-build output hashes |
 
 On Linux, `scripts/fetch-sources.sh` treats a failed Chromium build-dependency
@@ -358,6 +359,68 @@ the declared absences are not. A file covered by no merged platform is a defect
 rather than a platform fact — a patch edits it and nothing compiles it — and
 the merge reports that only once the reports it was given cover Linux, macOS
 and Windows.
+
+### Symbol closure over a library a patch adds sources to
+
+Compiling proves a translation unit is well formed. It does not prove the
+library it joined can still resolve its own symbols, and the gate's unit list
+cannot reach the difference: a file **listed** in GN rather than **patched** is
+outside the list by construction. Patch `0109` is the live case. Its arm64 leg
+adds nine objects for ffmpeg's HEVC SIMD path, three of them under
+`libavcodec/aarch64/h26x` with no `hevc` anywhere in their names, and dropping
+those three leaves 355 undefined `ff_hevc_put_hevc_*` symbols while every
+translation unit still compiles clean. Adding them to the unit list would not
+help either: `//third_party/ffmpeg:ffmpeg_internal` is a `static_library`
+whenever `is_component_ffmpeg` is false, which `build/args/linux-arm64.gn:12`
+makes it, so ninja stops at `alink` and an archive resolves nothing.
+
+`scripts/series-symbol-closure.py` asks one bounded question per affected
+library — deliberately not "everything a patch's GN edit pulls in", which is
+the whole build:
+
+```text
+undefined(objects the patch added)
+  - defined(every member of the library)
+  - undefined(members the patch did not add)
+```
+
+What survives is then split by asking the object files, never by guessing from
+source text. A symbol another archive **defines** is supplied by another
+library. A symbol other archives **reference** and nothing defines is supplied
+by the platform — measured on the real `macos-arm64` output, `__stderrp` is
+referenced as undefined by 33 archives, `__stdoutp` by 13 and `fputs` by 7.
+A symbol that no archive defines and no other archive references is one this
+series' objects are alone in wanting and nothing can supply, which is what a
+source missing from a GN list looks like.
+
+An earlier version searched the library's source tree for a textual
+definition. It was wrong in both directions — it read `fputs(...)` in
+`base/i18n/build_utf8_validator_tables.cc` as a definition when it is a call,
+and it would have missed ffmpeg's aarch64 assembly entirely, where definitions
+come from a `function ff_hevc_put_hevc_qpel_h4_8_neon` macro and look nothing
+like C.
+
+Which library a source lands in comes from the compile database, so no list
+name or target mapping is hardcoded. One restriction applies: when the patch
+**declares** the target it adds the source to, only that target counts.
+Patches `0057` and `0063` add angle's pre-existing `test_utils/ANGLETest.cpp`
+into targets they declare themselves, and that source is compiled into three
+other angle test libraries on platforms where the new target does not exist;
+closing over those would report their unrelated undefined symbols as this
+series' fault.
+
+The check runs as phase 1e (plan, and join the archives to the build) and
+phase 5 (the closure itself) of `scripts/checkseries.sh`, after the
+classification report so that a compile failure is read first — an unresolved
+symbol in a library whose sources did not compile is a consequence, not a
+finding. Cost is one extra ninja target and two `nm` passes per library,
+measured at 13s and 12s over the 2,209 archives of a full `macos-arm64`
+output.
+
+It fails when a required object is missing, and equally when it had nothing to
+measure: a missing archive, an archive with no members, or a library none of
+whose members are the objects we set out to check. A closure that ran on
+nothing must never be reportable as a clean closure.
 
 `.github/workflows/series-gate.yml` runs the gate on `linux-x64` and
 `windows-x64` by default, weekly and on dispatch. It needs bootstrap, sync,

@@ -57,13 +57,34 @@ VOLATILE_PATHS = {
     ("screen.geometry", "availWidth"),
 }
 
+# Render surfaces that may never earn a volatility exemption by disagreeing
+# with themselves. coh.render-determinism, severity fatal: real hardware draws
+# the same scene the same way twice, so a surface whose second read differs has
+# lost determinism, and per-call noise violates the axiom by construction.
+#
+# This set exists because the escape hatch below used to swallow exactly that.
+# A probe that disagreed with its own repeat read was added to the volatile set
+# and then skipped, so a fork that perturbed its canvas produced a CLEANER
+# report the more it drifted: the noisy surfaces excused themselves and the
+# remaining comparison passed. The divergence is now a reported failure on
+# whichever side produced it, which is what makes the row's claim falsifiable.
+DETERMINISM_REQUIRED = {
+    "canvas.2d",
+    "webgl1",
+    "webgl2",
+    "audio.offline_render",
+    "clientrects",
+}
+
 
 def measured_volatility(capture):
     """Probes that disagreed with themselves within one session.
 
     Measured rather than assumed: if a field moved on real hardware between two
     reads, requiring it to match across browsers would be requiring something
-    the hardware itself does not do.
+    the hardware itself does not do. The render surfaces are the exception and
+    are handled by determinism_failures() instead — for them, disagreeing with
+    the second read is the defect rather than the excuse.
     """
     unstable = set()
     probes, repeat = capture.get("probes", {}), capture.get("repeat", {})
@@ -72,8 +93,34 @@ def measured_volatility(capture):
         if not (first and first.get("ok") and second.get("ok")):
             continue
         if json.dumps(first["value"], sort_keys=True) != json.dumps(second["value"], sort_keys=True):
+            if pid in DETERMINISM_REQUIRED:
+                continue
             unstable.add(pid)
     return unstable
+
+
+def determinism_failures(capture):
+    """-> [(probe id, [(path, first, repeat)])] for every render surface that
+    did not reproduce its own first read.
+
+    The second read is a genuine recomputation rather than a re-read of a
+    retained result: the collector runs the whole probe again, which for these
+    five means a new canvas element, a new WebGL context with recompiled
+    shaders, a new OfflineAudioContext and a freshly built and detached DOM
+    subtree. So a surface that perturbs per call has two independent chances to
+    show it, and one that does not is measured as deterministic rather than
+    assumed to be.
+    """
+    out = []
+    probes, repeat = capture.get("probes", {}), capture.get("repeat", {})
+    for pid in sorted(DETERMINISM_REQUIRED):
+        first, second = probes.get(pid), repeat.get(pid)
+        if not (first and second and first.get("ok") and second.get("ok")):
+            continue
+        mismatches = list(diff(first["value"], second["value"]))
+        if mismatches:
+            out.append((pid, mismatches))
+    return out
 
 
 # Headers whose value describes the capture server rather than the browser.
@@ -186,6 +233,14 @@ def main() -> int:
 
     volatile = ALWAYS_VOLATILE | measured_volatility(ref) | measured_volatility(sub)
 
+    # coh.render-determinism, decided rather than excused. A render surface
+    # that disagrees with its own second read is a defect on whichever side
+    # produced it, so it is reported before the cross-capture comparison: the
+    # comparison's premise is that each side reproduces itself.
+    determinism = [(side, pid, mismatches)
+                   for side, capture in (("reference", ref), ("subject", sub))
+                   for pid, mismatches in determinism_failures(capture)]
+
     # A profile is only replayable by a binary of the same browser build.
     # Apostate deliberately does not spoof its own version — the binary really
     # is the Chromium it reports, and claiming otherwise would require behaving
@@ -284,6 +339,18 @@ def main() -> int:
             print(f"        … {len(mismatches) - args.max_per_probe} more")
         print()
 
+    for side, pid, mismatches in determinism:
+        print(f"FAIL  {pid}   ({len(mismatches)} field(s) differ between the {side}'s "
+              f"own two reads; coh.render-determinism)")
+        for p, a, b in mismatches[:args.max_per_probe]:
+            loc = ".".join(p) if p else "<value>"
+            print(f"        {loc}")
+            print(f"          first  : {truncate(a)}")
+            print(f"          repeat : {truncate(b)}")
+        if len(mismatches) > args.max_per_probe:
+            print(f"        … {len(mismatches) - args.max_per_probe} more")
+        print()
+
     if version_derived:
         n = sum(len(m) for _, m in version_derived)
         print(f"version-derived, not counted as failures "
@@ -309,12 +376,13 @@ def main() -> int:
     total = len(passed) + len(failed) + len(errored)
     result_label = "probes conform" if build_comparable else "probes match (diagnostic)"
     print(f"{len(passed)}/{total} {result_label}    {len(failed)} failed    "
-          f"{len(errored)} errored    {len(skipped)} volatile")
+          f"{len(errored)} errored    {len(skipped)} volatile    "
+          f"{len(determinism)} non-deterministic")
 
     if not build_comparable:
         print("INCOMPLETE: matching full browser builds are required for V3.")
         return 2
-    return 0 if not failed and not errored else 1
+    return 0 if not failed and not errored and not determinism else 1
 
 
 if __name__ == "__main__":

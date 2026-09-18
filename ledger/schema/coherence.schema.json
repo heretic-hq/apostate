@@ -39,7 +39,7 @@
     },
     "enforced_by": {
       "type": "array",
-      "description": "Every gate that actually makes this invariant hold, and nothing else. An EMPTY ARRAY means nothing enforces the edge; that is a legitimate and common value, it is counted and printed by scripts/check-schema-wiring.py on every run, and it is never a failure. The field is required so that a row cannot drop out of that count by omission. Assignment rules, so the array is not an opinion: `resolver` where composition cannot emit a profile that violates the invariant; `patch` where either every member surface is served by one single profile field that a sequenced patch reads, so the members have one source and cannot disagree, or the patch directly implements the invariant; `v3-probe` where every observable the statement names is recorded in that probe AND none of them is excluded by conform.py's ALWAYS_VOLATILE or VOLATILE_PATHS, so a V3 diff against the reference device decides the edge.",
+      "description": "Every gate that actually makes this invariant hold, and nothing else. An EMPTY ARRAY means nothing enforces the edge; that is a legitimate and common value, it is counted and printed by scripts/check-schema-wiring.py on every run, and it is never a failure. The field is required so that a row cannot drop out of that count by omission. Assignment rules, so the array is not an opinion: `resolver` where composition cannot emit a profile that violates the invariant; `patch` where either every member surface is served by one single profile field that a sequenced patch reads, so the members have one source and cannot disagree, or the patch directly implements the invariant; `v3-probe` where every observable the statement names is recorded in that probe AND none of them is excluded by conform.py's ALWAYS_VOLATILE or VOLATILE_PATHS, so a V3 diff against the reference device decides the edge; `coherence-gate` where the statement is a relation inside ONE running browser that no diff against a reference can decide - either because its operands are the window state conform.py excludes by design, or because the observable it needs is in no capture at all - and capture/derive/coherence.py evaluates it from measured operands and fails on violation.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -53,13 +53,14 @@
             "enum": [
               "resolver",
               "patch",
-              "v3-probe"
+              "v3-probe",
+              "coherence-gate"
             ]
           },
           "site": {
             "type": "string",
             "minLength": 1,
-            "description": "resolver: 'scripts/profile_resolver.py:<function>', which must exist, be called in that file, and carry a '# coh: <this row's id>' marker comment on the condition that enforces this edge - the marker is what keeps the claim falsifiable when the condition is deleted. patch: an entry exactly as it appears in patches/series, which must also exist on disk. v3-probe: 'capture/collector/collector.js:<probe id>', a probe id the collector registers."
+            "description": "resolver: 'scripts/profile_resolver.py:<function>', which must exist, be called in that file, and carry a '# coh: <this row's id>' marker comment on the condition that enforces this edge - the marker is what keeps the claim falsifiable when the condition is deleted. patch: an entry exactly as it appears in patches/series, which must also exist on disk. v3-probe: 'capture/collector/collector.js:<probe id>', a probe id the collector registers. coherence-gate: 'capture/derive/coherence.py:<edge id>', an edge the gate registers a check for, and it must be THIS row's edge - the same falsifiability rule as the resolver marker, so a row cannot borrow a neighbouring edge's check and survive deleting its own."
           },
           "note": {
             "type": "string"

@@ -75,6 +75,13 @@ ABSENCE_TOOL="$REPO_ROOT/scripts/series_absences.py"
 [ -f "$ABSENCE_TOOL" ] || die "missing $ABSENCE_TOOL"
 REPORT_TOOL="$REPO_ROOT/scripts/series-gate-report.py"
 [ -f "$REPORT_TOOL" ] || die "missing $REPORT_TOOL"
+CLOSURE_TOOL="$REPO_ROOT/scripts/series-symbol-closure.py"
+[ -f "$CLOSURE_TOOL" ] || die "missing $CLOSURE_TOOL"
+# Chromium's own llvm-nm, for the same reason the gate uses Chromium's ninja:
+# the host's nm may not read this target's objects at all, and on a Windows
+# runner there is no system nm. `.exe` is tolerated so one path serves both.
+NM_BIN="$SRC/third_party/llvm-build/Release+Asserts/bin/llvm-nm"
+[ -x "$NM_BIN" ] || NM_BIN="$NM_BIN.exe"
 
 # Linux compiles inside the pinned container, exactly as build.sh and
 # checkfile.sh do. Compiling against the host's libraries would answer a
@@ -445,6 +452,33 @@ if [ "${#absent[@]}" -gt 0 ]; then
     say "phase 1d: ${#includer_objects[@]} includer object(s) join the compile set"
 fi
 
+# Phase 1e -- the libraries a GN source addition lands in.
+#
+# Compiling proves a translation unit is well formed; it does not prove the
+# library it joined can still resolve its own symbols. Patch 0109 adds nine
+# objects for ffmpeg's aarch64 HEVC path, three of them under
+# libavcodec/aarch64/h26x with no "hevc" in their names, and dropping those
+# three leaves 355 undefined ff_hevc_put_hevc_* symbols while every unit still
+# compiles clean. Those files are listed in GN rather than patched, so the unit
+# list cannot see them, and //third_party/ffmpeg:ffmpeg_internal is a
+# static_library in this configuration, so ninja stops at alink and an archive
+# resolves nothing.
+#
+# So the archive of each affected library joins the build and phase 5 asks nm
+# whether the added objects' references are satisfiable. One extra ninja target
+# per library, and the library's own objects are mostly prerequisites of the
+# series objects already being built.
+closure_archives=()
+if [ "$MODE" != "list" ]; then
+  while IFS= read -r archive; do
+    [ -n "$archive" ] || continue
+    closure_archives+=("$archive")
+    objects+=("$archive")
+  done < <(python3 "$CLOSURE_TOOL" plan --root "$REPO_ROOT" --source-index "$SOURCE_INDEX")
+  [ "${#closure_archives[@]}" -eq 0 ] ||
+    say "phase 1e: ${#closure_archives[@]} library archive(s) join the build for symbol closure"
+fi
+
 ninja_exit=0
 if [ "$MODE" = "list" ]; then
   say "list mode: ${#in_graph[@]} unit(s) in the graph, ${#absent[@]} absent; nothing compiled"
@@ -522,8 +556,8 @@ if [ "${#includer_objects[@]}" -gt 0 ]; then
   fi
 fi
 
-# Not exec: the EXIT trap that removes $WORK has to run, and this is the last
-# command either way, so its status is the gate's.
+# Not exec: the EXIT trap that removes $WORK has to run.
+report_status=0
 python3 "$REPORT_TOOL" \
   --units "$UNITS" \
   --map "$MAP" \
@@ -539,4 +573,20 @@ python3 "$REPORT_TOOL" \
   --mode "$MODE" \
   --ninja-exit "$ninja_exit" \
   --jobs "$JOBS" \
-  --root "$REPO_ROOT"
+  --root "$REPO_ROOT" || report_status=$?
+
+# Phase 5 -- symbol closure over the libraries phase 1e named.
+#
+# After the report, so a compile failure is read first: an unresolved symbol in
+# a library whose sources did not compile is a consequence, not a finding.
+closure_status=0
+if [ "${#closure_archives[@]}" -gt 0 ]; then
+  echo
+  python3 "$CLOSURE_TOOL" check \
+    --root "$REPO_ROOT" \
+    --source-index "$SOURCE_INDEX" \
+    --out "$OUT" \
+    --nm "$NM_BIN" || closure_status=$?
+fi
+
+[ "$report_status" -eq 0 ] && [ "$closure_status" -eq 0 ]

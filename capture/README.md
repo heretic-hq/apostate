@@ -44,6 +44,8 @@ schema/capture.schema.json   Native lossless capture format
 collector/                   The measurement page. No dependencies, no build step
 server/receive.py            Local receiver; writes raw captures to disk
 derive/conform.py            Diffs one capture against another — the V3 gate
+derive/coherence.py          Decides the invariants a diff cannot — the coherence gate
+coherence/probe.html         Operands for the single-binary invariants
 collect-unattended.py        Takes a capture on a host with no display
 ```
 
@@ -153,6 +155,79 @@ On a display-less Linux host running SwiftShader under Xvfb, stock Chrome 152:
 audio renders byte-identical. A software rasteriser is as deterministic as the
 hardware here, which is what makes such a host usable as a conformance runner
 even though it is useless as a hardware reference.
+
+## Collector generations, and the eighteen stranded captures
+
+Every capture records the sha256 of the `collector.js` that measured it.
+`conform.py` refuses to compare two captures whose hashes differ, and
+`import-capture.py` refuses to admit a capture the collector in this tree did
+not produce. Both rules are right: two collector versions measured different
+things, and comparing them silently would be comparing two number systems.
+
+The cost of those rules was never tracked, and it has already been paid. The
+collector has changed five times and no capture was ever migrated, so the 26
+admitted captures in `resources/fingerprints/raw/` are split across five
+instruments:
+
+| collector  | captures | what is in it                                                |
+|------------|----------|--------------------------------------------------------------|
+| `6385f36c` | 9        | the first M4 Max and Linux sweep, plus three Apostate runs    |
+| `6b9f3004` | 5        | M4 Max battery/incognito matrix, `win-intel-uhd630`           |
+| `c856a603` | 3        | three early `apple-m4-max` reads                              |
+| `91fe5c48` | 1        | `apple-m4-max-20260907T083721Z`                               |
+| `a19ad58d` | 8        | **the only generation a capture taken today can be compared against**: `m4-max-chrome-20260908T163229Z`, `windows-chrome-20260910T140813Z`, four `linux-nvidia` hosts and two `windows-nvidia` hosts |
+
+So the comparable reference set is eight captures, four of them on borrowed
+NVIDIA hosts and one on a Windows machine, none of which should be assumed
+retakeable. The other eighteen remain valid evidence for the surfaces they were
+read for — the bytes are what those devices emitted — but no V3 run can use
+them, and nothing warns when a row depends on one. It does: the ledger's two
+most-cited T0 captures, `apple-m4-max-20260907T083721Z` (110 citations) and
+`apple-m4-max-20260907T033252Z` (99), are both on stranded generations.
+
+**Adding a probe to the collector therefore costs the whole reference set**, and
+that is why the coherence gate below is a separate instrument rather than five
+more probes. If we ever do want to add one, the path to keeping the references
+comparable is known and deliberately not taken yet:
+
+1. Relax `conform.py`'s hash equality to "equal, or the subject's collector is a
+   declared superset of the reference's", iterating the reference's probe ids as
+   it already does.
+2. Gate that relaxation on a **measurement, never a declaration**: run the old
+   and the new collector against the same binary on the same host and diff every
+   probe the old one carries. All identical proves the addition did not perturb a
+   shared resource, change timing or allocate GPU memory some later probe reads.
+   A hand-written "this change was additive" table is exactly the silent
+   invalidation these rules exist to refuse.
+
+## Deciding coherence edges
+
+`derive/coherence.py` decides the `ledger/coherence.jsonl` invariants that a
+field diff cannot, and is named in those rows as
+`capture/derive/coherence.py:<edge id>`. Some relations hold over window
+position and size, which `conform.py` excludes from comparison by design because
+window geometry is the user's choice rather than the device's identity; others
+need an observable no capture records. Both kinds have to be decided inside one
+running browser against no reference at all.
+
+```sh
+capture/derive/coherence.py live --browser out/Release/chrome --profile PROFILE.json
+capture/derive/coherence.py capture resources/fingerprints/raw/<name>.json
+capture/derive/coherence.py pair A.json B.json
+```
+
+`live` serves `coherence/probe.html`, launches the browser at it headed — under
+`xvfb-run` on Linux, the configuration `scripts/run-v3.sh` uses, because every
+clause about a window rect is meaningless without a window — and decides the
+single-binary edges. `capture` decides `coh.render-determinism` from one
+capture's two reads. `pair` decides the two-profile edge.
+
+The outcome vocabulary matters more than it looks. `INCONCLUSIVE` means the
+right inputs were supplied and the run did not exercise the invariant: two runs
+that claim the same audio hardware agree on every render hash, and reporting
+that as a pass would be a check that passes on correct and broken input alike.
+`SKIP` means this mode cannot decide this edge at all. Neither is a pass, and
+only `INCONCLUSIVE` affects the exit status (2).
 
 ## Format
 

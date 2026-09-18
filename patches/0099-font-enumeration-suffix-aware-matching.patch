@@ -12,13 +12,13 @@ allowlist naming Arial and not Arial Narrow made 0090 hide a family every real
 Windows machine with Arial reports, which is a machine that cannot exist.
 
 The same behaviour exists on Linux and is ours: WindowsStretchSuffix in
-skia/font_cache_skia.cc emulates the stretch table for a Windows persona,
-guarded on the profile's claimed platform. There is no weight emulation there,
-so this mirrors only what is actually emulated. macOS does none of it, and that
-is not an omission: CoreText enumerates "Avenir Next" and "Avenir Next
-Condensed" as separate families, so hiding one while showing the other is a
-claim a Mac can make, and stripping there would decline to hide a family the
-profile legitimately excluded.
+third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc emulates the
+stretch table for a Windows persona, guarded on the profile's claimed platform.
+There is no weight emulation there, so this mirrors only what is actually
+emulated. macOS does none of it, and that is not an omission: CoreText
+enumerates "Avenir Next" and "Avenir Next Condensed" as separate families, so
+hiding one while showing the other is a claim a Mac can make, and stripping
+there would decline to hide a family the profile legitimately excluded.
 
 Fixing this in the catalogue was considered and rejected. Mirroring twenty-one
 suffixes per family in data multiplies the non-macOS allowlists by twenty-two

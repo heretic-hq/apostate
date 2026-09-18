@@ -56,12 +56,15 @@ not do:
                               supposed to be derived FROM the ledger, so a key
                               no row asked for is a surface with no verification
                               tier, no evidence and no coherence edge.
-  7. CITED PATH IS ABSENT     a Chromium source path a ledger row cites that
+  7. CITED PATH IS ABSENT     a Chromium source path this repository cites that
                               .workspace/src does not have, no sequenced patch
                               creates, and no unsynced DEPS checkout could
-                              explain. Nobody can open the evidence. Its
-                              sibling finding, CITED AS UPSTREAM, is a path that
-                              resolves only because the series is applied.
+                              explain. Nobody can open the evidence. Read from
+                              ledger/*.jsonl, scripts/*.tsv, docs/**/*.md code
+                              spans, and patches/*.patch header prose -- never
+                              from a diff body. Its sibling finding, CITED AS
+                              UPSTREAM, is a path that resolves only because
+                              the series is applied.
 
     python3 scripts/check-schema-wiring.py            # report, exit 1 on a finding
     python3 scripts/check-schema-wiring.py --verbose  # plus every resolved read
@@ -355,10 +358,16 @@ LEDGER = ROOT / "ledger" / "surfaces.jsonl"
 COHERENCE = ROOT / "ledger" / "coherence.jsonl"
 RESOLVER = ROOT / "scripts" / "profile_resolver.py"
 COLLECTOR = ROOT / "capture" / "collector" / "collector.js"
+# The single-binary coherence gate, instrument for the "coherence-gate" kind.
+GATE = ROOT / "capture" / "derive" / "coherence.py"
 
 # Check 7 reads the pinned mapping checkout, and reads nothing else from it.
 WORKSPACE = ROOT / ".workspace" / "src"
 LEDGER_DIR = ROOT / "ledger"
+# Check 7's other three citation sources. Declarations, docs and patch headers
+# carry paths a reader is expected to open, and until now nothing resolved them.
+SCRIPTS_DIR = ROOT / "scripts"
+DOCS_DIR = ROOT / "docs"
 # Chromium's build directory. Everything under it is generated, and which of it
 # exists depends on what this machine has built, so it is never source.
 BUILD_ROOT = "out"
@@ -424,7 +433,7 @@ X_LEDGER_REASONS = {
 # Coherence edges: what really enforces each one. `check` is prose nothing
 # evaluates (see the header), so the field this gate resolves is the site.
 ENFORCED_BY = "enforced_by"
-ENFORCEMENT_KINDS = ("resolver", "patch", "v3-probe")
+ENFORCEMENT_KINDS = ("resolver", "patch", "v3-probe", "coherence-gate")
 UNBUILT_DEPENDENCY = "unbuilt_dependency"
 UNBUILT_DEPENDENCY_REASONS = {
     # The invariant names a profile key config/profile.schema.json does not
@@ -469,6 +478,11 @@ URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
 DEPS_KEY_RE = re.compile(r"\s{2}'src/(?P<path>[^']+)'\s*:")
 # A patch hunk that creates a file, which is how the fork declares what it owns.
 PATCH_ADDS_RE = re.compile(r"^--- /dev/null\n\+\+\+ b/(.+)$", re.M)
+# Markdown code, which is where this repository's docs put a path a reader is
+# meant to open. Both fence styles, and inline spans matched non-greedily so
+# two spans on one line stay two.
+FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 
 # `probe("keyboard.layout", { deterministic: true }, ...)` in the collector.
 PROBE_RE = re.compile(r"\bprobe\(\s*\"([^\"]+)\"")
@@ -481,6 +495,11 @@ COH_MARKER_RE = re.compile(r"#\s*coh:\s*(?P<id>[A-Za-z0-9][A-Za-z0-9_.\-]*)")
 RESOLVER_SITE_RE = re.compile(r"^scripts/profile_resolver\.py:(?P<fn>[A-Za-z_][A-Za-z0-9_]*)$")
 # `capture/collector/collector.js:keyboard.layout` -> the probe id half.
 PROBE_SITE_RE = re.compile(r"^capture/collector/collector\.js:(?P<probe>\S+)$")
+# `capture/derive/coherence.py:coh.window-within-avail-rect` -> the edge id half.
+GATE_SITE_RE = re.compile(
+    r"^capture/derive/coherence\.py:(?P<edge>coh\.[a-z0-9]+(?:[.-][a-z0-9]+)*)$")
+# `check("coh.window-within-avail-rect", ...)` in the gate, same idiom as PROBE_RE.
+GATE_CHECK_RE = re.compile(r"\bcheck\(\s*\"([^\"]+)\"")
 
 # The token half of an `evidence` reference has to be something a reader can
 # search for. A dotted or dashed identifier is; the wildcard is not, so a row
@@ -1196,7 +1215,14 @@ def registered_probes():
     return set(PROBE_RE.findall(COLLECTOR.read_text(encoding="utf-8", errors="replace")))
 
 
-def enforcement_problem(edge, entry, facts, probes, series):
+def registered_checks():
+    """-> {edge id} the coherence gate actually registers."""
+    if not GATE.is_file():
+        return set()
+    return set(GATE_CHECK_RE.findall(GATE.read_text(encoding="utf-8", errors="replace")))
+
+
+def enforcement_problem(edge, entry, facts, probes, checks, series):
     """Does this enforced_by entry name a site that exists?"""
     if not isinstance(entry, dict):
         return f"{ENFORCED_BY} entries must be objects carrying kind and site"
@@ -1230,6 +1256,33 @@ def enforcement_problem(edge, entry, facts, probes, series):
                     f"and enforces nothing")
         if not (PATCH_DIR / site).is_file():
             return f"patches/{site} is not on disk"
+        return None
+
+    if kind == "coherence-gate":
+        # A relation that must hold inside ONE live browser -- a window rect
+        # inside its work area, a rect against computed style, a resolved
+        # timezone in the supported set. It cannot be a v3-probe: the
+        # assignment rule for that kind requires none of the named observables
+        # be excluded by conform.py, and screen.geometry's screenX, screenY,
+        # outerWidth, outerHeight, availWidth and availHeight are all in
+        # VOLATILE_PATHS -- correctly, because a diff between two captures
+        # cannot decide a relation over window-state values. The instrument is
+        # a single-binary check, so it gets its own kind.
+        match = GATE_SITE_RE.match(site)
+        if not match:
+            return (f"a coherence-gate site is spelled "
+                    f"'capture/derive/coherence.py:<edge id>'; {site!r} is not")
+        # The site must name this row's OWN edge. Without it a row can borrow a
+        # neighbouring edge's check and the claim survives deleting the very
+        # thing it claims -- the same hole the resolver '# coh:' marker closes.
+        if match.group("edge") != edge:
+            return (f"{site!r} names {match.group('edge')}, not this row's edge {edge}, so "
+                    f"the row claims a check that decides a different invariant")
+        if not GATE.is_file():
+            return "capture/derive/coherence.py is not on disk"
+        if match.group("edge") not in checks:
+            return (f"capture/derive/coherence.py registers no check for {edge}, so nothing "
+                    f"evaluates this invariant")
         return None
 
     match = PROBE_SITE_RE.match(site)
@@ -1297,6 +1350,93 @@ def ledger_lines():
                 row = None
             out.append((rel, lineno, line, row))
     return out
+
+
+def patch_header_prose(text):
+    """-> [(lineno, line)] for the prose above the first diff line.
+
+    The boundary is the whole point. Everything from the first diff line down
+    is patch CONTENT: hunk bodies carry `#include "third_party/..."`, context
+    lines naming real files, and added source that mentions paths it does not
+    cite. None of that is a citation -- it is the code being changed -- and
+    extracting from it would produce hundreds of findings against a clean tree,
+    at which point the check gets switched off and protects nothing.
+
+    `--- ` and `+++ ` are matched with their trailing space so the bare `---`
+    that git format-patch puts before a diffstat cannot end the prose early;
+    the diffstat itself is prose worth reading, and its elided
+    `.../x64/libavcodec/codec_list.c` form is discarded downstream because
+    `...` is not an entry at the checkout root.
+
+    Several patches have no prose at all -- 0061 opens on `diff --git` -- and
+    an empty result is the correct answer for those, not a reason to look
+    harder.
+    """
+    out = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if line.startswith(("diff --git ", "--- ", "+++ ", "@@ ")):
+            break
+        out.append((lineno, line))
+    return out
+
+
+def markdown_citations(text):
+    """-> [(lineno, text)] for fenced blocks and inline code spans only.
+
+    Markdown is prose and will contain deliberate non-paths: an illustrative
+    `foo/bar.cc`, a filename in a sentence that names a shape rather than a
+    file. Scanning bare prose would make the check fire on an example, and a
+    check that fires on examples is one people learn to ignore.
+
+    A citation someone expects a reader to open is written as code in this
+    repository's docs -- `docs/BUILD.md` cites every script and source path
+    that way -- so restricting to code spans costs no real coverage and buys
+    the whole false-positive class. The narrower rule was chosen over scanning
+    prose for exactly that trade.
+    """
+    out = []
+    fenced = False
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if FENCE_RE.match(line):
+            fenced = not fenced
+            continue
+        if fenced:
+            out.append((lineno, line))
+            continue
+        spans = INLINE_CODE_RE.findall(line)
+        if spans:
+            # Joined with a space, which the extractor's lookaround treats as a
+            # boundary, so two adjacent spans cannot be read as one path.
+            out.append((lineno, " ".join(spans)))
+    return out
+
+
+def prose_lines():
+    """-> ([(file, lineno, text, None)], {source: line count}) for the non-ledger sources.
+
+    Same shape ledger_lines() returns, so one extractor and one resolution loop
+    serve all four. The fourth element is None because these lines are not JSON
+    rows and carry no annotation.
+    """
+    out = []
+    counted = {"tsv": 0, "markdown": 0, "patch": 0}
+
+    def add(rel, pairs, kind):
+        for lineno, text in pairs:
+            out.append((rel, lineno, text, None))
+        counted[kind] += len(pairs)
+
+    for path in sorted(SCRIPTS_DIR.glob("*.tsv")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        pairs = list(enumerate(text.splitlines(), 1))
+        add(path.relative_to(ROOT).as_posix(), pairs, "tsv")
+    for path in sorted(DOCS_DIR.rglob("*.md")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        add(path.relative_to(ROOT).as_posix(), markdown_citations(text), "markdown")
+    for path in sorted(PATCH_DIR.glob("*.patch")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        add(path.relative_to(ROOT).as_posix(), patch_header_prose(text), "patch")
+    return out, counted
 
 
 def cited_paths(lines, roots):
@@ -1517,7 +1657,23 @@ def generated_path_problem(entry):
 
 
 def check_citations():
-    """-> (findings, tally). Every Chromium path the ledger cites must resolve.
+    """-> (findings, tally). Every Chromium path this repository cites must resolve.
+
+    Four sources, because a citation nothing reads is a citation nothing
+    protects. The ledger was the first, and widening to the other three was
+    prompted by two demonstrations on one day: a relay that said Windows reads
+    chromium/config/Chrome/win-msvc/x64 when build/args/windows-x64.gn sets
+    is_clang and so it reads win/x64, and the same error restated in a message.
+    Both were caught by a human reading carefully, which is not a control.
+
+      ledger/*.jsonl        every line; rows may also carry an exception
+      scripts/*.tsv         every line, comments included -- the evidence
+                            column of scripts/series-absences.tsv is nothing
+                            but citations, and its header comments cite too
+      docs/**/*.md          fenced blocks and inline code spans only, never
+                            bare prose; see markdown_citations()
+      patches/*.patch       the header prose only, never the diff; see
+                            patch_header_prose()
 
     Skipped, loudly, without a pinned checkout: CI runs these gates with no
     36 GB of somebody else's code, and a check that silently passed there would
@@ -1526,16 +1682,26 @@ def check_citations():
     tally = {
         "skipped": None, "cited": 0, "local": 0, "pinned": 0, "fork": 0,
         "unsynced": [], "excused": 0, "revision": True, "notes": [],
+        "sources": {"ledger": 0, "tsv": 0, "markdown": 0, "patch": 0},
     }
     if not WORKSPACE.is_dir():
         tally["skipped"] = (f"no pinned checkout at "
                             f"{WORKSPACE.relative_to(ROOT).as_posix()}")
         return [], tally
 
-    lines = ledger_lines()
+    ledger = ledger_lines()
+    prose, counted = prose_lines()
+    tally["sources"]["ledger"] = len(ledger)
+    tally["sources"].update(counted)
     roots = {entry.name for entry in WORKSPACE.iterdir()}
-    cited = cited_paths(lines, roots)
-    exceptions, findings = generated_exceptions(lines)
+    # One extractor over every source. The guards in cited_paths() were arrived
+    # at by fixing seven false positives, and a second extractor for the new
+    # sources would drift from them the first time either was touched.
+    cited = cited_paths(ledger + prose, roots)
+    # Annotations live in ledger rows and only there: a markdown sentence or a
+    # patch header has nowhere to carry one, so the prose lines are deliberately
+    # not offered to this.
+    exceptions, findings = generated_exceptions(ledger)
     declared_deps, unpopulated = deps_checkouts()
     created = series_created()
     tally["cited"] = len(cited)
@@ -1608,8 +1774,9 @@ def check_citations():
             f"CITED PATH IS ABSENT     {path}\n"
             f"        {where}\n"
             f"        Not in .workspace/src, not created by a sequenced patch, and not in an "
-            f"unsynced DEPS checkout. The row's evidence cannot be opened by anyone reading "
-            f"it. Fix the path, or carry {GENERATED_PATH_EXCEPTION} if the build generates it."
+            f"unsynced DEPS checkout. Nobody reading the citation can open it. Fix the path, "
+            f"or carry {GENERATED_PATH_EXCEPTION} if the build generates it and the citation "
+            f"is a ledger row."
         )
 
     # Whatever is left appears in its row's text but is not a path this check
@@ -1873,6 +2040,7 @@ def main() -> int:
     edges, coherence_findings = coherence_rows()
     facts = resolver_facts()
     probes = registered_probes()
+    checks = registered_checks()
     series = set(entries)
     claimed_edges = set()
     unenforced = []
@@ -1890,7 +2058,7 @@ def main() -> int:
             unenforced.append(edge)
         else:
             for entry in enforced:
-                problem = enforcement_problem(edge, entry, facts, probes, series)
+                problem = enforcement_problem(edge, entry, facts, probes, checks, series)
                 if problem:
                     site = entry.get("site") if isinstance(entry, dict) else entry
                     coherence_findings.append(
@@ -1950,13 +2118,19 @@ def main() -> int:
     # ----------------------------------------------------------------- check 7
     citation_findings, tally = check_citations()
 
-    print("\nledger source citations")
+    print("\nsource citations")
     if tally["skipped"]:
-        print(f"  SKIP {tally['skipped']}, so the citations in ledger/*.jsonl were not "
-              f"resolved. Nothing here passed; nothing was checked.")
+        print(f"  SKIP {tally['skipped']}, so the citations in ledger/*.jsonl, "
+              f"scripts/*.tsv, docs/**/*.md and the patch headers were not resolved. "
+              f"Nothing here passed; nothing was checked.")
     else:
+        print(f"  read {tally['sources']['ledger']} ledger row(s), "
+              f"{tally['sources']['tsv']} declaration line(s), "
+              f"{tally['sources']['markdown']} markdown code line(s) and "
+              f"{tally['sources']['patch']} patch header line(s)")
         print(f"  {tally['cited']} distinct Chromium source path(s) cited across "
-              f"ledger/*.jsonl: {tally['pinned']} in the pinned checkout, {tally['fork']} "
+              f"ledger/*.jsonl, scripts/*.tsv, docs/**/*.md and patches/*.patch headers: "
+              f"{tally['pinned']} in the pinned checkout, {tally['fork']} "
               f"created by a sequenced patch, {tally['local']} of our own, "
               f"{tally['excused']} build-generated, {len(tally['unsynced'])} in an unsynced "
               f"DEPS checkout")

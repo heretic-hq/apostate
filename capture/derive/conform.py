@@ -18,13 +18,39 @@ every deterministic probe twice, and anything that disagreed with itself on real
 hardware cannot be required to agree across browsers. Fields listed in
 ALWAYS_VOLATILE are the ones whose variance is definitional rather than
 observed.
+
+On collector generations: this used to refuse outright when the two captures
+carried different `context.collector_sha256`, which stranded 18 of 26 admitted
+captures. The rule was far stronger than the evidence — a revision that
+rewrites one probe and leaves thirty-five untouched has not changed what those
+thirty-five measure — so comparability is now decided PER PROBE from
+corpus/collector-probe-matrix.json, which digests each probe's implementation
+plus the helpers it calls at every revision of the collector reachable from
+git. Probes whose implementation is byte-identical are compared; the rest are
+SKIPPED AND REPORTED, never silently compared. A collector with no entry in the
+matrix still refuses the whole comparison: fail closed.
+
+What that evidence does and does not cover: it proves the probe itself was not
+rewritten. It does not prove that a probe ADDED later cannot perturb an older
+one through timing, GPU memory or permission state, which only an A/B run of
+both collectors on one host would settle. The report says so, and the one
+double capture we hold of a single device across two generations (the Sri Lanka
+Windows box on 6b9f3004 and a19ad58d) is the empirical check on it.
+
+The reference side must also be a real device: a capture tiered
+`not-a-reference` in corpus/capture-tiers.json is our own browser's output, and
+holding ourselves to it proves only that we agree with ourselves.
 """
 
 import argparse
+import importlib.util
 import json
 import pathlib
 import re
 import sys
+
+REPO = pathlib.Path(__file__).resolve().parent.parent.parent
+PROVENANCE_MODULE = REPO / "corpus" / "provenance.py"
 
 # Values that describe the moment of measurement rather than the device.
 # Everything else earns its exemption by being measured as unstable.
@@ -213,23 +239,65 @@ def truncate(v, n=68):
     return s if len(s) <= n else s[:n - 1] + "…"
 
 
+def load_provenance():
+    """corpus/provenance.py reads the tier register and the probe matrix."""
+    spec = importlib.util.spec_from_file_location(
+        "apostate_provenance", PROVENANCE_MODULE)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load %s" % PROVENANCE_MODULE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("reference", type=pathlib.Path, help="T0 capture of the device being claimed")
     ap.add_argument("subject", type=pathlib.Path, help="capture taken from Apostate")
     ap.add_argument("--show-volatile", action="store_true", help="also list fields excluded as volatile")
     ap.add_argument("--max-per-probe", type=int, default=6, help="mismatch lines shown per probe")
+    ap.add_argument("--tiers", type=pathlib.Path,
+                    help="capture tier register (default corpus/capture-tiers.json)")
+    ap.add_argument("--matrix", type=pathlib.Path,
+                    help="per-probe collector matrix (default corpus/collector-probe-matrix.json)")
     args = ap.parse_args()
 
     ref = json.loads(args.reference.read_text())
     sub = json.loads(args.subject.read_text())
 
-    if ref["context"]["collector_sha256"] != sub["context"]["collector_sha256"]:
-        print("REFUSED: captures were taken with different collector versions.")
-        print(f"  reference {ref['context']['collector_sha256'][:16]}")
-        print(f"  subject   {sub['context']['collector_sha256'][:16]}")
-        print("They measured different things and are not comparable.")
+    provenance = load_provenance()
+
+    # The reference has to be a real device. Our own browser's output is tiered
+    # not-a-reference, and a capture nobody has recorded at all is refused
+    # rather than assumed: a tier is a claim about the world and absence of a
+    # claim is not a weak claim, it is none.
+    try:
+        reference_tier = provenance.load_tiers(args.tiers).lookup(args.reference)
+    except provenance.ProvenanceError as exc:
+        print("REFUSED: %s" % exc)
         return 2
+    refusal = provenance.reference_refusal(reference_tier)
+    if refusal:
+        print("REFUSED: %s" % refusal)
+        return 2
+
+    # Per-probe comparability. Identical collectors need no matrix: one
+    # instrument measured both sides, which is the strongest evidence there is.
+    # Different collectors are compared only where the matrix says the probe's
+    # implementation is byte-identical, helpers included.
+    ref_collector = ref["context"]["collector_sha256"]
+    sub_collector = sub["context"]["collector_sha256"]
+    verdicts = None
+    if ref_collector != sub_collector:
+        try:
+            verdicts = provenance.load_matrix(args.matrix).verdicts(
+                ref_collector, sub_collector)
+        except provenance.ProvenanceError as exc:
+            print("REFUSED: %s" % exc)
+            print("Captures taken by different collectors are compared per "
+                  "probe, so a generation whose source cannot be read cannot "
+                  "be compared at all.")
+            return 2
 
     volatile = ALWAYS_VOLATILE | measured_volatility(ref) | measured_volatility(sub)
 
@@ -256,6 +324,12 @@ def main() -> int:
 
     print(f"reference : {ref['context'].get('label') or args.reference.stem}  {ref['context']['ua'][:64]}")
     print(f"subject   : {sub['context'].get('label') or args.subject.stem}  {sub['context']['ua'][:64]}")
+    print(f"reference tier: {reference_tier['tier']}  ({reference_tier['device']})")
+    if verdicts is None:
+        print(f"collector : {ref_collector[:8]} on both sides; every probe comparable")
+    else:
+        print(f"collector : reference {ref_collector[:8]}, subject {sub_collector[:8]}; "
+              "per-probe comparability from corpus/collector-probe-matrix.json")
     if version_mismatch:
         print(f"\n  NOTE: browser builds differ — reference {ref_ver}, subject {sub_ver}.")
         print("  Version-bearing fields will differ and no patch should change that:")
@@ -269,9 +343,19 @@ def main() -> int:
 
     rp, sp = ref["probes"], sub["probes"]
     passed, failed, skipped, errored = [], [], [], []
+    incomparable = []
     version_derived = []
 
     for pid in sorted(rp):
+        if verdicts is not None:
+            verdict = verdicts.get(pid, "not-in-matrix")
+            if verdict != "comparable":
+                # Reported, never quietly folded in with the volatile set: the
+                # reason this probe is not being checked is a property of the
+                # instrument, and a reader has to be able to see which claims
+                # the run did not test.
+                incomparable.append((pid, verdict))
+                continue
         if pid in volatile:
             skipped.append(pid)
             continue
@@ -362,6 +446,23 @@ def main() -> int:
             print(f"  {pid}: {locs}")
         print()
 
+    if incomparable:
+        by_verdict = {}
+        for pid, verdict in incomparable:
+            by_verdict.setdefault(verdict, []).append(pid)
+        print(f"not compared — the two collectors do not measure these the same "
+              f"way ({len(incomparable)} probe(s)):")
+        for verdict, pids in sorted(by_verdict.items()):
+            print(f"  {verdict}: {', '.join(sorted(pids))}")
+        print(f"  reference collector {ref_collector[:8]}, subject "
+              f"{sub_collector[:8]}. Verdicts come from the per-probe source "
+              f"digests in corpus/collector-probe-matrix.json, which cover each")
+        print("  probe's own implementation and the helpers it calls. They do not")
+        print("  cover a later probe perturbing an earlier one through timing,")
+        print("  GPU memory or permission state; only an A/B run of both")
+        print("  collectors on one host would settle that.")
+        print()
+
     for pid, why in errored:
         print(f"ERROR {pid}: {why}")
     if errored:
@@ -377,6 +478,7 @@ def main() -> int:
     result_label = "probes conform" if build_comparable else "probes match (diagnostic)"
     print(f"{len(passed)}/{total} {result_label}    {len(failed)} failed    "
           f"{len(errored)} errored    {len(skipped)} volatile    "
+          f"{len(incomparable)} not comparable    "
           f"{len(determinism)} non-deterministic")
 
     if not build_comparable:

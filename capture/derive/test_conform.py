@@ -2,6 +2,7 @@
 
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import pathlib
@@ -12,25 +13,78 @@ from unittest.mock import patch
 import conform
 
 
-def capture(version="152.0.7977.83"):
+def capture(version="152.0.7977.83", collector="a" * 64):
     probes = {"example": {"ok": True, "value": 7}}
     if version is not None:
         probes["navigator.userAgentData"] = {
             "ok": True, "value": {"high": {"uaFullVersion": version}}}
     return {
-        "context": {"collector_sha256": "a" * 64, "ua": "Chrome", "label": "test"},
+        "context": {"collector_sha256": collector, "ua": "Chrome", "label": "test"},
         "probes": probes,
     }
 
 
+# Two synthetic collector generations that share the `example` probe and differ
+# on `moved`, plus one generation the matrix does not know at all. Synthetic
+# rather than the real corpus so these stay tests of the comparison rule and
+# not of whichever captures happen to be admitted.
+def matrix_document():
+    def generation(digest, probes):
+        return {"capture_version": 2, "collector_sha256": digest,
+                "commit": digest[:7], "committed": "2026-09-08T00:00:00+00:00",
+                "subject": "synthetic", "probes": {
+                    pid: {"deterministic": True, "helpers": [],
+                          "source_sha256": source}
+                    for pid, source in probes.items()}}
+    return {
+        "schema": "apostate/corpus/collector-probe-matrix/1",
+        "generations": {
+            "a" * 64: generation("a" * 64, {"example": "1" * 64, "moved": "2" * 64,
+                                            "navigator.userAgentData": "3" * 64}),
+            "b" * 64: generation("b" * 64, {"example": "1" * 64, "moved": "9" * 64,
+                                            "navigator.userAgentData": "3" * 64}),
+        },
+        "pairs": {
+            "aaaaaaaa->bbbbbbbb": {"comparable": ["example", "navigator.userAgentData"],
+                                   "implementation_differs": ["moved"],
+                                   "only_in_a": [], "only_in_b": []},
+            "bbbbbbbb->aaaaaaaa": {"comparable": ["example", "navigator.userAgentData"],
+                                   "implementation_differs": ["moved"],
+                                   "only_in_a": [], "only_in_b": []},
+        },
+        "unmatrixable": {"c" * 64: {"captures": ["synthetic.json"],
+                                    "reason": "locally modified, never committed"}},
+    }
+
+
 class ConformTests(unittest.TestCase):
-    def compare(self, reference, subject):
+    def compare(self, reference, subject, tier="physical-full", tiers=True):
         with tempfile.TemporaryDirectory() as directory:
-            paths = [pathlib.Path(directory) / name for name in ("ref.json", "sub.json")]
+            root = pathlib.Path(directory)
+            paths = [root / name for name in ("ref.json", "sub.json")]
             for path, data in zip(paths, (reference, subject)):
                 path.write_text(json.dumps(data))
+            entry = {
+                "sha256": hashlib.sha256(paths[0].read_bytes()).hexdigest(),
+                "tier": tier,
+                "device": "synthetic",
+                "justification": "synthetic fixture",
+                "refuted_by": "nothing; it is a fixture",
+                "reason_class": "our-own-output",
+            }
+            name = "ref.json"
+            if not tiers:
+                # A register that exists but does not mention this capture at
+                # all: neither its digest nor its name is in it.
+                name, entry["sha256"] = "other.json", "0" * 64
+            register = root / "tiers.json"
+            register.write_text(json.dumps({"captures": {name: entry}}))
+            matrix = root / "matrix.json"
+            matrix.write_text(json.dumps(matrix_document()))
             output = io.StringIO()
-            with patch("sys.argv", ["conform.py", *map(str, paths)]), contextlib.redirect_stdout(output):
+            argv = ["conform.py", *map(str, paths),
+                    "--tiers", str(register), "--matrix", str(matrix)]
+            with patch("sys.argv", argv), contextlib.redirect_stdout(output):
                 result = conform.main()
             return result, output.getvalue()
 
@@ -52,12 +106,47 @@ class ConformTests(unittest.TestCase):
         for subject in (capture(), capture(None)):
             self.assertEqual(self.compare(capture(None), subject)[0], 2)
 
-    def test_collector_mismatch_is_refused(self):
-        subject = capture()
-        subject["context"]["collector_sha256"] = "b" * 64
+    def test_cross_generation_compares_the_probes_both_collectors_share(self):
+        # The old rule refused this pair outright, which stranded 18 of 26
+        # admitted captures. `example` is implementation-identical across the
+        # two generations, so it is compared and its difference is a finding.
+        subject = capture(collector="b" * 64)
+        subject["probes"]["example"]["value"] = 8
         status, output = self.compare(capture(), subject)
+        self.assertEqual(status, 1)
+        self.assertIn("FAIL  example", output)
+
+    def test_probe_whose_implementation_differs_is_reported_not_compared(self):
+        reference, subject = capture(), capture(collector="b" * 64)
+        reference["probes"]["moved"] = {"ok": True, "value": "measured one way"}
+        subject["probes"]["moved"] = {"ok": True, "value": "measured another"}
+        status, output = self.compare(reference, subject)
+        self.assertEqual(status, 0)
+        self.assertIn("implementation-differs: moved", output)
+        self.assertIn("1 not comparable", output)
+        self.assertNotIn("FAIL  moved", output)
+
+    def test_collector_absent_from_the_matrix_is_refused(self):
+        status, output = self.compare(capture(), capture(collector="d" * 64))
         self.assertEqual(status, 2)
         self.assertIn("REFUSED", output)
+
+    def test_unmatrixable_collector_is_refused_with_its_recorded_reason(self):
+        status, output = self.compare(capture(), capture(collector="c" * 64))
+        self.assertEqual(status, 2)
+        self.assertIn("unmatrixable", output)
+        self.assertIn("locally modified, never committed", output)
+
+    def test_reference_tiered_not_a_reference_is_refused(self):
+        status, output = self.compare(capture(), capture(), tier="not-a-reference")
+        self.assertEqual(status, 2)
+        self.assertIn("REFUSED", output)
+        self.assertIn("not-a-reference", output)
+
+    def test_untiered_reference_is_refused(self):
+        status, output = self.compare(capture(), capture(), tiers=False)
+        self.assertEqual(status, 2)
+        self.assertIn("has no entry in", output)
 
     def test_failed_subject_probe_stays_error(self):
         subject = copy.deepcopy(capture())

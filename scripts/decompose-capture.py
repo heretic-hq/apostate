@@ -261,9 +261,54 @@ def admission_record_path(out_dir, raw_sha256):
     return pathlib.Path(out_dir) / ADMISSION_DIRNAME / (raw_sha256 + ".json")
 
 
-def persist_admission_decision(out_dir, raw_sha256, decision, reason, context=None, capture_path=None):
+def persist_admission_decision(out_dir, raw_sha256, decision, reason, context=None,
+                               capture_path=None, raw=None):
+    """Write the admission decision for a capture, or refuse to.
+
+    `accepted` is not a string a caller may assert. Everything downstream reads
+    this record as the decision — scripts/build-anchors.py builds an anchor from
+    any capture whose record says `accepted` and never re-derives it — so a
+    writer that takes the verdict on trust is the whole admission system's
+    single point of failure.
+
+    It failed exactly that way. resources/fingerprints/raw/admissions/70fd8f09…
+    recorded stock-linux-20260907T150627Z.json as `accepted` with the reason
+    "capture passed admission checks", for a capture that fails four of them:
+    context.automation_suspected is true, context.automation_signals names the
+    Headless token in its UA, capture_version is 1, and screen.details did not
+    complete. No flag was involved and no check was missing or misspelled — the
+    record was minted by calling this function directly, and this function
+    validated nothing. The gate was never run, so it could not refuse.
+
+    So the verdict is now derived here, from the capture, by the same gate.
+    `accepted` requires the capture's own bytes, requires them to be the bytes
+    the digest addresses, and requires validate_capture to pass on them. A
+    caller with no capture to show cannot record an acceptance at all: absence
+    fails closed. `rejected` needs no capture, because a refusal that cannot be
+    substantiated is still a refusal.
+    """
     if not HEX64.fullmatch(raw_sha256):
         raise ValueError("raw capture hash must be 64 hexadecimal characters")
+    if decision == "accepted":
+        if raw is None:
+            raise ValueError(
+                "refusing to record %s as accepted with no capture to check: "
+                "an accepted decision is derived from the capture, never "
+                "asserted by the caller" % raw_sha256[:16])
+        if hashlib.sha256(raw).hexdigest() != raw_sha256:
+            raise ValueError(
+                "refusing to record %s as accepted: the capture supplied "
+                "hashes to %s, so the record would not address the bytes it "
+                "was decided on"
+                % (raw_sha256[:16], hashlib.sha256(raw).hexdigest()[:16]))
+        def reject_constant(_value):
+            raise ValueError("non-finite JSON number")
+        refusal = admission_rejection_reason(
+            json.loads(raw, parse_constant=reject_constant))
+        if refusal:
+            raise ValueError(
+                "refusing to record %s as accepted: %s"
+                % (raw_sha256[:16], refusal))
     record = {
         "raw_sha256": raw_sha256,
         "decision": decision,
@@ -602,7 +647,7 @@ def main() -> int:
         written.append((block, path, rec))
     try:
         persist_admission_decision(args.out, raw_sha256, "accepted",
-                                   "capture passed admission checks", ctx)
+                                   "capture passed admission checks", ctx, raw=raw)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print("REFUSED: admission decision could not be saved: %s" % exc,
               file=sys.stderr)

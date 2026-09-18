@@ -33,8 +33,19 @@ records: it is a font and raster measurement, not a GPU measurement. It is
 reported per member so the exclusion can be checked, not assumed.
 
 Inputs are captures under `resources/fingerprints/raw/` that carry an
-`accepted` admission record. Nothing else is read; a capture without a decision
-is skipped by name, never inferred from a filename.
+`accepted` admission record, plus any capture for which
+`corpus/capture-tiers.json` records an anchor exception naming the backend that
+capture measures. Nothing else is read; a capture without either is skipped by
+name, never inferred from a filename.
+
+The exception exists because one capture needed it and the alternative in use
+was worse. The tree's only measurement of stock Chromium's software rasteriser
+is a headless session, and it was carrying a hand-written `accepted` admission
+record that claimed it "passed admission checks" — a record this script
+believed without re-deriving. An acceptance that cannot be re-derived is not
+evidence, so that record is gone and the allowance is written down instead,
+per capture, naming the one backend it covers and checked against the backend
+measured here.
 
 Output is deterministic: no timestamps, no host state, sorted compact JSON.
 Running it twice produces byte-identical files.
@@ -59,6 +70,8 @@ PIN_PATH = REPO / "build" / "CHROMIUM_VERSION"
 SURVEY_PATH = DEFAULT_OUT / "probe-host-survey.json"
 ADMISSION_DIRS = (REPO / "corpus" / "blocks" / "admissions", RAW_DIR / "admissions")
 IMPORT_SCRIPT = REPO / "scripts" / "import-capture.py"
+PROVENANCE_MODULE = REPO / "corpus" / "provenance.py"
+PROVENANCE_TIERS = REPO / "corpus" / "capture-tiers.json"
 DISPERSION_PATH = (REPO / "resources" / "profiles" / "dispersion"
                    / "gpu_identity.json")
 
@@ -116,6 +129,20 @@ def load_import_helpers():
                  "SOFTWARE_RENDERERS", "SOFTWARE_ADMISSION_NOTE"):
         if not hasattr(module, name):
             die("%s does not export %s" % (IMPORT_SCRIPT.name, name))
+    return module
+
+
+def load_provenance():
+    """The tier register's reader. corpus/provenance.py owns that policy."""
+    spec = importlib.util.spec_from_file_location(
+        "apostate_provenance", PROVENANCE_MODULE)
+    if spec is None or spec.loader is None:
+        die("cannot load %s" % PROVENANCE_MODULE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for name in ("load_tiers", "anchor_exception_refusal", "ProvenanceError"):
+        if not hasattr(module, name):
+            die("%s does not export %s" % (PROVENANCE_MODULE.name, name))
     return module
 
 
@@ -244,17 +271,15 @@ def admission_record(raw_sha256):
     return None
 
 
-def measure(path, helpers, pin):
+def measure(path, helpers, provenance, tiers, pin):
     raw = path.read_bytes()
     raw_sha256 = hashlib.sha256(raw).hexdigest()
     record = admission_record(raw_sha256)
-    if record is None:
-        return None, "no admission record for sha256 %s" % raw_sha256
-    if record.get("decision") != "accepted":
-        return None, "admission decision is %r" % record.get("decision")
     try:
         capture = json.loads(raw)
     except ValueError as exc:
+        if record is None:
+            return None, "unreadable and unadmitted: %s" % exc
         die("%s is admitted but unreadable: %s" % (path.name, exc))
 
     webgl1 = probe(capture, "webgl1") or {}
@@ -262,14 +287,35 @@ def measure(path, helpers, pin):
     canvas = probe(capture, "canvas.2d") or {}
     renderer = webgl1.get("unmaskedRenderer")
     marker = helpers.software_marker(renderer)
-    # The admission door already decided this. A software capture admitted with
-    # --allow-software-renderer carries SOFTWARE_ADMISSION_NOTE in its reason,
-    # which means its identity strings are the rasteriser's own and there is no
-    # hardware claim to misattribute; anything else still refuses, because that
-    # is the llvmpipe-named-as-a-Tesla case the refusal exists for. Reading the
-    # decision rather than re-deriving it keeps one owner for the policy.
     software = bool(marker)
-    if software and helpers.SOFTWARE_ADMISSION_NOTE not in (record.get("reason") or ""):
+    backend, backend_slug = backend_of(renderer)
+
+    accepted = record is not None and record.get("decision") == "accepted"
+    exception = None
+    if not accepted:
+        # No acceptance to read. The one remaining way in is a named exception
+        # in the tier register, and it is checked against the backend MEASURED
+        # here rather than against anything the capture or its filename says,
+        # so an allowance written for a software rasteriser cannot be spent on
+        # a hardware anchor. A capture the register does not mention at all is
+        # skipped: absence is not permission.
+        why = ("no admission record for sha256 %s" % raw_sha256 if record is None
+               else "admission decision is %r" % record.get("decision"))
+        try:
+            entry = tiers.lookup(path)
+        except provenance.ProvenanceError as exc:
+            return None, "%s; %s" % (why, exc)
+        refusal = provenance.anchor_exception_refusal(entry, backend)
+        if refusal:
+            return None, "%s; %s" % (why, refusal)
+        exception = entry["anchor_exception"]
+    elif software and helpers.SOFTWARE_ADMISSION_NOTE not in (record.get("reason") or ""):
+        # A software capture admitted through scripts/import-capture.py with
+        # --allow-software-renderer carries SOFTWARE_ADMISSION_NOTE in its
+        # reason, which means its identity strings are the rasteriser's own and
+        # there is no hardware claim to misattribute; anything else still
+        # refuses, because that is the llvmpipe-named-as-a-Tesla case the
+        # refusal exists for.
         die("%s is admitted but its renderer %r is the software rasteriser %r and "
             "its admission record does not carry the self-consistent-software "
             "allowance; an anchor may not be built from it"
@@ -277,7 +323,6 @@ def measure(path, helpers, pin):
 
     high = (probe(capture, "navigator.userAgentData") or {}).get("high") or {}
     version = helpers.full_version(capture)
-    backend, backend_slug = backend_of(renderer)
     vendor, vendor_slug = vendor_of(webgl1.get("unmaskedVendor"))
     cluster = webgpu_cluster(probe(capture, "webgpu"))
 
@@ -298,8 +343,13 @@ def measure(path, helpers, pin):
         "capture": rel(path),
         "capture_name": path.name,
         "capture_sha256": raw_sha256,
-        "admission_record": record["__record_path"],
-        "admission_reason": record.get("reason"),
+        "admission_record": (record["__record_path"] if record is not None
+                             else rel(PROVENANCE_TIERS)),
+        "admission_reason": (record.get("reason") if accepted else
+                             "no admission record; admitted for the %s backend "
+                             "only by the anchor exception recorded in %s: %s"
+                             % (exception["backend"], rel(PROVENANCE_TIERS),
+                                exception["reason"])),
         "label": (capture.get("context") or {}).get("label"),
         "taken_at": (capture.get("context") or {}).get("taken_at"),
         "browser_version": version,
@@ -1080,6 +1130,11 @@ def main():
     args = ap.parse_args()
 
     helpers = load_import_helpers()
+    provenance = load_provenance()
+    try:
+        tiers = provenance.load_tiers(PROVENANCE_TIERS)
+    except provenance.ProvenanceError as exc:
+        die("%s" % exc)
     software = tuple(helpers.SOFTWARE_RENDERERS)
     try:
         pin = PIN_PATH.read_text(encoding="utf-8").strip()
@@ -1088,7 +1143,7 @@ def main():
 
     measurements, skipped = [], []
     for path in sorted(args.raw.glob("*.json")):
-        measurement, reason = measure(path, helpers, pin)
+        measurement, reason = measure(path, helpers, provenance, tiers, pin)
         if measurement is None:
             skipped.append((path.name, reason))
             continue

@@ -397,9 +397,14 @@ def import_one(entry, args, gate, pin, collector_sha256):
 
     target = RAW_DIR / (name + ".json")
     state = write_capture(raw, target)
-    record = gate.persist_admission_decision(
-        RAW_DIR, raw_sha256, "accepted", reason, capture["context"],
-        capture_path=str(target.relative_to(REPO)))
+    # The writer re-derives the acceptance from these bytes instead of taking
+    # this script's word for it, so it has to run under the same gate that
+    # admitted them: an off-major capture is checked against its own major,
+    # exactly as admit() checked it above.
+    with observed_major(gate, ua_major(capture)):
+        record = gate.persist_admission_decision(
+            RAW_DIR, raw_sha256, "accepted", reason, capture["context"],
+            capture_path=str(target.relative_to(REPO)), raw=raw)
 
     return {
         "name": name,

@@ -156,49 +156,70 @@ audio renders byte-identical. A software rasteriser is as deterministic as the
 hardware here, which is what makes such a host usable as a conformance runner
 even though it is useless as a hardware reference.
 
-## Collector generations, and the eighteen stranded captures
+## Collector generations, and what makes two of them comparable
 
 Every capture records the sha256 of the `collector.js` that measured it.
-`conform.py` refuses to compare two captures whose hashes differ, and
 `import-capture.py` refuses to admit a capture the collector in this tree did
-not produce. Both rules are right: two collector versions measured different
-things, and comparing them silently would be comparing two number systems.
-
-The cost of those rules was never tracked, and it has already been paid. The
-collector has changed five times and no capture was ever migrated, so the 26
-admitted captures in `resources/fingerprints/raw/` are split across five
-instruments:
+not produce, and `conform.py` used to refuse to compare two captures whose
+hashes differed at all. The first rule is right. The second was far stronger
+than the evidence, and the cost was never tracked: the collector has changed
+five times and no capture was ever migrated, so of the 26 captures admitted
+across `resources/fingerprints/raw/` (22) and `resources/fingerprints/self/`
+(4, our own browser's output) only eight could be compared to anything.
 
 | collector  | captures | what is in it                                                |
 |------------|----------|--------------------------------------------------------------|
-| `6385f36c` | 9        | the first M4 Max and Linux sweep, plus three Apostate runs    |
+| `6385f36c` | 9        | the first M4 Max and Linux sweep, plus four runs of our own browser |
 | `6b9f3004` | 5        | M4 Max battery/incognito matrix, `win-intel-uhd630`           |
 | `c856a603` | 3        | three early `apple-m4-max` reads                              |
 | `91fe5c48` | 1        | `apple-m4-max-20260907T083721Z`                               |
-| `a19ad58d` | 8        | **the only generation a capture taken today can be compared against**: `m4-max-chrome-20260908T163229Z`, `windows-chrome-20260910T140813Z`, four `linux-nvidia` hosts and two `windows-nvidia` hosts |
+| `a19ad58d` | 8        | the current generation: `m4-max-chrome-20260908T163229Z`, `windows-chrome-20260910T140813Z`, four `linux-nvidia` hosts and two `windows-nvidia` hosts |
 
-So the comparable reference set is eight captures, four of them on borrowed
-NVIDIA hosts and one on a Windows machine, none of which should be assumed
-retakeable. The other eighteen remain valid evidence for the surfaces they were
-read for — the bytes are what those devices emitted — but no V3 run can use
-them, and nothing warns when a row depends on one. It does: the ledger's two
-most-cited T0 captures, `apple-m4-max-20260907T083721Z` (110 citations) and
-`apple-m4-max-20260907T033252Z` (99), are both on stranded generations.
+**Comparability is now decided per probe, and measured.**
+`scripts/build-collector-matrix.py` extracts every revision of the collector
+reachable from git, slices each into its probe registrations and module-level
+helpers, resolves which helpers each probe's body reaches transitively, and
+digests the probe's source together with that closure. Two generations measure
+a probe the same way exactly when the digest matches. The result is checked in
+as `corpus/collector-probe-matrix.json` and regenerating it reproduces the file
+byte for byte, so the claim is falsifiable by re-extracting the collectors.
+`conform.py` compares the probes whose digests match and skips and REPORTS the
+rest; a collector the matrix does not contain is still refused outright.
 
-**Adding a probe to the collector therefore costs the whole reference set**, and
-that is why the coherence gate below is a separate instrument rather than five
-more probes. If we ever do want to add one, the path to keeping the references
-comparable is known and deliberately not taken yet:
+What it found, for the two pairs that matter:
 
-1. Relax `conform.py`'s hash equality to "equal, or the subject's collector is a
-   declared superset of the reference's", iterating the reference's probe ids as
-   it already does.
-2. Gate that relaxation on a **measurement, never a declaration**: run the old
-   and the new collector against the same binary on the same host and diff every
-   probe the old one carries. All identical proves the addition did not perturb a
-   shared resource, change timing or allocate GPU memory some later probe reads.
-   A hand-written "this change was additive" table is exactly the silent
-   invalidation these rules exist to refuse.
+| pair | comparable | implementation differs | removed | added |
+|------|-----------:|-----------------------:|--------:|------:|
+| `6b9f3004` → `a19ad58d` | 31 | 5 (`clientrects`, `codecs.media`, `css.media`, `fonts.detected`, `permissions.states`) | 0 | 8 |
+| `6385f36c` → `a19ad58d` | 30 | 6 (the same five plus `api.surface`) | 0 | 8 |
+
+The empirical check on it is the one device we captured twice across a
+generation boundary: the Sri Lanka Windows box on `6b9f3004` and `a19ad58d`.
+Holding it to itself across the two collectors now compares 26 probes and
+reports 13, and every one of the five implementation-differing probes it skips
+would otherwise have produced findings — 12 leaf differences in `clientrects`,
+10 in `codecs.media`, 6 in `permissions.states`, 3 in `css.media` — that are
+properties of the instrument, not of the machine.
+
+**The limit of this evidence, stated because it is not the limit the original
+plan asked for.** A source digest proves the probe itself was not rewritten. It
+does not prove that a probe ADDED later cannot perturb an earlier one through
+timing, GPU memory or permission state; only running both collectors against
+one binary on one host would settle that. `conform.py` prints this caveat
+beside every skipped probe rather than implying more than it measured.
+
+`91fe5c48` is not in git history: a locally-modified collector, run once with
+some checks deliberately disabled, never committed. It has no source to digest,
+so it stays stranded and `corpus/collector-probe-matrix.json` records why in
+its `unmatrixable` section. The alternative — trusting the probes whose values
+match a sibling capture of the same device — was rejected: agreement with the
+value under test is not evidence about the instrument, and "some checks
+disabled" means we cannot name which probes were weakened. Nothing is lost by
+it; the M4 Max it measured is also captured on the current collector.
+
+**Adding a probe to the collector still costs something**, but now it costs
+exactly the probes it touches rather than the whole reference set, and the
+matrix says which ones.
 
 ## Deciding coherence edges
 

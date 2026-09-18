@@ -286,9 +286,33 @@ def admission_record_path(out_dir, raw_sha256):
 
 
 def persist_admission_decision(out_dir, raw_sha256, decision, reason, context=None,
-                               capture_path=None, probe_errors=None):
+                               capture_path=None, probe_errors=None, raw=None):
+    """Write the admission decision for a capture, or refuse to.
+
+    `accepted` is derived from the capture here, never taken from the caller.
+    The same function in scripts/decompose-capture.py once wrote an `accepted`
+    record for a headless, automation-suspected capture because a caller said
+    so and the writer checked nothing, and every consumer downstream believed
+    the record rather than re-deriving it. The receiver writes into the same
+    directory and is the same hole; it closes the same way.
+    """
     if not HEX64.fullmatch(raw_sha256):
         raise ValueError("raw capture hash must be 64 hexadecimal characters")
+    if decision == "accepted":
+        if raw is None:
+            raise ValueError(
+                "refusing to record %s as accepted with no capture to check"
+                % raw_sha256[:16])
+        if hashlib.sha256(raw).hexdigest() != raw_sha256:
+            raise ValueError(
+                "refusing to record %s as accepted: the capture supplied "
+                "hashes to %s" % (raw_sha256[:16],
+                                  hashlib.sha256(raw).hexdigest()[:16]))
+        refusal = admission_rejection_reason(
+            json.loads(raw, parse_constant=_reject_nonfinite_json))
+        if refusal:
+            raise ValueError("refusing to record %s as accepted: %s"
+                             % (raw_sha256[:16], refusal))
     record = {
         "raw_sha256": raw_sha256,
         "decision": decision,
@@ -832,7 +856,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             output.write(encoded)
         try:
             persist_admission_decision(self.out_dir, raw_sha256, "accepted",
-                                       "capture passed admission checks", capture["context"], path)
+                                       "capture passed admission checks",
+                                       capture["context"], path, raw=body)
         except (OSError, ValueError, json.JSONDecodeError) as e:
             self._json(500, {"error": "admission decision could not be saved: %s" % e})
             return

@@ -15,17 +15,67 @@ record at `raw/admissions/<sha256-of-the-file>.json` naming the decision, the
 reason, and the `context` it was decided on. A capture in `raw/` with no such
 record — or whose record says `rejected` — is not a reference, and
 `scripts/build-anchors.py` skips it by name rather than inferring anything from
-the directory it sits in. The two references admitted before this convention
-existed carry their records in `corpus/blocks/admissions/` instead, written by
+the directory it sits in; the one narrow exception is recorded per capture in
+`corpus/capture-tiers.json` and described below. The two references admitted
+before this convention existed carry their records in
+`corpus/blocks/admissions/` instead, written by
 `scripts/decompose-capture.py`; both locations are authoritative.
+
+An `accepted` record is no longer something a caller can assert. It used to be:
+`persist_admission_decision` took the decision and the reason as arguments and
+validated nothing, so `raw/admissions/70fd8f09….json` recorded
+`stock-linux-20260907T150627Z.json` as accepted with the reason "capture passed
+admission checks" — for a capture that fails five of them: `automation_suspected`
+is true, `automation_signals` names the Headless token in its UA,
+`capture_version` is 1, `secure_context` is absent, and the `screen.details`
+probe did not complete. That record has been deleted and the writer now derives
+the verdict: recording an acceptance requires the capture's own bytes, requires
+them to hash to the digest the record addresses, and requires the admission
+gate to pass on them. A caller with no capture to show cannot record an
+acceptance at all.
+
+Deleting it left one real dependency to carry: the tree's only measurement of
+stock Chromium's software rasteriser is that capture, and
+`corpus/anchors/linux-swiftshader-google-6922d61bab83.json` is built from it and
+is cited by patches 0027, 0038, 0052, 0091, 0102 and 0104. So the allowance is
+written down instead of laundered. `corpus/capture-tiers.json` records an
+`anchor_exception` on that capture naming the single backend it covers, and
+`scripts/build-anchors.py` checks that name against the backend it MEASURED —
+an exception for a software rasteriser cannot be spent on a hardware anchor,
+and it cannot make the capture a reference for anything else.
+
+## `self/` is not a reference store
+
+`self/` holds captures of **our own browser**: `apostate-linux`,
+`apostate-profiled`, `apostate-m4max` and `macos-claim`. They are kept because
+before/after evidence of our own behaviour is exactly what a patch has to cite,
+and they are kept out of `raw/` because conforming against them is circular —
+they measure what we emitted, so agreement proves only that we agree with
+ourselves. Nothing that globs the reference store can reach them.
+
+## What each capture is
+
+`corpus/capture-tiers.json` records, per capture and keyed by the sha256 of its
+bytes, whether it is a full physical device (`physical-full`), a VM with a real
+passthrough GPU whose GPU cluster alone is a measurement
+(`physical-gpu-only`), or not a reference at all (`not-a-reference`: our own
+output, or a session with automation suspicion). A tier is a claim about the
+world that no probe settles, so each entry carries the measurement that
+supports it and what would have to be observed to refute it. A capture with no
+entry fails closed: `capture/derive/conform.py` refuses it as a reference
+rather than assuming it is trustworthy.
 
 ## Reading a capture
 
 Each file carries its own provenance in `context`:
 
 - `collector_sha256` — which collector version measured it. Captures from
-  different collector versions measured different things and are not directly
-  comparable.
+  different collector versions are compared PER PROBE, against the source
+  digests in `corpus/collector-probe-matrix.json`: probes whose implementation
+  is byte-identical across the two generations are compared and the rest are
+  skipped and reported. A collector with no entry in that matrix is refused
+  outright, which today means `91fe5c48` — a locally-modified collector that
+  was never committed, so there is no source to digest.
 - `automation_suspected` — true if anything automation-shaped was present.
   **A capture with this set is not T0**, whatever else it contains.
 - `repeat` — a second reading of every deterministic probe from the same

@@ -142,7 +142,9 @@ combining any of them with host mode refuses the launch on stderr and exits
 non-zero. `--fingerprint-explain` is the exception and still works. The packages
 follow the same rule from the other side, emitting the per-field locale and
 timezone switches only for a natively composed resolution and never for a
-host-inherited one, since the binary would refuse that pairing.
+host-inherited one. That is not tidiness: under a precedence reading they would
+simply be ignored there, but the binary refuses the pairing, so emitting them
+would end the launch with a non-zero exit.
 
 Network localization has a separate precedence chain:
 

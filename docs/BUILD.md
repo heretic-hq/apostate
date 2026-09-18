@@ -558,9 +558,11 @@ Asked for `OptionId.DesktopCPPx64`, `OptionId.DesktopCPPx86` and
 installer ran the full 25-minute bound and had reached only package 004 of
 many before being killed — exit 124, slow rather than stuck, but a quarter of
 the gate's 180-minute budget spent before the first compile on every run. The
-overlay does the same job in **12 seconds including the 213 MB download**,
-measured end to end against a tree seeded with a real older revision's
-headers.
+overlay does the same job in **15 seconds including the 213 MB download**,
+measured on that runner: both packages fetched, digest-checked and overlaid
+between 06:26:35 and 06:26:50. The Debugging Tools install that follows took a
+further 8 seconds, so the whole SDK phase is 24 seconds against an install that
+had not finished in 25 minutes.
 
 It is also *better* provenance, not a compromise for speed.
 `winsdksetup.exe` is a 1.4 MB bootstrapper: its bytes can be pinned, and it

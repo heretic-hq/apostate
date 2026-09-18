@@ -26,8 +26,14 @@
 # quarter of the gate's 180-minute budget spent before the first compile, every
 # run, is not a cost worth paying for a file copy. For contrast on the same
 # runner: the ATL component through the VS installer takes 26 seconds, and the
-# Debuggers feature alone through this same winsdksetup takes about 40, which is
-# why the Debuggers still come from it.
+# Debuggers feature alone through this same winsdksetup takes 8, which is why
+# the Debuggers still come from it.
+#
+# Measured for the overlay on the same runner class: both packages fetched,
+# digest-checked and copied in 15 seconds, and the whole SDK phase including the
+# Debuggers install in 24. The Include and Lib trees still list only
+# 10.0.22621.0 and 10.0.26100.0 afterwards, so this upgrades in place and does
+# not leave two revisions side by side.
 #
 # The packages are also better provenance than the installer, not worse.
 # winsdksetup.exe is a 1.4 MB bootstrapper: we can pin its bytes, and then it

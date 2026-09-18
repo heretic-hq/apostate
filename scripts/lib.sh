@@ -89,22 +89,27 @@ case "$(uname -s)" in
     if [ -z "${vs2022_install:-}" ]; then
       _vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
       if [ -x "$_vswhere" ]; then
-        # Ask for the C++ x64 toolset first, since an install without it
-        # cannot build anything here. Fall back to any install rather than
-        # leaving the variable unset: an unset variable returns to the broken
-        # table lookup, whereas a path that turns out to lack the toolset
-        # fails later with a message naming the missing component.
-        _vs_path="$("$_vswhere" -latest -products '*' \
+        # Pin the version range. vs%YEAR%_install is checked BEFORE the
+        # table, so a bare -latest on an image that later gains VS 2026 would
+        # export an 18.0 path as vs2022_install and GetVisualStudioVersion
+        # would answer '2022' for it -- a silently mislabelled toolchain
+        # instead of a clean failure. Ask for the C++ x64 toolset first, since
+        # an install without it cannot build anything here, then fall back to
+        # any 2022 install: leaving the variable unset returns to the broken
+        # table, whereas a path missing the toolset fails later naming the
+        # component.
+        _vs_range='[17.0,18.0)'
+        _vs_path="$("$_vswhere" -latest -products '*' -version "$_vs_range" \
           -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 \
           -property installationPath 2>/dev/null | tr -d '\r')"
         if [ -z "$_vs_path" ]; then
-          _vs_path="$("$_vswhere" -latest -products '*' \
+          _vs_path="$("$_vswhere" -latest -products '*' -version "$_vs_range" \
             -property installationPath 2>/dev/null | tr -d '\r')"
         fi
         if [ -n "$_vs_path" ]; then
           export vs2022_install="$_vs_path"
         fi
-        unset _vs_path
+        unset _vs_path _vs_range
       fi
       unset _vswhere
     fi

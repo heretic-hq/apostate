@@ -24,6 +24,25 @@ fi
 
 mkdir -p "$OUT"
 
+# gn imports visual_studio_version.gni, which runs vs_toolchain.py
+# get_toolchain_dir and aborts the whole generate if it cannot resolve a
+# toolchain. Run exactly that command first, so the failure names the cause
+# instead of arriving as a gn import backtrace after the sync. This is the
+# real predicate rather than a proxy for it: verify-host-tooling.sh can only
+# confirm Visual Studio exists, and it did exactly that on a runner where gn
+# then failed, because vs_toolchain.py looks for 2022 under %ProgramFiles%
+# while the hosted images install Build Tools into the x86 tree. lib.sh
+# exports vs2022_install to bridge that; this checks the bridge held.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if ! python3 "$SRC/build/vs_toolchain.py" get_toolchain_dir >/dev/null 2>&1; then
+      printf '==> vs_toolchain.py get_toolchain_dir failed:\n' >&2
+      python3 "$SRC/build/vs_toolchain.py" get_toolchain_dir >&2 2>&1 || true
+      die "Chromium cannot resolve a Visual Studio toolchain (vs2022_install=${vs2022_install:-<unset>}); gn would fail at build/config/win/visual_studio_version.gni"
+    fi
+    ;;
+esac
+
 # The pinned SDK is resolved and linked before args.gn is written, so the
 # generated args name a source-relative path that is identical on every host.
 # Without this, Chromium picks the newest SDK the active Xcode provides and an

@@ -76,24 +76,11 @@ case "$target" in
           fail "missing $vs_unix/DIA SDK/bin/amd64/msdia140.dll; build/vs_toolchain.py copies it unconditionally"
         fi
 
-        # Finding Visual Studio is not the same as Chromium finding it, and
-        # this check used to conflate the two: it passed on a runner where gn
-        # then died with "No supported Visual Studio can be found". The
-        # MSVC_LOCATION table in build/vs_toolchain.py looks for 2022 under
-        # %ProgramFiles% while these images install Build Tools into the x86
-        # tree, so ask vs_toolchain.py itself rather than trusting the path.
-        if [ -n "${SRC:-}" ] && [ -f "$SRC/build/vs_toolchain.py" ]; then
-          if DEPOT_TOOLS_WIN_TOOLCHAIN=0 python3 -c '
-import os, sys
-sys.path.insert(0, os.path.join(os.environ["SRC"], "build"))
-import vs_toolchain
-sys.stdout.write(vs_toolchain.DetectVisualStudioPath())
-' >/dev/null 2>&1; then
-            note "vs_toolchain.py resolves the toolchain"
-          else
-            fail "vswhere found $vs_path but build/vs_toolchain.py cannot resolve it; export vs2022_install (scripts/lib.sh does this) or gn will fail at visual_studio_version.gni"
-          fi
-        fi
+        # Whether Chromium can actually FIND this install is asserted in
+        # configure.sh, not here. This script runs before the checkout exists,
+        # so build/vs_toolchain.py is not present to ask, and a guarded check
+        # that finds no file would skip silently -- a check rendering as green
+        # because it never ran.
       fi
     else
       fail "vswhere.exe not found at $vswhere; vs_toolchain.py cannot locate Visual Studio"

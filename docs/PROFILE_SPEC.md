@@ -160,11 +160,11 @@ timezone travels as the per-field switches `--fingerprint-locale` and
 `--fingerprint-timezone`, which is what the precedence list above already
 implies by putting per-field overrides above the seed. It used to travel as an
 `--apostate-profile` envelope carrying nothing but a locale block, and that was
-a bug rather than a style: `InstallComposedProfile()` returns early whenever
-`--apostate-profile` is present, and `base/apostate/profile.cc` leaves absent
-fields absent by design, so an envelope with only a locale in it meant
-composition never ran. Eleven of twelve axes silently inherited the host and
-`--fingerprint` was ignored. Since `geoip` defaults on, that was very nearly
+a bug rather than a style: `InstallComposedProfile()` returns early when
+`--apostate-profile` carries device content, and `base/apostate/profile.cc`
+leaves absent fields absent by design, so an envelope with only a locale in it
+meant composition never ran. Eleven of twelve axes silently inherited the host
+and `--fingerprint` was ignored. Since `geoip` defaults on, that was very nearly
 every launch. The user-visible point is the one to keep: asking for a locale or
 a timezone no longer costs you the composed fingerprint.
 
@@ -175,14 +175,53 @@ With `geoip: true`, the lookup is performed through the configured proxy, or
 through the direct network when no proxy is configured. The result is fixed for
 the process before Chromium starts.
 
-A timeout or lookup failure should be reported rather than papered over, and the
-two packages do not currently agree on that. Python raises `GeoIPError` or
-`GeoIPUnavailableError`. Node warns on the console and continues with
-`{locale: "en-US", timezone: "UTC"}`, and has a second unconditional fallback to
-the same pair below it, so a Node caller whose lookup fails gets an invented
-American locale rather than an error. That is a defect in the Node adapter and
-not the intended contract; it is recorded here rather than described as the
-guarantee it is not.
+**A failure is reported and nothing is invented.** That is the contract: no
+timeout, unreachable provider or malformed response ever produces a `UTC` or
+`en-US` that the caller did not ask for. It is a guarantee about invention, not
+a promise to raise.
+
+The clean version of that only became possible with the change described above.
+While the GeoIP result travelled inside an envelope, "set nothing" and "set
+`en-US`/`UTC`" were the same thing operationally, because an envelope with no
+locale block was still an envelope and suppressed composition either way. Now
+that the result rides `--fingerprint-locale` and `--fingerprint-timezone`,
+omitting those two switches is a real state: the composed profile's own drawn
+locale and timezone apply, and they are coherent with the rest of the identity
+by construction, since the same seed produced them. So a failed lookup yields a
+launch that succeeds, is internally coherent, and invents nothing.
+
+The behaviour that implements it is decided and landing, not landed. Both
+packages will proceed with no locale or timezone override, record a warning a
+caller can read, and invent nothing. The warning lands in the existing warnings
+list rather than a new channel: `diagnostics.warnings` in Node, and
+`LaunchPlan.diagnostics["warnings"]` in Python, where it is merged after the
+resolver returns because the lookup runs before a `ProfileResolution` exists. A
+stderr line stays too, but the field is what a caller should inspect, since a
+console line is invisible to code reading a return value.
+
+One behaviour change worth stating plainly, because it is a move toward
+leniency: a Python launch that previously raised `GeoIPError` on a lookup
+failure will succeed instead. On the launch path Python will no longer raise for
+a lookup failure, a timeout, an unavailable provider, or a malformed or
+incomplete provider result; it warns and sends no override, and a partial result
+still contributes the field it does carry. `resolve_geoip()` called directly
+keeps raising at every site it raises today, and a non-positive `geoip_timeout`
+still raises, because that is a caller bug rather than a network failure.
+`GeoIPError` and `GeoIPUnavailableError` stay exported and stay raised by
+`resolve_geoip()`, so a `try`/`except` around a direct call is still needed and
+one around `launch()` for the failure path is not. Parity is the reason the
+stricter of the two conforming behaviours is not kept.
+
+Until that lands, the two packages disagree and neither matches the contract:
+Python raises on the launch path, and Node warns on the console and continues
+with `{locale: "en-US", timezone: "UTC"}`, with a second unconditional fallback
+to the same pair below it. The Node half is the defect the ruling closes.
+
+**`geoip` is best-effort geo-matching; explicit values are the guarantee.** When
+a lookup fails, the persona keeps its own composed locale and timezone, which
+will not match the proxy's exit country. Passing `locale` and `timezone`
+explicitly is the deterministic way to guarantee geo-matching, and it is already
+the strongest row of the chain above rather than a new mechanism.
 
 The Node adapter performs the built-in GeoIP request through the configured
 HTTP(S), SOCKS4, or SOCKS5 proxy. Chromium authentication is a separate native
@@ -197,6 +236,29 @@ populating it is what allows preemptive authentication. Skipping it forces a
 407 round trip on every new connection and leaves multi-round schemes
 unfinished. UDP over SOCKS5 UDP ASSOCIATE, including proxied QUIC/HTTP3, is
 supported natively; WebRTC UDP/STUN/TURN is not offered.
+
+Proxy credentials are the one remaining envelope user, and they inherit the cost
+the locale path just escaped. Credentials have no switch of their own, so they
+travel in an `--apostate-profile` envelope, and the shape the launcher sends is
+`{device_profile: {}, proxy_credentials: {…}}` — an *empty* device profile
+rather than an absent one, which is what suppresses composition. So a launch
+that authenticates to a proxy currently inherits the host on every axis. The
+empty key is not redundant either: `base/apostate/profile.cc` reads
+`proxy_credentials` only inside `FindDict("device_profile")`, so a payload
+without that key loses the credentials altogether.
+
+The fix is native and is landing rather than landed: composition will run when
+the payload claims no device — an empty or absent `device_profile`, or a bare
+payload whose only key is `proxy_credentials` — and the composed profile is then
+re-installed with the credentials attached. A payload carrying any device
+content still suppresses composition, so absent-means-absent is untouched. The
+user-visible line is the same one the locale path earned: authenticating to a
+proxy will no longer cost you the composed fingerprint.
+
+Until it lands the Node package warns loudly about it, which is an interim by
+decision rather than a workaround, and a credential-free `--proxy-server`
+endpoint with authentication supplied another way avoids the envelope entirely.
+
 `humanize: true` is rejected rather than accepted as a no-op.
 
 Geography controls locale and timezone only. Fonts, voices, GPU, rendering,

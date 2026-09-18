@@ -401,11 +401,19 @@ browser starts, through the proxy when one is configured, and the result travels
 as `--fingerprint-locale` and `--fingerprint-timezone` rather than as a profile
 envelope, so asking for a locale does not cost you the composed fingerprint.
 
-A lookup failure should be reported rather than replaced with `UTC` and `en-US`,
-and only the Python package does that: it raises `GeoIPError`. The Node package
-warns and continues with `en-US` and `UTC`, which is a known defect in the Node
-adapter rather than the intended behaviour. Pass `locale` and `timezone`
-explicitly if you need a failure to be loud on Node.
+A failed lookup never invents a locale. It leaves both switches off, so the
+profile's own drawn locale and timezone apply and the identity stays coherent —
+the same seed produced them. The consequence is worth being explicit about:
+those values will not match the proxy's exit country, so `geoip` is best-effort
+geo-matching and passing `locale` and `timezone` explicitly is the way to
+guarantee it.
+
+That behaviour is decided and landing rather than landed, and today the two
+packages differ: Python raises `GeoIPError` from `launch()` on a failed lookup,
+and Node warns on the console and continues with `en-US` and `UTC`. When the
+change lands, both will warn into the resolution's own warnings list — which a
+caller can read, unlike a console line — and neither will raise from `launch()`
+or invent a locale. `resolve_geoip()` called directly keeps raising.
 
 Proxy credentials go into Chromium's in-memory `HttpAuthCache`, the same place
 interactively typed credentials go. That cache is per network context, is never

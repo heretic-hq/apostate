@@ -110,7 +110,7 @@ browser = launch(
 | `fingerprint` | a fresh random seed | Seed for the whole identity. `"host"` (also `"off"`, `"false"`, `"0"`, `"disable"`, `"disabled"`) inherits the real machine and composes nothing. |
 | `fingerprint_platform` | host's own OS on macOS and Windows; `"windows"` on Linux | `windows`, `macos` or `linux`. Selects the GPU cluster as well as the OS identity. Needs that platform's fonts installed — see below. Cannot be combined with host inheritance. |
 | `locale`, `timezone` | derived from the seed | Override just these. |
-| `geoip` | `True` | Derive locale and timezone from the proxy's exit IP. A failed lookup raises `GeoIPError` rather than inventing `en-US`/`UTC`. |
+| `geoip` | `True` | Best-effort: derive locale and timezone from the proxy's exit IP. A failed lookup never invents `en-US`/`UTC`; the launch keeps the profile's own composed locale and timezone, which will not match the proxy's exit country, so pass `locale` and `timezone` explicitly when geo-matching has to be guaranteed. Landing with that change: a lookup failure currently raises `GeoIPError` from `launch()` and will instead warn and continue. `resolve_geoip()` called directly keeps raising. |
 | `proxy` | none | `http://`, `https://`, `socks5://`; credentials are kept out of the command line. |
 | `headless` | `True` | |
 | `user_data_dir` | off-the-record | Persist cookies and storage. |

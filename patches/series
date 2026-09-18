@@ -241,3 +241,33 @@
 # in a different function, and neither touches the other's struct members.
 # It is last because it was authored last.
 0113-a-persistent-profile-keeps-one-identity.patch
+
+# 0114 stops a composed launch inheriting the operator's locale environment,
+# which today's packaging change made a live leak: with 440 locale paks instead
+# of one, the host's LANG and LANGUAGE reach the application locale and a
+# composed Windows persona served Thai navigator.languages, Thai Intl
+# formatting and a Buddhist calendar. It writes the same four variables the
+# Python and Node launchers already write, in the browser process, before the
+# locale is resolved and before the first child is forked.
+#
+# It comes after 0081, which wrote base/apostate/compose.{h,cc},
+# base/apostate/profile.{h,cc} and base/apostate/explain.{h,cc} -- every file
+# it touches -- and after 0084, whose PreSandboxStartup call site is the point
+# it relies on and does not change.
+#
+# After 0111 twice over, and this is the load-bearing one. 0111 made
+# --fingerprint-locale the only thing that writes locale.accept_languages into
+# a composed profile, which is why reading the switch here is complete rather
+# than a shortcut; and 0111 wrote the resolve_locale() lambda, the
+# LocaleInheritanceNote helper and the two "(inherited)" assertions in
+# compose_unittest.cc that this patch rewrites. Its compose.cc hunks carry
+# 0111's exact lines as context in both places.
+#
+# After 0106, which wrote the PayloadDescribesDevice branch and
+# ReportAuthoredProfileBypass that its compose.cc hunks edit, and after 0110,
+# which wrote profile.h's static payload-helper family that
+# AcceptLanguagesInPayload joins and the profile.cc block it is appended after.
+#
+# After 0113, which is the last patch to touch the explain report and the
+# compose_unittest.cc tail this appends past. It is independent of 0112.
+0114-composed-locale-never-the-host-shell.patch

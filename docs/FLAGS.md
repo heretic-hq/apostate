@@ -202,16 +202,17 @@ apostate fingerprint composition
   reproduce with      --fingerprint=12345
   root                60eab51485a4...
 
-surface                          layer       evidence               value
-anchor                           anchor      physical-ground-truth  macos-metal-apple-850a91233555
-os_release                       dispersion  catalogue-value        macos-26-5-0
-gpu_identity                     dispersion  physical-ground-truth  apple-m4-max
-cpu                              dispersion  physical-ground-truth  cores-14
-memory                           dispersion  catalogue-value        gib-8
-panel                            dispersion  catalogue-value        mba13-default
-audio                            dispersion  physical-ground-truth  coreaudio-256
-locale.accept_languages          host-inherited host-inherited      (inherited)
-locale.timezone                  host-inherited host-inherited      (inherited)
+surface                  layer             evidence               value
+anchor                   anchor            physical-ground-truth  macos-metal-apple-850a91233555
+os_release               dispersion        catalogue-value        macos-26-5-0
+gpu_identity             dispersion        physical-ground-truth  apple-m4-max
+cpu                      dispersion        physical-ground-truth  cores-14
+memory                   dispersion        catalogue-value        gib-8
+panel                    dispersion        catalogue-value        mba13-default
+audio                    dispersion        physical-ground-truth  coreaudio-256
+locale.application       composed-default  native-derived         en-US
+locale.accept_languages  composed-default  native-derived         (the en-US bundle's default)
+locale.timezone          host-inherited    host-inherited         (inherited)
 
 limitations
   - anchor macos-metal-apple-850a91233555 has one measured member, so no
@@ -224,11 +225,26 @@ limitations
     that same switch
 ```
 
-The two locale rows are the surface an operator checks against their exit IP,
-so the report names the layer that decided each one. `host-inherited` means no
-`locale` section was composed and the host's own zone and language list are in
-effect; `command-line` means a switch set it, which is also how a GeoIP answer
-from the Python or Node package arrives.
+The three locale rows are the surface an operator checks against their exit IP,
+so the report names the layer that decided each one.
+
+`locale.application` is the application locale the launch presents, and it is
+the row to read first because the other two resolve against it: it decides
+`Intl.DateTimeFormat`, `NumberFormat` and `Collator`, the calendar and hour
+cycle they report, the default `Accept-Language` list, and locale-dependent font
+fallback. `LANGUAGE`, `LC_ALL`, `LC_MESSAGES` and `LANG` are written to it in
+the browser process before the locale is resolved, so the host's own four never
+reach it. `command-line` means `--fingerprint-locale` named it — which is also
+how a GeoIP answer from the Python or Node package arrives —
+and `composed-default` means nothing did, so `en-US` is presented rather than
+the operator's shell. It is never `host-inherited`, except under
+`--fingerprint=host`, which reports no surfaces at all.
+
+`locale.accept_languages` is `command-line` when a switch named the list, and
+`composed-default` otherwise: no override is composed, and the list a page reads
+is the one the application locale's resource bundle declares. `locale.timezone`
+is the one of the three that really can be `host-inherited`, because ICU's zone
+is a separate producer from the application locale.
 
 The `evidence` column says where each value came from:
 `physical-ground-truth` is a measurement from a real device, `catalogue-value`

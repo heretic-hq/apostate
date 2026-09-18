@@ -443,15 +443,16 @@ ours on the next.
   `Isolate::DefaultLocale()`, which is ICU's process default converted to a
   language tag (`v8/src/execution/isolate.cc:8123`). Chromium sets that default
   from the *application* locale, which `l10n_util` resolves against the UI
-  resource bundles the build actually ships — and our linux-x64 artifact ships
-  exactly one, `locales/en-US.pak`, because
-  [`scripts/package-artifact.sh`](../scripts/package-artifact.sh) lists it as
-  the only pak in the required set. Chromium's build produces all 220. Our
-  packaging step discards them.
+  resource bundles the build actually ships. It was shipping exactly one.
+  [`scripts/package-artifact.sh`](../scripts/package-artifact.sh) listed
+  `locales/en-US.pak` as the only pak in the required set for linux-x64,
+  linux-arm64 and windows-x64, while Chromium's build produced all 220 —
+  packaging discarded them. That is fixed and the record of it stays, because
+  the *consequences* of fixing it are the rest of this entry.
 
-  So on the shipped artifact nothing moves the locale: `LANG=de_DE.UTF-8`,
+  While one pak shipped, nothing moved the locale: `LANG=de_DE.UTF-8`,
   `LC_ALL=fr_FR.UTF-8`, `LC_ALL=ja_JP.UTF-8`, `--lang=de-DE` and `--lang=fr-FR`
-  all leave every member at en-US. That is not a property of Chromium. Stock
+  all left every member at en-US. That is not a property of Chromium. Stock
   Google Chrome 151 with its full pak set, same host, same probe:
 
   ```text
@@ -478,29 +479,79 @@ ours on the next.
   unaffected — `package-artifact.sh` ships `Chromium.app` wholesale and the
   bundle already carries 55 `.lproj` directories.
 
-  Until a build ships the wider set, `--fingerprint-locale` moves web-content
-  language preferences and not the UI locale, so a launch that geo-matches its
-  language list to a proxy exit still formats dates and numbers as en-US.
+  **That build has landed, and it turned the lever on.** The artifact now ships
+  440 paks, so the environment moves the application locale for real — and the
+  first thing it moved was the host's own value into a composed persona. On a
+  host with `LANG=th_TH.UTF-8` and `LANGUAGE=th`, a Windows persona served Thai
+  `navigator.languages`, Thai `Intl` formatting, and `calendar: "buddhist"`,
+  which restates every year it touches as `1/1/2513`. That is not inheritance,
+  it is the host showing through a composed profile, and it was worse than the
+  en-US the wider pak set replaced.
 
-  When that build lands, the environment is set by the launcher and never
-  inherited by a composed launch. Only `--fingerprint=host` inherits the host's
-  locale environment, because only there is the host the thing being presented.
-  A composed persona gets `LANGUAGE`, `LC_ALL`, `LC_MESSAGES` and `LANG` written
-  explicitly — to the resolved locale when a launch layer named one, and to the
-  composed default when none did. All four, because each moves the application
-  locale on its own, so leaving any one of them at the operator's value lets the
-  host win through a variable nobody wrote. The failure this avoids is specific:
-  an operator in Bangkok with `LANG=th_TH.UTF-8`, composing a Windows persona
-  through a Mexican exit, would otherwise serve Thai language preferences and
-  Thai date and number formatting from a Mexican IP under a synthetic Windows
-  identity. That is not inheritance, it is the host showing through a composed
-  profile, and it is worse than the en-US the wider pak set replaces.
+  So the environment is written, never inherited, in three places that agree:
+  the Python package, the Node package, and — since patch `0114` — the browser
+  itself, for the bare launch that goes through neither. Only
+  `--fingerprint=host` inherits the host's locale environment, because only
+  there is the host the thing being presented. A composed persona gets
+  `LANGUAGE`, `LC_ALL`, `LC_MESSAGES` and `LANG` written explicitly — to the
+  resolved locale when a launch layer named one, and to the composed default
+  `en-US` when none did. All four, because each moves the application locale on
+  its own, so leaving any one of them at the operator's value lets the host win
+  through a variable nobody wrote. `LANGUAGE` takes the BCP-47 tag as written
+  and the other three take the POSIX spelling; a locale the host has not
+  generated therefore still works, because `LANGUAGE` needs nothing generated.
 
-  `ledger/surfaces.jsonl`'s `intl.resolved-locale` row carries the escalation,
-  every measurement above, and the one question still open: whether stock on a
-  host whose system language is not English reports its own locale or en-US,
-  which decides whether that combination is a defect or the correct reproduction
-  of a real device.
+  Writing them is necessary and not sufficient, and this is the part worth
+  remembering. `content/app/content_main.cc` runs `setlocale(LC_ALL, "")` before
+  any embedder hook exists, so the C library has already adopted the operator's
+  environment; glib reads `LANGUAGE` live but falls back to the C library when
+  it is unset. Measured: with `LANG=en_US.UTF-8` inherited and the composed
+  environment written, `LC_MESSAGES` was still `en_US.UTF-8`. Patch `0114`
+  therefore re-runs `content`'s two `setlocale` calls from `"C"`, the locale a
+  fresh process starts in, which reproduces exactly the state a launcher-set
+  environment produces. It runs from `InstallComposedProfile` at
+  `PreSandboxStartup`, after the compositor and before both the zygote fork and
+  the `PreCreateThreadsImpl` resolution, so every child inherits the answer
+  rather than deciding again.
+
+  **The environment is the Linux lever and only the Linux lever.** macOS
+  resolves the application locale from `NSBundle`'s `preferredLocalizations` —
+  `LANG`, `LANGUAGE` and `LC_ALL` each leave `Intl` at en-US on the shipped
+  bundle, measured — and Windows falls through to `GetUserDefaultLocaleName`.
+  Those two leak the host's *system* language by routes no environment fix
+  reaches, and they are what `intl.resolved-locale` stays escalated for.
+
+  What else the 440 paks turned on, since the paks were dead weight and are now
+  live, and all of it page-readable off one application locale: the calendar and
+  hour cycle `Intl.DateTimeFormat` reports; `getWeekInfo().firstDay`;
+  `Intl.Collator`'s default order, which sorts `aäoz` under en-US and `aozä`
+  under sv; number and date grouping; `DisplayNames`, `RelativeTimeFormat`,
+  `ListFormat` and long time-zone names; the *shape* of `navigator.languages`,
+  since `LANGUAGE=th` yields `["th-TH","th"]` with no English fallback while
+  `de` yields four entries, so the list length is a second-order signal; the
+  rendered width of `<input type=date>`, 125.33px under en-US against 106.33
+  (th), 108.33 (ja) and 141.33 (ar) at one font size, which is the host's locale
+  read off a UA form control with no `Intl` call at all; and locale-dependent
+  CJK font fallback, visible in `measureText`. The UI's RTL flip under
+  `LANGUAGE=ar` was tested and does *not* reach
+  `getComputedStyle(documentElement).direction`.
+
+  The check, against a fresh artifact on a host whose shell is deliberately
+  foreign:
+
+  ```sh
+  LANG=th_TH.UTF-8 LANGUAGE=th \
+    node scripts/checks/release-smoke.mjs <artifact>/chrome
+  ```
+
+  Before `0114` that printed three failures, `LOCALE windows`, `LOCALE macos`
+  and `LOCALE linux`, each `languages=th-TH,th intl=th`. After it, all twelve
+  checks pass and each LOCALE line reads `languages=en-US,en intl=en-US`.
+
+  `ledger/surfaces.jsonl`'s `intl.resolved-locale` row carries every measurement
+  above and the one question still open: whether stock on a host whose system
+  language is not English reports its own locale or en-US, which decides whether
+  that combination is a defect or the correct reproduction of a real device.
 
 ## 9. Verification
 
@@ -542,19 +593,24 @@ the launch on stderr and exits non-zero rather than half-applying.
 [docs/FLAGS.md](FLAGS.md) is the user-facing reference for all of these.
 
 `--fingerprint-explain` prints, per surface, the resolved value, the layer that
-owns it (invariant, anchor, dispersion, command-line, host-inherited), the
-evidence class, and any limitation. It answers what the profile claims and what
-this host can actually serve, and on a cross-OS launch it is where the pairing's
-cost is reported rather than hidden: which fonts the persona needs, and what
-stays the host's whatever the profile says.
+owns it (invariant, anchor, dispersion, command-line, host-inherited,
+composed-default), the evidence class, and any limitation. It answers what the
+profile claims and what this host can actually serve, and on a cross-OS launch
+it is where the pairing's cost is reported rather than hidden: which fonts the
+persona needs, and what stays the host's whatever the profile says.
 
-The locale surface reports as two rows, `locale.accept_languages` and
-`locale.timezone`, each naming its own layer and carrying the resolved value
-rather than a policy id. It printed one row naming the policy id before, which
-is how a Bangkok host serving `America/New_York` produced a report with nothing
-wrong in it: the drawn id `en-us` was accurate, and the zone it implied was
-never printed. A report that cannot show the value an operator is comparing
-against an exit IP cannot be used to debug the comparison.
+The locale surface reports as three rows, `locale.application`,
+`locale.accept_languages` and `locale.timezone`, each naming its own layer and
+carrying the resolved value rather than a policy id. It printed one row naming
+the policy id before, which is how a Bangkok host serving `America/New_York`
+produced a report with nothing wrong in it: the drawn id `en-us` was accurate,
+and the zone it implied was never printed. A report that cannot show the value
+an operator is comparing against an exit IP cannot be used to debug the
+comparison. `locale.application` was added for the same reason one step later:
+the report said `locale.accept_languages (inherited)` on a launch that was
+serving Thai under a Windows persona, because the application locale those rows
+resolve against was named nowhere. `composed-default` is the layer that exists
+to be unmistakable — not the operator's choice, not the host's value.
 It writes to stdout, never to a page-visible API.
 
 ### Table transport

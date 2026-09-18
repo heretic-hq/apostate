@@ -8,7 +8,12 @@
   "properties": {
     "id": {
       "type": "string",
-      "description": "Native source identifier consumed by base/apostate/profile.cc; it identifies the selected profile and remains in the runtime payload."
+      "description": "Native source identifier consumed by base/apostate/profile.cc; it identifies the selected profile and remains in the runtime payload.",
+      "x-ledger": {
+        "reason": "not-a-surface",
+        "why": "The loader parses it into source_id_ and no emitter reads that field, so nothing a page can measure depends on it. It names the profile rather than describing the device, and a surface row describes an observable a detector reads.",
+        "evidence": "patches/0004-base-device-profile-loader.patch:source_id_"
+      }
     },
     "source_capture": {
       "type": "string",
@@ -16,6 +21,11 @@
       "x-wiring": {
         "reason": "not-a-browser-surface",
         "why": "Provenance, not a device claim. Both launchers strip it from the payload before the switch is built, so the native loader can never see it and no C++ read could exist.",
+        "evidence": "python/apostate/launch.py:source_capture"
+      },
+      "x-ledger": {
+        "reason": "not-a-surface",
+        "why": "Provenance for the resolver's own bookkeeping, stripped from the payload before launch, so there is no observable for a surface row to describe and no tier it could be verified at.",
         "evidence": "python/apostate/launch.py:source_capture"
       }
     },
@@ -224,6 +234,12 @@
     "screen": {
       "type": "object",
       "additionalProperties": false,
+      "x-precedence": {
+        "available_work_area": [
+          "avail_inset_left/top/right/bottom, whenever the profile is composed: base/apostate/compose.cc DeriveWorkArea reads the four insets, REMOVES them from the payload, and Sets the four absolute avail_* from them. Both sets are declared, a profile may carry both, and on this path the insets win outright because the Set overwrites whatever was there.",
+          "avail_left/top/width/height as supplied, on the --apostate-profile path: ComposeProfileForCurrentProcess returns before DeriveWorkArea when that switch is present, so nothing derives anything, base/apostate/profile.cc reads only the four absolutes, and any insets beside them are inert. That is the one path on which a profile's insets change nothing a page can see."
+        ]
+      },
       "properties": {
         "displays": {
           "type": "array",
@@ -336,13 +352,16 @@
           "type": "integer"
         },
         "avail_width": {
-          "type": "integer"
+          "type": "integer",
+          "description": "screen.availWidth. A derived output on the composed path: DeriveWorkArea overwrites it with width - avail_inset_left - avail_inset_right, so a value supplied beside the insets is discarded rather than merged. Read as given only when composition is skipped. See x-precedence on this object."
         },
         "avail_height": {
-          "type": "integer"
+          "type": "integer",
+          "description": "screen.availHeight. Same precedence as avail_width: DeriveWorkArea overwrites it with height - avail_inset_top - avail_inset_bottom on the composed path, and it is read as given only when composition is skipped."
         },
         "device_pixel_ratio": {
-          "type": "number"
+          "type": "number",
+          "description": "THE DEVICE SCALE FACTOR, NOT devicePixelRatio. The name matches ScreenDetailed.devicePixelRatio, the observable it replays, and not the arithmetic: window.devicePixelRatio is DSF x page zoom x CSS zoom (LocalFrame::DevicePixelRatio over LayoutZoomFactor), so a 2x display at 110% zoom reports 2.2 while this field holds 2. base/apostate/profile.cc stores it as device_scale_factor_ and it is served into ScreenInfo::device_scale_factor, which is the input to that product, so Chromium re-forms the ratio exactly as navigator.deviceMemory re-does its bucketing from real RAM. Do NOT pin LocalDOMWindow::devicePixelRatio to this value: the ledger row window.device-pixel-ratio records that it fails three ways at once, because the CSS resolution feature and the DPR client hint keep reading the real product and the ratio stops responding to zoom, which no real browser does. Evidence class: physical-ground-truth when captured, catalogue-value otherwise."
         },
         "color_depth": {
           "type": "integer",
@@ -353,11 +372,12 @@
           "description": "Chromium uses this as an HDR flag rather than a bit depth; only 24 and 30 exist. It drives screen.colorDepth and screen.pixelDepth only. The dynamic-range and color-gamut media features come from color_gamut and hdr below, not from this: conformance showed colorDepth matching the reference device while both media features did not."
         },
         "avail_left": {
-          "type": "integer"
+          "type": "integer",
+          "description": "screen.availLeft. A derived output on the composed path: DeriveWorkArea overwrites it with avail_inset_left, the panel origin being zero by construction since patch 0101 removed a screen.left lookup no profile can answer. Read as given only when composition is skipped."
         },
         "avail_top": {
           "type": "integer",
-          "description": "Height of the menu bar on macOS or a top-docked taskbar on Windows. Not derivable from the sizes: a total inset says nothing about how it splits above and below."
+          "description": "screen.availTop: height of the menu bar on macOS or a top-docked taskbar on Windows. Not derivable from the sizes, because a total inset says nothing about how it splits above and below. A derived output on the composed path, where DeriveWorkArea overwrites it with avail_inset_top; read as given only when composition is skipped."
         },
         "color_gamut": {
           "type": "string",
@@ -376,25 +396,25 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 100000,
-          "description": "Work-area inset the OS furniture contributes on the left edge, in CSS pixels. Insets are carried instead of absolute avail_* coordinates because availLeft and availTop are panel-relative: the Windows reference capture ran on a second monitor at x=1920 and reported availLeft 1920 with a zero inset. The loader derives avail_left = left + avail_inset_left and avail_width = width - avail_inset_left - avail_inset_right. Evidence class: physical-ground-truth when measured, catalogue-value for an authored furniture model."
+          "description": "Work-area inset the OS furniture contributes on the left edge, in CSS pixels. Insets are the composition-time input and the absolute avail_* coordinates are its output, because availLeft and availTop are panel-relative: the Windows reference capture ran on a second monitor at x=1920 and reported availLeft 1920 with a zero inset. base/apostate/compose.cc DeriveWorkArea derives avail_left = avail_inset_left and avail_width = width - avail_inset_left - avail_inset_right, then removes all four insets from the payload, so the native loader never reads one. Evidence class: physical-ground-truth when measured, catalogue-value for an authored furniture model."
         },
         "avail_inset_top": {
           "type": "integer",
           "minimum": 0,
           "maximum": 100000,
-          "description": "Work-area inset the OS furniture contributes on the top edge, in CSS pixels. Insets are carried instead of absolute avail_* coordinates because availLeft and availTop are panel-relative: the Windows reference capture ran on a second monitor at x=1920 and reported availLeft 1920 with a zero inset. The loader derives avail_top = top + avail_inset_top and avail_height = height - avail_inset_top - avail_inset_bottom. Evidence class: physical-ground-truth when measured, catalogue-value for an authored furniture model."
+          "description": "Work-area inset the OS furniture contributes on the top edge, in CSS pixels. Insets are the composition-time input and the absolute avail_* coordinates are its output, for the reason given on avail_inset_left. base/apostate/compose.cc DeriveWorkArea derives avail_top = avail_inset_top and avail_height = height - avail_inset_top - avail_inset_bottom, then removes all four insets from the payload. It adds no panel origin: patch 0101 deleted the screen.top lookup because the schema declares no such key and forbids additional properties here, so that fallback could only ever be zero. Evidence class: physical-ground-truth when measured, catalogue-value for an authored furniture model."
         },
         "avail_inset_right": {
           "type": "integer",
           "minimum": 0,
           "maximum": 100000,
-          "description": "Work-area inset the OS furniture contributes on the right edge, in CSS pixels. Insets are carried instead of absolute avail_* coordinates because availLeft and availTop are panel-relative: the Windows reference capture ran on a second monitor at x=1920 and reported availLeft 1920 with a zero inset. The loader derives avail_width from the two horizontal insets. Evidence class: physical-ground-truth when measured, catalogue-value for an authored furniture model."
+          "description": "Work-area inset the OS furniture contributes on the right edge, in CSS pixels. Composition-time input only, like the other three: DeriveWorkArea derives avail_width from the two horizontal insets and then removes them. Evidence class: physical-ground-truth when measured, catalogue-value for an authored furniture model."
         },
         "avail_inset_bottom": {
           "type": "integer",
           "minimum": 0,
           "maximum": 100000,
-          "description": "Work-area inset the OS furniture contributes on the bottom edge, in CSS pixels. Insets are carried instead of absolute avail_* coordinates because availLeft and availTop are panel-relative: the Windows reference capture ran on a second monitor at x=1920 and reported availLeft 1920 with a zero inset. The loader derives avail_height from the two vertical insets. Evidence class: physical-ground-truth when measured, catalogue-value for an authored furniture model."
+          "description": "Work-area inset the OS furniture contributes on the bottom edge, in CSS pixels. Composition-time input only, like the other three: DeriveWorkArea derives avail_height from the two vertical insets and then removes them. A partial inset set is dropped without deriving anything, because DeriveWorkArea removes the insets before it checks that width, height and all four are present. Evidence class: physical-ground-truth when measured, catalogue-value for an authored furniture model."
         }
       }
     },
@@ -490,6 +510,11 @@
         "limits": {
           "type": "object",
           "description": "Numeric limits keyed as the IDL spells them. Served as the minimum of claim and backend, like gl_limits.",
+          "x-ledger": {
+            "reason": "row-names-no-field",
+            "why": "The surface is recorded as webgpu.adapter-limits, and that row is verdict escalate with profile_field null: a T0 capture differential showed a browser claiming a different GPU returning limits byte-identical to the real hardware, and whether a real limit set can be sourced per GPU family is a corpus question rather than a patching one. So the key exists to carry the answer once the row has one.",
+            "evidence": "ledger/surfaces.jsonl:webgpu.adapter-limits"
+          },
           "additionalProperties": {
             "type": "integer",
             "minimum": 0
@@ -757,6 +782,11 @@
         "reason": "declared-not-implemented",
         "why": "The ledger records window.outer-dimensions as inherit and coh.window-chrome-inset-matches-os states that the difference is produced by the platform rather than by any value we can set, so a loader read would have to fabricate outerHeight and break coh.window-within-avail-rect against screenY. The designed realisation is sizing the real OS window at launch, which neither launcher does yet; docs/LIMITATIONS.md states that the fields do nothing.",
         "evidence": "docs/LIMITATIONS.md"
+      },
+      "x-ledger": {
+        "reason": "row-names-no-field",
+        "why": "The surfaces are recorded as window.outer-dimensions and window.inner-dimensions, both verdict inherit with profile_field null, because window size is user state and what must hold is the relation coh.window-chrome-inset-matches-os rather than a value. An inherit row names no field by design, so these keys carry the measurement with no row able to name them.",
+        "evidence": "ledger/surfaces.jsonl:window.outer-dimensions"
       },
       "properties": {
         "outer_inner_delta_width": {

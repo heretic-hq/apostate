@@ -14,6 +14,7 @@ import hashlib
 from pathlib import Path
 import re
 import sys
+import textwrap
 from typing import Iterable
 
 
@@ -63,42 +64,221 @@ def _read_manifest(path: Path) -> dict[str, str]:
     return values
 
 
-def _series_entries(series_path: Path) -> list[str]:
+def _series_runs(series_path: Path) -> list[tuple[str | None, list[tuple[int, str]]]]:
+    """Split patches/series into runs of entries tagged with what documents them.
+
+    The series is the apply order, and that order is set by dependency rather
+    than by number: 0093 rewrites the branch of compose.cc 0091 reaches, so it
+    follows it, and 0084/0085 come last because they are authored on top of
+    the whole compose.cc chain.  Every such departure is explained by a
+    comment above the entries it applies to, so a run is the unit the
+    explanation covers, and these runs are what makes that documentation
+    machine-readable instead of decorative.
+    """
     try:
         lines = series_path.read_text(encoding="utf-8").splitlines()
     except OSError as error:
         raise ValidationError(f"cannot read patches/series: {error}") from error
 
-    entries: list[str] = []
+    runs: list[tuple[str | None, list[tuple[int, str]]]] = []
+    comment: str | None = None
+    current: list[tuple[int, str]] = []
     for line_number, raw_line in enumerate(lines, 1):
         name = raw_line.partition("#")[0].strip()
-        if not name:
+        if name:
+            # build.sh treats entries as direct children of patches/.  Reject
+            # traversal and nested paths rather than hashing an unexpected file.
+            candidate = Path(name)
+            if candidate.name != name or name in {".", ".."}:
+                raise ValidationError(
+                    f"patches/series line {line_number} has invalid patch name {name!r}"
+                )
+            current.append((line_number, name))
             continue
-        # build.sh treats entries as direct children of patches/.  Reject
-        # traversal and nested paths rather than hashing an unexpected file.
-        candidate = Path(name)
-        if candidate.name != name or name in {".", ".."}:
-            raise ValidationError(
-                f"patches/series line {line_number} has invalid patch name {name!r}"
-            )
-        entries.append(name)
-    return entries
+        if current:
+            runs.append((comment, current))
+            current = []
+            comment = None
+        body = raw_line.strip()
+        text = body.lstrip("#").strip() if body.startswith("#") else ""
+        if text:
+            comment = f"{comment} {text}" if comment else text
+        else:
+            # A blank line between a comment and the entries below it means the
+            # comment is not introducing them, so a banner at the top of the
+            # file cannot silently exempt the whole series from the order check.
+            comment = None
+    if current:
+        runs.append((comment, current))
+    return runs
 
 
-def _check_hash(manifest: dict[str, str], key: str, expected: str, errors: list[str]) -> None:
+def _series_entries(series_path: Path) -> list[str]:
+    return [name for _, run in _series_runs(series_path) for _, name in run]
+
+
+def _patch_targets(patch_path: Path) -> tuple[set[str], set[str]]:
+    """Return the paths one patch creates and the paths it needs to exist.
+
+    A file section is a `--- ` line immediately followed by a `+++ ` line.
+    That pair, not either prefix alone, is what identifies a header: several
+    patches in this series carry no `diff --git` line, and a hunk body line
+    can itself begin with `---`.  scripts/validate-patch-headers.py reads the
+    series the same way, so there is one convention rather than two.
+    """
+    try:
+        lines = patch_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as error:
+        raise ValidationError(f"cannot read {patch_path.name}: {error}") from error
+
+    def target(raw: str) -> str | None:
+        value = raw[4:].split("\t", 1)[0].strip()
+        if value in {"/dev/null", ""}:
+            return None
+        return re.sub(r"^[ab]/", "", value)
+
+    created: set[str] = set()
+    required: set[str] = set()
+    for index, line in enumerate(lines[:-1]):
+        if not (line.startswith("--- ") and lines[index + 1].startswith("+++ ")):
+            continue
+        old, new = target(line), target(lines[index + 1])
+        if old is None and new is not None:
+            created.add(new)
+        elif new is None and old is not None:
+            # A deletion still needs the file to be there first.
+            required.add(old)
+        elif old is not None and new is not None:
+            required.add(new)
+            required.add(old)
+    return created, required
+
+
+def _check_apply_order(
+    runs: list[tuple[str | None, list[tuple[int, str]]]],
+    patches_dir: Path,
+    errors: list[str],
+) -> None:
+    """Check the properties of the apply order that hold without a checkout.
+
+    The order itself cannot be verified here -- only scripts/apply-patches.sh
+    against the pinned tree can answer whether the series applies -- so this
+    checks the three things that are decidable from the repository:
+
+    * every entry is a numbered patch and no number is used twice, so the
+      series cannot silently grow a second 0093;
+    * an undocumented run of entries is in ascending numeric order, which
+      catches the accidental shuffle while leaving a deliberate reorder legal
+      as long as a comment says why;
+    * a patch that needs a file must follow the patch that creates it, which
+      is a real dependency edge derived from the diffs rather than from the
+      filenames.
+    """
+    seen: dict[int, str] = {}
+    for comment, run in runs:
+        previous: tuple[int, str] | None = None
+        for line_number, name in run:
+            match = re.fullmatch(r"([0-9]{4})-.+\.patch", name)
+            if match is None:
+                errors.append(
+                    f"patches/series line {line_number}: {name!r} is not a "
+                    "numbered patch of the form NNNN-description.patch"
+                )
+                continue
+            number = int(match.group(1))
+            if number in seen and seen[number] != name:
+                errors.append(
+                    f"patches/series uses number {match.group(1)} twice: "
+                    f"{seen[number]} and {name}"
+                )
+            seen[number] = name
+            if comment is None and previous is not None and number < previous[0]:
+                errors.append(
+                    f"patches/series line {line_number}: {name} is out of numeric "
+                    f"order after {previous[1]} and nothing says why. The series is "
+                    "the apply order and a dependency may require this, but an "
+                    "undocumented reorder is indistinguishable from an accident: "
+                    "restore numeric order, or introduce these entries with a "
+                    "comment naming the dependency that forces it."
+                )
+            previous = (number, name)
+
+    order = {name: index for index, (_, name) in enumerate(
+        (entry for _, run in runs for entry in run))}
+    creators: dict[str, str] = {}
+    requirers: dict[str, list[str]] = {}
+    for name in order:
+        patch_path = patches_dir / name
+        if not patch_path.is_file():
+            continue
+        created, required = _patch_targets(patch_path)
+        for path in created:
+            if path in creators:
+                errors.append(
+                    f"patches/series has two patches creating {path}: "
+                    f"{creators[path]} and {name}"
+                )
+            else:
+                creators[path] = name
+        for path in required:
+            requirers.setdefault(path, []).append(name)
+    for path, creator in sorted(creators.items()):
+        for name in requirers.get(path, ()):
+            if name != creator and order[name] < order[creator]:
+                errors.append(
+                    f"patches/series applies {name} before {creator}, which creates "
+                    f"{path}. A patch cannot edit a file that does not exist yet."
+                )
+
+
+_REFRESH_NOTE = (
+    "Both digests are functions of the patch files alone, so no build is needed "
+    "to move them: run scripts/validate-release-baseline.py --refresh and commit "
+    "the result. Run it last, once patches/series has stopped moving, because "
+    "every patch edit invalidates it again. It rewrites only those two fields: "
+    "MANIFEST.lock's [outputs] still describe binaries built from the earlier "
+    "patch set, and the authoritative output-to-patch binding is the build "
+    "lineage record rather than this file. See docs/RELEASE.md."
+)
+
+
+def _check_hash(
+    manifest: dict[str, str],
+    key: str,
+    expected: str,
+    errors: list[str],
+    drift: list[str],
+) -> None:
+    """Check one recorded digest.
+
+    A missing or malformed digest is a defect in the file and always an error.
+    A digest that simply disagrees with the current sources is drift, which is
+    the expected state between builds, and the caller decides whether that is
+    fatal.
+    """
     actual = manifest.get(key)
     if actual is None:
         errors.append(f"MANIFEST.lock is missing {key}")
     elif not _HASH_RE.fullmatch(actual):
         errors.append(f"MANIFEST.lock has invalid {key}")
     elif actual != expected:
-        errors.append(f"stale MANIFEST.lock: {key} does not match current sources")
+        drift.append(f"{key}: recorded {actual[:12]}, current sources {expected[:12]}")
 
 
-def validate(root: Path, *, series_only: bool = False) -> list[str]:
-    """Return validation errors for *root*; an empty list means valid."""
+def validate(
+    root: Path,
+    *,
+    series_only: bool = False,
+) -> tuple[list[str], list[str]]:
+    """Return (errors, build-record drift) for *root*.
+
+    An error is something wrong with the repository.  Drift is the recorded
+    build no longer describing the current patch set, which is the ordinary
+    state between builds and is a release-gate matter rather than a defect.
+    """
     root = root.resolve()
     errors: list[str] = []
+    drift: list[str] = []
     build_dir = root / "build"
     patches_dir = root / "patches"
     version_path = build_dir / "CHROMIUM_VERSION"
@@ -118,13 +298,15 @@ def validate(root: Path, *, series_only: bool = False) -> list[str]:
         version = version_values[0]
 
     try:
-        entries = _series_entries(series_path)
+        runs = _series_runs(series_path)
     except ValidationError as error:
         errors.append(str(error))
-        entries = []
-    numeric_order = [int(Path(name).name[:4]) for name in entries if re.fullmatch(r"[0-9]{4}-.+\.patch", name)]
-    if numeric_order != sorted(numeric_order):
-        errors.append("patches/series is out of numeric apply order: " + ", ".join(entries))
+        runs = []
+    entries = [name for _, run in runs for _, name in run]
+    try:
+        _check_apply_order(runs, patches_dir, errors)
+    except ValidationError as error:
+        errors.append(str(error))
 
     counts = Counter(entries)
     for name, count in sorted(counts.items()):
@@ -141,7 +323,7 @@ def validate(root: Path, *, series_only: bool = False) -> list[str]:
     for name in sorted(patch_files - set(counts)):
         errors.append(f"patches/series does not reference patch {name}")
     if series_only:
-        return errors
+        return errors, drift
     try:
         manifest = _read_manifest(manifest_path)
     except ValidationError as error:
@@ -153,17 +335,77 @@ def validate(root: Path, *, series_only: bool = False) -> list[str]:
             "Chromium version drift: build/CHROMIUM_VERSION and MANIFEST.lock disagree"
         )
 
-    if entries and all((patches_dir / name).is_file() for name in entries):
-        series_hash = _sha256(series_path.read_bytes())
-        contents_digest = hashlib.sha256()
-        for name in entries:
-            contents_digest.update(name.encode("utf-8") + b"\0")
-            contents_digest.update((patches_dir / name).read_bytes())
-            contents_digest.update(b"\0")
-        _check_hash(manifest, "patch_series_sha256", series_hash, errors)
-        _check_hash(manifest, "patch_contents_sha256", contents_digest.hexdigest(), errors)
+    computed = patch_digests(series_path, patches_dir, entries)
+    if computed is not None:
+        for key, expected in computed.items():
+            _check_hash(manifest, key, expected, errors, drift)
 
-    return errors
+    return errors, drift
+
+
+def patch_digests(
+    series_path: Path, patches_dir: Path, entries: list[str]
+) -> dict[str, str] | None:
+    """The two patch digests MANIFEST.lock records, or None if unresolvable.
+
+    Both are functions of files in this repository and nothing else, so they
+    are computable without a Chromium checkout or a build.  The contents
+    digest covers each entry's name and complete bytes with NUL separators in
+    series order, which is what makes a reorder visible even when no patch
+    changed.  scripts/build.sh computes them the same way; this is the copy
+    that both checks and refreshes them, so the two cannot drift apart.
+    """
+    if not entries or not all((patches_dir / name).is_file() for name in entries):
+        return None
+    contents = hashlib.sha256()
+    for name in entries:
+        contents.update(name.encode("utf-8") + b"\0")
+        contents.update((patches_dir / name).read_bytes())
+        contents.update(b"\0")
+    return {
+        "patch_series_sha256": _sha256(series_path.read_bytes()),
+        "patch_contents_sha256": contents.hexdigest(),
+    }
+
+
+def refresh(root: Path) -> tuple[list[str], list[str]]:
+    """Rewrite the two patch digests in build/MANIFEST.lock in place.
+
+    Idempotent, and deliberately narrow: it touches those two assignments and
+    nothing else, because every other field in the file is evidence from a
+    build and cannot be recomputed here.  Returns (errors, changes).
+    """
+    root = root.resolve()
+    patches_dir = root / "patches"
+    series_path = patches_dir / "series"
+    manifest_path = root / "build" / "MANIFEST.lock"
+    errors, _ = validate(root, series_only=True)
+    if errors:
+        return errors + ["refusing to refresh MANIFEST.lock over an invalid series"], []
+    try:
+        entries = _series_entries(series_path)
+        text = manifest_path.read_text(encoding="utf-8")
+    except (ValidationError, OSError) as error:
+        return [str(error)], []
+    computed = patch_digests(series_path, patches_dir, entries)
+    if computed is None:
+        return ["cannot compute patch digests: patches/series is empty or incomplete"], []
+
+    changes: list[str] = []
+    for key, expected in computed.items():
+        pattern = re.compile(rf'^({re.escape(key)}\s*=\s*)"([^"]*)"$', re.MULTILINE)
+        match = pattern.search(text)
+        if match is None:
+            return [
+                f"build/MANIFEST.lock has no {key} line to refresh; it is generated "
+                "by scripts/build.sh, so run a build rather than hand-writing one"
+            ], []
+        if match.group(2) != expected:
+            changes.append(f"{key}: {match.group(2)[:12]} -> {expected[:12]}")
+            text = text[:match.start()] + f'{match.group(1)}"{expected}"' + text[match.end():]
+    if changes:
+        manifest_path.write_text(text, encoding="utf-8")
+    return [], changes
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -179,12 +421,46 @@ def main(argv: Iterable[str] | None = None) -> int:
         action="store_true",
         help="validate exact patch-series completeness and order without MANIFEST.lock",
     )
+    parser.add_argument(
+        "--release",
+        action="store_true",
+        help="also require build/MANIFEST.lock to record the current patch set",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="rewrite the two patch digests in build/MANIFEST.lock and exit",
+    )
     args = parser.parse_args(argv)
-    errors = validate(args.root, series_only=args.series_only)
+    if args.refresh:
+        errors, changes = refresh(args.root)
+        if errors:
+            for error in errors:
+                print(f"ERROR: {error}", file=sys.stderr)
+            return 1
+        for change in changes:
+            print(f"refreshed {change}")
+        if not changes:
+            print("build/MANIFEST.lock already records the current patch set")
+        return 0
+    errors, drift = validate(args.root, series_only=args.series_only)
+    if drift and args.release:
+        errors.append(
+            "build/MANIFEST.lock records a build of an earlier patch set ("
+            + "; ".join(drift)
+            + "). " + _REFRESH_NOTE
+        )
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
+    if drift:
+        print("NOTICE: build/MANIFEST.lock records a build of an earlier patch set.")
+        for line in drift:
+            print(f"        {line}")
+        print(textwrap.indent(textwrap.fill(_REFRESH_NOTE, 72), "        "))
+        print("        This is not a repository defect. Re-run with --release")
+        print("        to make it fatal, as the release gate does.")
     print("release baseline valid")
     return 0
 

@@ -11,6 +11,11 @@ on:
       - "python/**"
       - "npm/**"
       - "patches/**"
+      # check-schema-wiring.py resolves an x-wiring annotation's evidence
+      # against a file in this repository, and one of them is
+      # docs/LIMITATIONS.md. A docs-only edit can therefore invalidate a
+      # schema annotation, so docs are a trigger rather than a blind spot.
+      - "docs/**"
       - ".github/release/**"
       - ".github/workflows/check.yml"
   workflow_dispatch:
@@ -125,6 +130,33 @@ jobs:
           # bundled catalogue and CI stayed green. This writes nothing, names
           # the stale paths, and costs under a second.
           python3 scripts/sync-packages.py --check
+
+  wiring:
+    name: schema wiring reconciliation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Reconcile declared profile keys against the C++ that reads them
+        if: ${{ hashFiles('scripts/check-schema-wiring.py') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/check-schema-wiring.py
+          test -f config/profile.schema.json
+          test -f patches/series
+          # Its own job rather than a step inside "schema validation", because
+          # a failure here is a different repair: the schema is well-formed and
+          # a key in it is inert. fonts.enumeration_allowlist sat in the schema,
+          # was composed into every profile, and was read by no C++ for its
+          # whole life; fonts.provisioned_directory was never read at all; 0097
+          # and 0099 were committed and left out of patches/series, so they were
+          # in the repository and in no build. Every one of those was found by
+          # hand, weeks after the artifacts started promising the feature. This
+          # reads patches/ rather than a Chromium checkout, so it needs nothing
+          # but this repository and runs in well under a second.
+          python3 scripts/check-schema-wiring.py
 
   catalogue:
     name: catalogue and resolver validation

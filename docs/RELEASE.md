@@ -36,7 +36,10 @@ For a source revision that satisfies the release gate:
 1. Set the repository variable `APOSTATE_BUILD_TARGETS` only if narrowing the
    default three-target set. This is a repository variable, not a shell variable
    on the maintainer's machine.
-2. Create and push a tag in the exact form `vMAJOR.MINOR.PATCH`.
+2. Refresh the two artefacts the release gate requires to be current, in this
+   order and as the last commit before the tag. Both are described under
+   [Two pre-tag refresh steps](#two-pre-tag-refresh-steps).
+3. Create and push a tag in the exact form `vMAJOR.MINOR.PATCH`.
 
 For example, when publishing package version `0.1.0`:
 
@@ -59,26 +62,112 @@ Manual dispatch accepts an existing `release_tag` and requires `confirm=true`
 to guard against starting a multi-hour paid build accidentally. It executes
 the same gate and build path; the confirmation is not an authentication check.
 
-### Patch changes require a refreshed baseline
+### Two pre-tag refresh steps
 
-`scripts/build.sh` generates `build/MANIFEST.lock` after a successful build.
-Its `patch_contents_sha256` covers every listed patch's name and complete
-bytes, in `patches/series` order. Changing any patch changes that digest even
-when the series file itself is unchanged.
+Two checked-in artefacts describe a state the repository has moved past, and
+neither is repaired by a CI build: the release gate runs before any build is
+scheduled, so an input it rejects stays rejected. Both refreshes belong to
+the last commit before the tag.
 
-`scripts/validate-release-baseline.py` checks the committed manifest in the
-release gate before any Chromium build is scheduled. After a patch edit,
-rebuild locally with the build scripts to refresh `build/MANIFEST.lock` and
-include it in the source revision before tagging. Otherwise the release gate
-fails immediately on the stale patch hash. A fresh CI build cannot repair an
-input rejected by the earlier gate.
+Everyday runs of `scripts/validate-release-baseline.py` and
+`scripts/test_profile_resolver.py` report both as a notice and a skip and exit
+zero, because between releases they are expected to be behind and a check that
+is permanently red is a check nobody reads. The release gate turns both into
+hard failures.
+
+#### The patch digests in `build/MANIFEST.lock`
+
+`patch_series_sha256` is the SHA-256 of `patches/series`.
+`patch_contents_sha256` covers every listed patch's name and complete bytes,
+in series order with NUL separators, so it moves when a patch is edited even
+though the series file did not change.
+
+Both are functions of files in this repository, so no build is needed:
+
+```sh
+python3 scripts/validate-release-baseline.py --refresh
+```
+
+It is idempotent, prints the digests it moved, and refuses to run over a
+series that does not validate. It worked when
+`python3 scripts/validate-release-baseline.py --release` exits zero.
+
+Run it **last**, once `patches/series` and the patch files have stopped
+moving; every subsequent patch edit invalidates it again.
+
+It rewrites those two fields and nothing else. The rest of `MANIFEST.lock` is
+evidence from a build, and after a digest-only refresh its `[outputs]` hashes
+still describe binaries built from the earlier patch set. That binding is not
+faked here: the authoritative output-to-patch record is the append-only build
+lineage beside the manifest, which `scripts/build.sh` writes with the
+`patch_contents_sha256` and `outputs_sha256` of each build together. A release
+build regenerates the whole file from its own inputs.
+
+#### The golden profile digests in `scripts/test_profile_resolver.py`
+
+`CompositionTests.GOLDEN_PROFILES` pins one SHA-256 per persona over the
+composed profile. Those digests were produced by the C++ compositor in the
+browser process, and comparing them against this repository's Python resolver
+is the only evidence that the two implementations agree byte for byte. **Do
+not recompute them from `scripts/profile_resolver.py`**: that replaces a
+cross-implementation comparison with the module agreeing with itself, and
+reports it as success.
+
+So this one does need a build, on the host the vector was taken on — macOS
+arm64, ANGLE/Metal, 14 logical cores, 36 GiB — because a capability table is
+bound to the backend serving it.
+
+```sh
+bash scripts/build.sh macos-arm64
+
+# No switch prints the composed profile. Patch 0005 copies
+# --apostate-profile onto every child process, so a child's command line is
+# the readout, and `ps` must be given -ww or it truncates the base64.
+.workspace/src/out/macos-arm64/Chromium.app/Contents/MacOS/Chromium \
+  --fingerprint=12345 --fingerprint-platform=windows \
+  --user-data-dir="$(mktemp -d)" about:blank &
+sleep 5
+ps -Awwo args= | tr ' ' '\n' | grep -m1 '^--apostate-profile=' \
+  | cut -d= -f2- | base64 -d > native-windows.json
+kill %1
+
+python3 - native-windows.json <<'PY'
+import hashlib, json, sys
+profile = json.load(open(sys.argv[1]))
+encoded = json.dumps(profile, sort_keys=True, separators=(",", ":"),
+                     ensure_ascii=False).encode("utf-8")
+print(len(profile), sorted(profile))
+print(hashlib.sha256(encoded).hexdigest())
+PY
+```
+
+Repeat with `--fingerprint-platform=macos` and `=linux`, then paste each
+digest and its section list into `GOLDEN_PROFILES` and `GOLDEN_SECTIONS`.
+`ensure_ascii=False` is not a detail: Chromium's JSON writer emits raw UTF-8
+for non-ASCII, and the macOS persona's `speech.voices` names are what make
+that digest evidence about escaping rather than only about field values.
+
+It worked when
+
+```sh
+APOSTATE_REQUIRE_NATIVE_GOLDENS=1 python3 scripts/test_profile_resolver.py
+```
+
+exits zero with no skips. Without that variable the two golden tests skip and
+print which sections moved; with it they fail, which is how the release gate
+runs them. A profile whose section set still matches the pinned vector is
+compared outright, so the skip cannot hide a drift inside the shape the
+digests cover.
 
 ## What the workflow checks
 
 The release gate runs on a hosted Ubuntu runner. It validates the exact tag
 form, fetches tags, resolves the requested tag to a commit and requires the
 checkout to match that commit. It then validates the checked-in build baseline
-and runs the resolver and Python and Node package tests.
+with `--release` and runs the resolver checks with
+`APOSTATE_REQUIRE_NATIVE_GOLDENS=1`, followed by the Python and Node package
+tests. Those two settings are what make a stale build record and a stale
+cross-implementation digest fail here rather than at a tag nobody can undo.
 
 Target resolution follows the gate. Each selected target then runs
 `.github/workflows/build-target.yml` on a fresh Blacksmith VM. The job checks

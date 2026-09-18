@@ -130,12 +130,18 @@ separators. Any edit to any listed patch changes that digest, even if the
 series file is unchanged.
 
 The `release-gate` job in `.github/workflows/release.yml` runs
-`scripts/validate-release-baseline.py` before scheduling any Chromium build.
-It checks the committed manifest against the current version, patch series
-and patch bytes. After changing a patch, rebuild locally with the build
-scripts to regenerate `build/MANIFEST.lock` and include it with the source
-change before tagging. A stale digest fails the gate immediately; the CI
-build cannot refresh it because that build has not started yet.
+`scripts/validate-release-baseline.py --release` before scheduling any
+Chromium build. It checks the committed manifest against the current version,
+patch series and patch bytes. A stale digest fails that gate, and the CI build
+cannot refresh it because that build has not started yet.
+
+Both digests are functions of the patch files alone, so refreshing them needs
+no build: `scripts/validate-release-baseline.py --refresh` rewrites those two
+fields in place and nothing else. Run it as the last commit before the tag.
+Without `--release` the same script reports the drift as a notice and exits
+zero, because between builds those digests are expected to be behind.
+[docs/RELEASE.md](RELEASE.md) has the pre-tag sequence and what the refresh
+does not claim.
 
 ### Fresh builds and local lineage
 

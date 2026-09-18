@@ -55,9 +55,14 @@ evidence of its recorded target only; it is not evidence for targets that were
 not built.
 
 `scripts/validate-release-baseline.py` checks it, and the release gate runs
-that check on the tagged revision **before** any build starts. Because
-`patch_contents_sha256` hashes every patch's bytes, changing any patch without
-rebuilding locally to refresh `MANIFEST.lock` fails the gate immediately.
+that check with `--release` on the tagged revision **before** any build
+starts. Because `patch_contents_sha256` hashes every patch's bytes, changing
+any patch moves it and the gate fails until it is refreshed. The refresh
+needs no build -- both digests are functions of the patch files -- so
+`scripts/validate-release-baseline.py --refresh` rewrites those two fields
+and leaves the rest of the build record alone. Without `--release` the same
+check reports the drift as a notice and exits zero, because between builds
+the digests are expected to be behind.
 
 See [`docs/RELEASE.md`](../docs/RELEASE.md) for artifact names, manifest
 fields, artifact verification, and the release-candidate gate.

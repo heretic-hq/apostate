@@ -262,7 +262,8 @@ than by validation.
 ```text
 platform persona -> os release -> anchor (claimed platform)
   -> identity string -> cpu bucket -> memory bucket -> panel -> furniture
-  -> font packs -> media topology -> voice table -> locale/timezone
+  -> font packs -> media topology -> audio buffer -> voice table
+  -> locale/timezone
 ```
 
 A coherence-graph violation after resolution is a defect in the option tables,
@@ -285,8 +286,9 @@ prevalence; they are not uniform.
 | `furniture` | taskbar/dock edge, size, autohide | platform, os release | none |
 | `font_packs` | an installed-software bundle | platform, os release | none |
 | `media_topology` | input/output/camera counts + labels + group pairing | platform | none |
+| `audio` | output buffer size in frames | platform | none |
 | `voices` | voice table for an OS release and language set | platform, os release, languages | provider must be able to speak |
-| `locale` | language list + timezone | launch precedence, GeoIP | none |
+| `locale` | language list + timezone | launch precedence, then GeoIP, then the host | none; never drawn |
 
 Notes that matter per axis:
 
@@ -331,9 +333,64 @@ pairing, and the labels once permission is granted. Labels are drawn from
 per-platform vendor tables: a Realtek codec name is a Windows artifact and must
 never appear on macOS.
 
-**Voices.** The table is a function of OS release and installed language packs.
+**Audio.** One number, `audio.hardware_buffer_frames`, and it is the whole of
+`AudioContext.baseLatency`: Blink computes
+`max(framesPerBuffer, renderQuantumSize) / sampleRate` once per context and
+caches it, so a page reads the claimed machine's audio pipeline length in a
+single property access with no permission. The values are per-backend and
+measured where a capture exists — CoreAudio 256, WASAPI shared mode 480 — with
+Linux carrying Chromium's own Pulse floor of 512 because every admitted Linux
+reference turns out to have no audio device at all. It is conditioned on the
+platform and not on `media_topology`, because no capture measures one machine
+with two output devices and dispersing on an unmeasured axis is synthesis.
+
+The denominator is not ours. `audio.sample_rate` is undeclared
+(`audio.context-sample-rate`, verdict `escalate`), so the claimed frame count is
+served over the host's real rate. On a 48 kHz host every persona lands exactly
+on its reference capture. On a 44.1 kHz host it does not, and not uniformly:
+CoreAudio and PulseAudio pin the frame count, while WASAPI shared mode pins the
+10 ms period, so a real Windows machine at 44.1 kHz reports 441 frames rather
+than 480. Declaring a rate is therefore not sufficient to close that row; it has
+to decide which of the two each platform pins.
+
+**Voices.** The table is a function of OS release and installed language packs,
+keyed on the resolved language list. A launch that names no locale keys onto the
+empty set, which carries no `speech` section, so the host's real providers stay
+in effect — the only coherent answer when the language list is the host's too.
 Network voices (`localService: false`) are a build-level capability, not a
 profile value. See section 8.
+
+**Locale.** The one row in the table above that is not drawn, and the only
+surface whose correct value is a property of the network rather than of the
+machine. Precedence, strongest first:
+
+1. `--fingerprint-locale` and `--fingerprint-timezone`, one field each.
+2. GeoIP of the effective egress — the proxy exit when `--proxy-server` is set,
+   the direct IP otherwise. The Python and Node packages perform that lookup
+   before launch and pass the answer as the switches above, so the compositor
+   sees layers 1 and 2 as one; the packages keep them apart in their own
+   diagnostics, and `locale_source` / `timezone_source` say which answered.
+3. The host, expressed as absence. No `locale` section is composed, which
+   leaves the host's own zone in ICU and its own list in the Accept-Language
+   pref. Both fields fall back together, because a field nobody named is never
+   written by a source that cannot also answer for the other.
+
+A seed is not a layer here, and used to be: four catalogue policies were drawn
+from the composition root, so a bare launch on an `Asia/Bangkok` host served
+`America/New_York`, `Europe/London` or `Australia/Sydney` by seed. That is
+worse than inheriting the host, not better. A drawn timezone cannot correlate
+with an exit IP the draw never saw, so it guarantees the mismatch that
+`coh.timezone-network-position` is about, where the host's own zone at least
+matches a direct connection. Patch 0111 removed the draw and the compiled
+table it drew from; the four policies remain in the catalogue as the set
+`scripts/profile_resolver.py --locale-policy` selects from, each an internally
+consistent language-list-and-timezone pair.
+
+A failed or partial GeoIP lookup invents nothing. The field it could not answer
+for falls to the host and the launcher warns; `AL`, for instance, has a
+timezone in every provider and no entry in `scripts/geoip.py`'s country-locale
+policy, so an Albanian exit resolves `Europe/Tirane` and leaves the language
+list to the host.
 
 **Panel and furniture.** `availLeft`/`availTop`/`availWidth`/`availHeight`
 follow from the panel plus the furniture model; `outerWidth`/`outerHeight`
@@ -376,6 +433,75 @@ fix them:
   because a listed voice that cannot speak is worse than an absent one. Patch
   `0043` enforces that.
 
+A fourth looked like one and is not. It is recorded here because it was
+documented as an invariant on one measurement and turned out to be a defect of
+ours on the next.
+
+- **The `Intl` default locale**, and with it `navigator.languages`,
+  `navigator.language`, `DateTimeFormat`, `NumberFormat`, `Collator` and every
+  `toLocaleString`. Every `Intl` constructor resolves its default against
+  `Isolate::DefaultLocale()`, which is ICU's process default converted to a
+  language tag (`v8/src/execution/isolate.cc:8123`). Chromium sets that default
+  from the *application* locale, which `l10n_util` resolves against the UI
+  resource bundles the build actually ships — and our linux-x64 artifact ships
+  exactly one, `locales/en-US.pak`, because
+  [`scripts/package-artifact.sh`](../scripts/package-artifact.sh) lists it as
+  the only pak in the required set. Chromium's build produces all 220. Our
+  packaging step discards them.
+
+  So on the shipped artifact nothing moves the locale: `LANG=de_DE.UTF-8`,
+  `LC_ALL=fr_FR.UTF-8`, `LC_ALL=ja_JP.UTF-8`, `--lang=de-DE` and `--lang=fr-FR`
+  all leave every member at en-US. That is not a property of Chromium. Stock
+  Google Chrome 151 with its full pak set, same host, same probe:
+
+  ```text
+  --lang=de-DE         en-US,en / en-US / en-US / en-US / en-US   unchanged
+  LANGUAGE=de          de-DE,de,en-US,en / de-DE / de / de / de
+                       Date 1.1.1970, 00:00:00   Number 1.234.567,89
+  ```
+
+  Two things follow. The lever is the process **environment**, not `--lang`,
+  which moves nothing even on stock. And the application locale feeds the
+  Accept-Language default as well as ICU's, so one lever drives both producers
+  — which is what makes agreement achievable rather than a coincidence to be
+  maintained.
+
+  It was never missing ICU data. The same shipped binary formats any locale
+  named explicitly: `new Intl.NumberFormat("de-DE")` gives `1.234.567,89`,
+  `toLocaleString("de-DE", {month: "long"})` gives `Januar`,
+  `supportedLocalesOf` accepts de, fr, ja, ar, zh, th, ru, pt, es and it, and
+  `icudtl.dat` is the full 10.8 MB set. Only the default was pinned, and the pak
+  list pinned it.
+
+  Do not test this by mixing paks across versions: Chromium 153's paks beside a
+  152 binary core-dump, because resource ids are version-specific. macOS is
+  unaffected — `package-artifact.sh` ships `Chromium.app` wholesale and the
+  bundle already carries 55 `.lproj` directories.
+
+  Until a build ships the wider set, `--fingerprint-locale` moves web-content
+  language preferences and not the UI locale, so a launch that geo-matches its
+  language list to a proxy exit still formats dates and numbers as en-US.
+
+  When that build lands, the environment is set by the launcher and never
+  inherited by a composed launch. Only `--fingerprint=host` inherits the host's
+  locale environment, because only there is the host the thing being presented.
+  A composed persona gets `LANGUAGE`, `LC_ALL`, `LC_MESSAGES` and `LANG` written
+  explicitly — to the resolved locale when a launch layer named one, and to the
+  composed default when none did. All four, because each moves the application
+  locale on its own, so leaving any one of them at the operator's value lets the
+  host win through a variable nobody wrote. The failure this avoids is specific:
+  an operator in Bangkok with `LANG=th_TH.UTF-8`, composing a Windows persona
+  through a Mexican exit, would otherwise serve Thai language preferences and
+  Thai date and number formatting from a Mexican IP under a synthetic Windows
+  identity. That is not inheritance, it is the host showing through a composed
+  profile, and it is worse than the en-US the wider pak set replaces.
+
+  `ledger/surfaces.jsonl`'s `intl.resolved-locale` row carries the escalation,
+  every measurement above, and the one question still open: whether stock on a
+  host whose system language is not English reports its own locale or en-US,
+  which decides whether that combination is a defect or the correct reproduction
+  of a real device.
+
 ## 9. Verification
 
 A composition change is done when all five pass:
@@ -401,7 +527,8 @@ One switch family, all resolved before the first renderer starts.
 | `--fingerprint-platform=<windows\|macos\|linux>` | Platform persona, which also selects the GPU cluster. Defaults to the host's own OS on macOS and Windows, and to `windows` on Linux. |
 | `--fingerprint-anchor=<id>` | Pin the GPU anchor instead of drawing one. |
 | `--fingerprint-explain` | Write the composition report to stdout and exit. |
-| `--fingerprint-gpu-vendor`, `--fingerprint-gpu-renderer`, `--fingerprint-hardware-concurrency`, `--fingerprint-device-memory`, `--fingerprint-screen-width`, `--fingerprint-screen-height`, `--fingerprint-timezone`, `--fingerprint-locale` | Override one field each; the seed fills the rest. |
+| `--fingerprint-gpu-vendor`, `--fingerprint-gpu-renderer`, `--fingerprint-hardware-concurrency`, `--fingerprint-device-memory`, `--fingerprint-screen-width`, `--fingerprint-screen-height` | Override one field each; the seed fills the rest. |
+| `--fingerprint-timezone`, `--fingerprint-locale` | Override one field each. The seed fills in nothing here: what neither names is served by the host. See section 6. |
 | `--apostate-profile=<base64>` | An already-composed profile. |
 
 Precedence, strongest first: `--apostate-profile`, then host mode, then the
@@ -415,11 +542,19 @@ the launch on stderr and exits non-zero rather than half-applying.
 [docs/FLAGS.md](FLAGS.md) is the user-facing reference for all of these.
 
 `--fingerprint-explain` prints, per surface, the resolved value, the layer that
-owns it (invariant, anchor, dispersion, host-inherited), the evidence class, and
-any limitation. It answers what the profile claims and what this host can
-actually serve, and on a cross-OS launch it is where the pairing's cost is
-reported rather than hidden: which fonts the persona needs, and what stays the
-host's whatever the profile says.
+owns it (invariant, anchor, dispersion, command-line, host-inherited), the
+evidence class, and any limitation. It answers what the profile claims and what
+this host can actually serve, and on a cross-OS launch it is where the pairing's
+cost is reported rather than hidden: which fonts the persona needs, and what
+stays the host's whatever the profile says.
+
+The locale surface reports as two rows, `locale.accept_languages` and
+`locale.timezone`, each naming its own layer and carrying the resolved value
+rather than a policy id. It printed one row naming the policy id before, which
+is how a Bangkok host serving `America/New_York` produced a report with nothing
+wrong in it: the drawn id `en-us` was accurate, and the zone it implied was
+never printed. A report that cannot show the value an operator is comparing
+against an exit IP cannot be used to debug the comparison.
 It writes to stdout, never to a page-visible API.
 
 ### Table transport

@@ -973,6 +973,56 @@ print(catalogue['browser_build'])
             assert fake.chromium.options is not None
             self.assertEqual(fake.chromium.options["user_data_dir"], str(profile_path))
 
+    def test_a_composed_launch_is_given_a_locale_environment_and_never_inherits_one(self) -> None:
+        """Only host mode inherits the host's locale environment.
+
+        Chromium resolves its application locale from LANGUAGE, LC_ALL,
+        LC_MESSAGES and LANG, sets ICU's default locale from that, and every
+        `Intl` constructor resolves its own default against ICU's. So those
+        four variables decide `Intl.DateTimeFormat`, `Intl.NumberFormat`,
+        `Intl.Collator` and every `toLocaleString`, and a composed persona that
+        inherited them would serve the operator's real locale: a Bangkok host
+        with `LANG=th_TH.UTF-8` behind a Mexican exit would format dates and
+        numbers in Thai under a synthetic Windows identity.
+
+        All four are asserted because each moves the application locale on its
+        own, so one left at the host's value is enough to lose the surface.
+        """
+        launch_module = importlib.import_module("apostate.launch")
+        host_shell = {"LANGUAGE": "th", "LC_ALL": "th_TH.UTF-8",
+                      "LC_MESSAGES": "th_TH.UTF-8", "LANG": "th_TH.UTF-8"}
+
+        def plan_for(**options: Any) -> Any:
+            return launch_module._resolve_plan(translate_options(geoip=False, **options))
+
+        with mock.patch.dict(os.environ, host_shell, clear=False):
+            # A composed launch that named no locale gets the composed default,
+            # not the shell's. "Nothing resolved" has to mean a defined value
+            # or the served locale becomes a property of the operator's shell.
+            composed = launch_module._locale_environment(plan_for(fingerprint=12345))
+            self.assertEqual(
+                {"LANGUAGE": "en-US", "LC_ALL": "en_US.UTF-8",
+                 "LC_MESSAGES": "en_US.UTF-8", "LANG": "en_US.UTF-8"}, composed)
+
+            # A named locale reaches all four, in the form each expects.
+            named = launch_module._locale_environment(plan_for(fingerprint=1, locale="de-DE,de"))
+            self.assertEqual(
+                {"LANGUAGE": "de-DE", "LC_ALL": "de_DE.UTF-8",
+                 "LC_MESSAGES": "de_DE.UTF-8", "LANG": "de_DE.UTF-8"}, named)
+
+            # Host mode is the one launch that inherits, because there the host
+            # is what is being presented rather than what must not show.
+            self.assertEqual({}, launch_module._locale_environment(plan_for(fingerprint="host")))
+
+            # And the environment actually handed to the browser carries it,
+            # with the caller's own env still winning last.
+            environment = launch_module._launch_environment(
+                plan_for(fingerprint=12345, timezone="America/Mexico_City"), {"LANG": "caller"})
+            self.assertEqual("en-US", environment["LANGUAGE"])
+            self.assertEqual("en_US.UTF-8", environment["LC_ALL"])
+            self.assertEqual("America/Mexico_City", environment["TZ"])
+            self.assertEqual("caller", environment["LANG"])
+
 
 if __name__ == "__main__":
     unittest.main()

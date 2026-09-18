@@ -15,7 +15,8 @@ from typing import Any, Callable, Mapping, NamedTuple
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from .binary import BinaryManager, ensure_binary
-from .config import LaunchConfig, check_fingerprint_switches, translate_options
+from .config import (LaunchConfig, check_fingerprint_switches, is_host_seed,
+                     translate_options)
 from .errors import ConfigurationError, GeoIPError, LaunchError, ProfileError
 from .geoip import GeoIPResult, resolve_geoip
 from .profile_validation import validate_profile
@@ -142,6 +143,74 @@ class LaunchPlan:
     diagnostics: dict[str, Any]
 
 
+# The environment variables that decide Chromium's application locale, and
+# through it ICU's default locale and every `Intl` constructor's. All four,
+# because each moves it on its own: leaving one at the operator's value lets
+# the host decide through a variable nobody wrote.
+_LOCALE_ENV_VARS = ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG")
+
+# What a composed launch that resolved no locale gets. Not the host's, and not
+# nothing: absence of a resolved locale has to mean a defined default, or the
+# served locale becomes a property of the operator's shell.
+COMPOSED_DEFAULT_LOCALE = "en-US"
+
+
+def _posix_locale(tag: str) -> str:
+    """`de-DE` -> `de_DE.UTF-8`, for the three LC_* variables that expect it.
+
+    A tag with no region stays region-free rather than acquiring an invented
+    one. If the host has not generated the named locale, setlocale falls back
+    to C and `LANGUAGE` -- which takes the tag as written and needs nothing
+    generated -- still decides the application locale. Either way the host's
+    own value is gone, which is the point of writing these at all.
+    """
+    language, _, region = tag.partition("-")
+    base = f"{language}_{region}" if region else language
+    return f"{base}.UTF-8"
+
+
+def _locale_environment(plan: LaunchPlan) -> dict[str, str]:
+    """The locale environment a launch is given, or nothing for host mode.
+
+    Only host inheritance inherits the host's locale environment, because only
+    there is the host the thing being presented. A composed persona gets these
+    written explicitly, and the reason is a leak rather than tidiness: an
+    operator in Bangkok with LANG=th_TH.UTF-8, composing a Windows persona
+    through a Mexican exit, would otherwise serve Thai language preferences and
+    Thai date and number formatting from a Mexican IP under a synthetic Windows
+    identity. That is the host showing through a composed profile, which is the
+    one thing this product may not do.
+
+    Chromium resolves its application locale from these, sets ICU's default
+    locale from that, and every `Intl` constructor resolves its own default
+    against ICU's (v8/src/execution/isolate.cc:8123). So this is the only lever
+    that moves `Intl.DateTimeFormat`, `Intl.NumberFormat`, `Intl.Collator` and
+    `toLocaleString` together with `navigator.languages`; `--lang` moves none
+    of them, measured on stock Chrome as well as on ours. It has no effect on
+    an artifact that ships one locale pak -- see docs/FINGERPRINTS.md section 8
+    and scripts/package-artifact.sh, which now ships the full set.
+    """
+    if is_host_seed(plan.config.fingerprint):
+        return {}
+    resolved = plan.resolution.locale if plan.resolution is not None else None
+    tag = str(resolved or plan.config.locale or COMPOSED_DEFAULT_LOCALE).split(",", 1)[0].strip()
+    if not tag:
+        tag = COMPOSED_DEFAULT_LOCALE
+    posix = _posix_locale(tag)
+    return {name: (tag if name == "LANGUAGE" else posix) for name in _LOCALE_ENV_VARS}
+
+
+def _launch_environment(plan: LaunchPlan, supplied: Mapping[str, Any] | None) -> dict[str, str]:
+    """The browser process environment: this one's, then the caller's word."""
+    env = dict(os.environ)
+    env.update(_locale_environment(plan))
+    if plan.config.timezone:
+        env["TZ"] = plan.config.timezone
+    for key, value in dict(supplied or {}).items():
+        env[str(key)] = str(value)
+    return env
+
+
 def _resolve_plan(config: LaunchConfig, *, resolver: Any = None, catalogue: Any = None,
                   geoip_provider: Any = None, geoip_timeout: float = 10.0) -> LaunchPlan:
     network_result: GeoIPResult | None = None
@@ -172,14 +241,22 @@ def _resolve_plan(config: LaunchConfig, *, resolver: Any = None, catalogue: Any 
             # driving --fingerprint-locale/--fingerprint-timezone instead of an
             # --apostate-profile envelope: an envelope suppressed composition
             # whether or not it carried a locale, so "send nothing" and "send
-            # en-US/UTC" had the same effect. Sending neither switch now leaves
-            # the composed profile's own drawn pair in place, coherent with the
-            # rest of that identity because the same seed drew it. The cost is
-            # reported rather than hidden: it will not match the exit country.
+            # en-US/UTC" had the same effect.
+            #
+            # Sending neither switch leaves the browser's own precedence to
+            # settle the surface, and since patch 0111 that means the host's
+            # own zone and language list rather than a pair drawn from a
+            # four-entry catalogue pool. That is the whole reason this is a
+            # warning and not a refusal: the host's zone matches a direct
+            # egress and is at worst wrong the way a traveller's is, where a
+            # drawn one could not match any egress by construction. The cost is
+            # still reported rather than hidden, because behind a proxy the
+            # host's zone is the host's and not the exit's.
             geoip_warnings.append(
                 f"{exc}. No locale or timezone override is sent and none is invented, so the "
-                "composed profile keeps its own and it will not match the proxy's exit "
-                "country. Pass locale and timezone explicitly to guarantee a match."
+                "launch keeps the host's own locale and timezone. Behind a proxy that is the "
+                "host's and not the exit's. Pass locale and timezone explicitly to guarantee "
+                "a match."
             )
         else:
             unresolved = [
@@ -194,8 +271,8 @@ def _resolve_plan(config: LaunchConfig, *, resolver: Any = None, catalogue: Any 
             if unresolved:
                 geoip_warnings.append(
                     f"the GeoIP lookup resolved no {' and no '.join(unresolved)}. None is "
-                    "invented, so the composed profile keeps its own; pass it explicitly to "
-                    "guarantee a match."
+                    "invented, so the host's own is served for that field; pass it "
+                    "explicitly to guarantee a match."
                 )
         for warning in geoip_warnings:
             print(f"apostate: {warning}", file=sys.stderr)
@@ -649,6 +726,9 @@ def launch(*, fingerprint: int | str | None = None, fingerprint_platform: str | 
     launch_options.update(executable_path=str(binary), headless=config.headless, args=_native_args(plan))
     launch_options["ignore_default_args"] = _ignore_default_args(
         launch_options.get("ignore_default_args"), config.args)
+    # Set, not inherited: only host mode inherits the host's locale
+    # environment. See _locale_environment.
+    launch_options["env"] = _launch_environment(plan, launch_options.get("env"))
     if config.proxy is not None and "proxy" not in launch_options:
         launch_options["proxy"] = _playwright_proxy(config.proxy)
     try:
@@ -744,6 +824,9 @@ def launch_persistent_context(user_data_dir: str | Path, *, context_options: Map
                           args=_native_args(plan, persistent=True), user_data_dir=str(path))
     launch_options["ignore_default_args"] = _ignore_default_args(
         launch_options.get("ignore_default_args"), config.args)
+    # Set, not inherited: only host mode inherits the host's locale
+    # environment. See _locale_environment.
+    launch_options["env"] = _launch_environment(plan, launch_options.get("env"))
     if "viewport" not in launch_options and "no_viewport" not in launch_options:
         launch_options["no_viewport"] = True
     if config.proxy is not None and "proxy" not in launch_options:
@@ -784,6 +867,9 @@ async def launch_async(**options: Any) -> Any:
     launch_options.update(executable_path=str(binary), headless=config.headless, args=_native_args(plan))
     launch_options["ignore_default_args"] = _ignore_default_args(
         launch_options.get("ignore_default_args"), config.args)
+    # Set, not inherited: only host mode inherits the host's locale
+    # environment. See _locale_environment.
+    launch_options["env"] = _launch_environment(plan, launch_options.get("env"))
     if config.proxy is not None and "proxy" not in launch_options:
         launch_options["proxy"] = _playwright_proxy(config.proxy)
     try:
@@ -862,6 +948,9 @@ async def launch_persistent_context_async(user_data_dir: str | Path, *, context_
                           args=_native_args(plan, persistent=True), user_data_dir=str(path))
     launch_options["ignore_default_args"] = _ignore_default_args(
         launch_options.get("ignore_default_args"), config.args)
+    # Set, not inherited: only host mode inherits the host's locale
+    # environment. See _locale_environment.
+    launch_options["env"] = _launch_environment(plan, launch_options.get("env"))
     if "viewport" not in launch_options and "no_viewport" not in launch_options:
         launch_options["no_viewport"] = True
     if config.proxy is not None and "proxy" not in launch_options:

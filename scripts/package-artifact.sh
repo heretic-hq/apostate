@@ -51,7 +51,7 @@ resources.pak
 chrome_100_percent.pak
 chrome_200_percent.pak
 v8_context_snapshot.bin
-locales/en-US.pak'
+locales'
     optional='libEGL.so
 libGLESv2.so
 libvulkan.so.1
@@ -69,7 +69,7 @@ resources.pak
 chrome_100_percent.pak
 chrome_200_percent.pak
 v8_context_snapshot.bin
-locales/en-US.pak'
+locales'
     optional='libEGL.dll
 libGLESv2.dll
 vk_swiftshader.dll
@@ -128,6 +128,38 @@ while IFS= read -r entry; do
 done <<EOF
 $optional
 EOF
+
+# The whole `locales` directory, not `locales/en-US.pak`, and the difference is
+# a fingerprint property rather than a packaging preference.
+#
+# Chromium's build produces every locale pak. Staging only en-US.pak left
+# l10n_util with one UI resource bundle to resolve the application locale
+# against, so it could only ever answer en-US -- and Chromium sets ICU's default
+# locale from the application locale, which is what every Intl constructor
+# resolves its default against (v8/src/execution/isolate.cc:8123). The effect on
+# the shipped artifact: LANG, LC_ALL and --lang all failed to move
+# Intl.DateTimeFormat, Intl.NumberFormat, Intl.Collator or any toLocaleString
+# off en-US, while navigator.languages followed the profile. A page could read
+# that disagreement in one call, with no network request. Stock Chrome with its
+# full pak set moves all of them together from LANGUAGE alone, so the lever was
+# always there and this is the thing it operates.
+#
+# Shipping one pak was also a divergence from stock in its own right: real
+# Chrome and real Chromium both ship the complete set, 220 files.
+#
+# en-US.pak is asserted separately because it is the fallback the binary needs
+# to start at all, and requiring the directory does not by itself promise a
+# member. macOS is not in this check: it stages Chromium.app wholesale and the
+# bundle already carries its .lproj directories.
+case "$TARGET" in
+  linux-x64|linux-arm64|windows-x64)
+    [ -f "$stage/locales/en-US.pak" ] ||
+      die "staged payload has no locales/en-US.pak: the fallback UI bundle is what the binary starts on"
+    paks="$(find "$stage/locales" -name '*.pak' -type f | wc -l | tr -d ' ')"
+    [ "$paks" -gt 1 ] ||
+      die "staged payload has $paks locale pak(s): one bundle pins the application locale, and with it ICU's default and every Intl constructor's, to en-US whatever the profile resolved"
+    ;;
+esac
 
 [ -f "$REPO_ROOT/LICENSE" ] || die "missing LICENSE"
 cp "$REPO_ROOT/LICENSE" "$stage/"

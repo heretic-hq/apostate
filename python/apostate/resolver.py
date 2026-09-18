@@ -55,7 +55,8 @@ _CATALOGUE_ID = "apostate"
 _RETIRED_CATALOGUE_KEYS = ("families", "family_count", "distributions", "compatibility_acceptance")
 _DISPERSION_AXES = (
     "os_release", "gpu_identity", "machine_class", "cpu", "memory", "panel",
-    "furniture", "font_packs", "media_topology", "network", "battery", "voices",
+    "furniture", "font_packs", "media_topology", "audio", "network", "battery",
+    "voices",
 )
 _POLICY_KINDS = ("locale", "theme")
 _ROTATION_STATUSES = frozenset({"measured-safe", "single-member"})

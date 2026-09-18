@@ -36,9 +36,10 @@ SCHEMA_PATHS = {
     "profile": ROOT / "config" / "profile.schema.json",
 }
 
-# JSON Schema annotations do not affect validation. x-precedence and x-wiring
-# are small, intentionally namespaced annotations used by contract readers:
-# x-wiring records why a declared profile key is read by no C++, and
+# JSON Schema annotations do not affect validation. The x- names here are
+# small, intentionally namespaced annotations used by contract readers:
+# x-wiring records why a declared profile key is read by no C++, x-ledger
+# records why a declared profile key is named by no ledger row, and
 # scripts/check-schema-wiring.py fails when one of those goes stale.
 ANNOTATIONS = {
     "$comment",
@@ -51,6 +52,7 @@ ANNOTATIONS = {
     "readOnly",
     "title",
     "writeOnly",
+    "x-ledger",
     "x-precedence",
     "x-wiring",
 }

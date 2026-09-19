@@ -161,11 +161,36 @@ class AnchorCapabilityLayerTests(unittest.TestCase):
         self.assertEqual(RESOLVER.gl_limit_entries("MIN_PROGRAM_TEXEL_OFFSET", -8),
                          [("MIN_PROGRAM_TEXEL_OFFSET", -8)])
 
-    def test_a_nonintegral_range_endpoint_is_left_inherited(self):
-        # The Linux/Vulkan anchor's point size max is 2047.9375. Serving 2047
-        # would be a limit no measurement produced, so neither endpoint goes.
+    def test_a_measured_fraction_survives_on_a_float_valued_parameter(self):
+        # The Linux/Vulkan anchor's point size max is 2047.9375 -- 2047 + 15/16
+        # from a four-bit subpixel point size. This used to be dropped for not
+        # being integral, and the host's [1, 256] was served under an NVIDIA
+        # renderer string. Rounding to 2047 would be just as wrong: it is a
+        # limit no measurement produced.
         self.assertEqual(
-            RESOLVER.gl_limit_entries("ALIASED_POINT_SIZE_RANGE", [1, 2047.9375]), [])
+            RESOLVER.gl_limit_entries("ALIASED_POINT_SIZE_RANGE", [1, 2047.9375]),
+            [("ALIASED_POINT_SIZE_RANGE_MIN", 1),
+             ("ALIASED_POINT_SIZE_RANGE_MAX", 2047.9375)])
+        self.assertEqual(
+            RESOLVER.gl_limit_entries("MAX_TEXTURE_LOD_BIAS", 1.75),
+            [("MAX_TEXTURE_LOD_BIAS", 1.75)])
+
+    def test_a_fraction_is_refused_on_a_count(self):
+        # Only the three parameters GL itself defines as float-valued may
+        # carry one. A texture size with a fraction in it is not a
+        # measurement this can represent, and rounding would invent one.
+        self.assertEqual(RESOLVER.gl_limit_entries("MAX_TEXTURE_SIZE", 16384.5), [])
+        self.assertEqual(
+            RESOLVER.gl_limit_entries("UNIFORM_BUFFER_OFFSET_ALIGNMENT", 256.5), [])
+
+    def test_an_integral_measurement_stays_an_int(self):
+        # Byte-stability: a whole number keeps its int type even on a
+        # float-valued parameter, so no already-resolved profile changes
+        # shape or serialised bytes.
+        entries = RESOLVER.gl_limit_entries("ALIASED_POINT_SIZE_RANGE", [1, 1024])
+        self.assertEqual(entries, [("ALIASED_POINT_SIZE_RANGE_MIN", 1),
+                                   ("ALIASED_POINT_SIZE_RANGE_MAX", 1024)])
+        self.assertIsInstance(entries[1][1], int)
 
     def test_a_webgl_specification_constant_is_not_a_gl_limit(self):
         # Answered by Blink, not the GL binding layer. Admitting it would

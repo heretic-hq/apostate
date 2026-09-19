@@ -35,7 +35,7 @@ shape asserted a wiring that does not exist. That was a true positive, the
 same class as a falsely-enforced ledger edge, and the right fix was to drop
 the bound from additionalProperties and state the reason in the description.
 
-Four separate defects produced one symptom, and they are worth separating
+Five separate defects produced one symptom, and they are worth separating
 because only the third is a policy question and the fourth is the one that
 made the other fixes look partly applied.
 
@@ -152,6 +152,36 @@ rather than written when the caller's buffer cannot hold both. A short buffer
 there is the caller violating the GL contract for that pname, not something
 this layer should paper over by writing one endpoint and inventing the other.
 
+Seventh, and this one is the same belief with its second half intact. The
+five places above were corrected to allow a zero and a negative. They were
+still all reading "positive INTEGRAL scalar", and the integral half survived
+because the values those five sites happened to hold were whole numbers. Three
+of the servable names are float-valued in GL itself -- ALIASED_LINE_WIDTH_
+RANGE, ALIASED_POINT_SIZE_RANGE and MAX_TEXTURE_LOD_BIAS -- and a real device
+does use the fraction: the Linux/Vulkan anchor measures a point-size maximum
+of 2047.9375, which is 2047 + 15/16, exactly what a four-bit subpixel point
+size produces. It was dropped, and the host's [1, 256] was served under an
+NVIDIA renderer string.
+
+Truncating to 2047 would have been no better than dropping it; that is a limit
+no measurement produced. So the fraction is carried, and carried across all
+four gates, because each one had its own version of the belief and a value
+that survives the resolver only to be truncated by the loader is the same bug
+wearing a different hat:
+
+  the shared rule       keeps a fraction only for the three GL float-valued
+                        names, and still refuses one on a count
+  profile.schema.json   gl_limits is `number`, not `integer`
+  the loader            a non-integral value goes to gl_limits_fractional_
+                        instead of being rejected
+  the serving table     lookups consult both maps through one accessor
+
+An integral value stays an int everywhere, including on those three names, so
+no profile that already resolved changes shape or serialised bytes. Confirmed
+on the compiled tables: the four anchors with whole point-size maxima still
+emit 511, 1023, 1024, 1024 as integers, and only the NVIDIA anchor emits
+2047.9375 as a float.
+
 Last, the silent case is now loud, in both places it was quiet.
 
 In the GL hooks: a composed profile that carries a GPU identity and an empty
@@ -177,7 +207,7 @@ max() for the one floor, warning included.
 Ledger: webgl.parameters, webgl2.parameters, gpu.angle-backend, headless.gpu-stack.
 --- a/base/apostate/compose.cc
 +++ b/base/apostate/compose.cc
-@@ -1072,15 +1072,22 @@ std::optional<Composition> Compose(const ComposeRequest& request,
+@@ -1138,15 +1138,22 @@ std::optional<Composition> Compose(const ComposeRequest& request,
      // the object it receives.
      //
      // Note what this does NOT say. It does not say the identity should
@@ -205,7 +235,7 @@ Ledger: webgl.parameters, webgl2.parameters, gpu.angle-backend, headless.gpu-sta
    }
    if (anchor && anchor->members.size() == 1) {
      composition.limitations.push_back(
-@@ -1101,6 +1108,32 @@ std::optional<Composition> Compose(const ComposeRequest& request,
+@@ -1167,6 +1174,32 @@ std::optional<Composition> Compose(const ComposeRequest& request,
      MergeFragment(composition.profile,
                    ParseFragment("anchor", anchor->value_json),
                    request.union_array_paths);
@@ -240,7 +270,7 @@ Ledger: webgl.parameters, webgl2.parameters, gpu.angle-backend, headless.gpu-sta
          .value = std::string(anchor->id),
 --- a/base/apostate/profile.cc
 +++ b/base/apostate/profile.cc
-@@ -1039,22 +1039,31 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
+@@ -1083,22 +1083,48 @@ Profile* Profile::ParseOrNull(const std::string& encoded) {
      for (const auto [name, value] : *gl) {
        // A JSON number past int32 arrives as a double — the same representation
        // gap webgpu.limits already handles — so accept both, and only integral
@@ -257,14 +287,32 @@ Ledger: webgl.parameters, webgl2.parameters, gpu.angle-backend, headless.gpu-sta
 +      // MAX_SERVER_WAIT_TIMEOUT is 0. Both were dropped here with an ERROR
 +      // line on every launch, so even a profile that carried them correctly
 +      // arrived at the serving hooks without them.
++      //
++      // Integral OR fractional. The integral half of that assumption is the
++      // seventh place it was written down, and it outlived the other six
++      // because the values they held happened to be whole numbers. Three of
++      // the servable names are float-valued in GL -- the two aliased ranges
++      // and MAX_TEXTURE_LOD_BIAS -- and the Linux/Vulkan anchor measured
++      // ALIASED_POINT_SIZE_RANGE max 2047.9375. Truncating it to 2047 would
++      // serve a number no device reported; rejecting it served the host's.
++      // A fraction goes to its own map so gl_limits() stays integral and
++      // nothing that already worked moves.
        std::optional<int64_t> v;
        if (std::optional<int> iv = value.GetIfInt()) {
          v = *iv;
        } else if (std::optional<double> dv = value.GetIfDouble()) {
 -        if (std::isfinite(*dv) && *dv > 0 && *dv < 9007199254740992.0 &&
-+        if (std::isfinite(*dv) && std::abs(*dv) < 9007199254740992.0 &&
-             std::trunc(*dv) == *dv) {
+-            std::trunc(*dv) == *dv) {
++        if (!std::isfinite(*dv) || std::abs(*dv) >= 9007199254740992.0) {
++          LOG(ERROR) << "apostate: gl_limits." << name
++                     << " is not a finite number in range; ignoring";
++          continue;
++        }
++        if (std::trunc(*dv) == *dv) {
            v = static_cast<int64_t>(*dv);
++        } else {
++          profile->gl_limits_fractional_[name] = *dv;
++          continue;
          }
        }
 -      if (v && *v > 0) {
@@ -273,21 +321,57 @@ Ledger: webgl.parameters, webgl2.parameters, gpu.angle-backend, headless.gpu-sta
        } else {
          LOG(ERROR) << "apostate: gl_limits." << name
 -                   << " must be a positive integer; ignoring";
-+                   << " must be an integer; ignoring";
++                   << " must be a number; ignoring";
        }
      }
    }
+--- a/base/apostate/profile.h
++++ b/base/apostate/profile.h
+@@ -447,6 +447,24 @@ class BASE_EXPORT Profile {
+     return gl_limits_;
+   }
+ 
++  // The few GL limits a device genuinely reports with a fraction, kept apart
++  // from gl_limits() rather than rounded into it.
++  //
++  // Almost every limit is a count and is integral, which is why gl_limits()
++  // is int64_t and why every gate in this pipeline assumed integral. Three of
++  // the servable names are float-valued in GL itself -- the two aliased
++  // ranges and MAX_TEXTURE_LOD_BIAS -- and a real device does use the
++  // fraction: the Linux/Vulkan anchor measured ALIASED_POINT_SIZE_RANGE max
++  // 2047.9375, which is 2047 + 15/16, exactly what a four-bit subpixel point
++  // size produces. Truncating that to 2047 would serve a number no device
++  // reported, and dropping it serves the host's.
++  //
++  // Integral values stay in gl_limits() even for these names, so nothing that
++  // already worked moves. Only the fractional ones land here.
++  const std::map<std::string, double>& gl_limits_fractional() const {
++    return gl_limits_fractional_;
++  }
++
+   // WebGL extension names the claimed device exposes, as
+   // getSupportedExtensions() spells them.
+   //
+@@ -754,6 +772,7 @@ class BASE_EXPORT Profile {
+   std::vector<MediaDevice> media_devices_;
+   std::map<std::string, std::string> keyboard_layout_map_;
+   std::map<std::string, int64_t> gl_limits_;
++  std::map<std::string, double> gl_limits_fractional_;
+   std::set<std::string> gl_extensions_;
+   std::set<std::string> webgpu_features_;
+   std::string webgpu_vendor_;
 --- a/ui/gl/gl_gl_api_implementation.cc
 +++ b/ui/gl/gl_gl_api_implementation.cc
-@@ -10,6 +10,7 @@
+@@ -10,6 +10,8 @@
  #include "base/no_destructor.h"
  
  #include <array>
++#include <optional>
 +#include <string_view>
  #include <vector>
  
  #include "base/command_line.h"
-@@ -247,6 +248,10 @@ namespace {
+@@ -247,6 +249,10 @@ namespace {
  struct ApostateGlLimit {
    GLenum pname;
    const char* name;
@@ -298,7 +382,7 @@ Ledger: webgl.parameters, webgl2.parameters, gpu.angle-backend, headless.gpu-sta
  };
  
  constexpr ApostateGlLimit kApostateGlLimits[] = {
-@@ -294,6 +299,72 @@ constexpr ApostateGlLimit kApostateGlLimits[] = {
+@@ -294,6 +300,72 @@ constexpr ApostateGlLimit kApostateGlLimits[] = {
      {GL_MAX_VARYING_COMPONENTS, "MAX_VARYING_COMPONENTS"},
      {GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS,
       "MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS"},
@@ -371,7 +455,7 @@ Ledger: webgl.parameters, webgl2.parameters, gpu.angle-backend, headless.gpu-sta
  };
  
  // True when the active backend enforces the limits it reports, so a claim
-@@ -322,48 +393,167 @@ constexpr ApostateGlLimit kApostateGlLimits[] = {
+@@ -322,159 +394,317 @@ constexpr ApostateGlLimit kApostateGlLimits[] = {
  // avoiding costs a detector a multi-hundred-megabyte allocation at the
  // reported maximum. The cheap check is the one to pass.
  //
@@ -441,37 +525,26 @@ Ledger: webgl.parameters, webgl2.parameters, gpu.angle-backend, headless.gpu-sta
 +}
  
 -  GLApiBase::glGetIntegervFn(pname, params);
-+// Serve a two-element range in place. Both endpoints come from the profile or
-+// neither does: half a served interval is a pair no device reported.
-+template <typename T>
-+bool ApostateServeRange(const base::apostate::Profile* profile,
-+                        const ApostateGlRange& range,
-+                        bool enforces,
-+                        T* params) {
-+  const auto low = profile->gl_limits().find(range.low);
-+  const auto high = profile->gl_limits().find(range.high);
-+  if (low == profile->gl_limits().end() ||
-+      high == profile->gl_limits().end()) {
-+    return false;
++// The claimed value for `name`, whichever map it landed in.
++//
++// gl_limits() is integral and holds almost everything. A device that reports
++// a genuine fraction -- the Linux/Vulkan anchor's ALIASED_POINT_SIZE_RANGE
++// max of 2047.9375 -- lands in the fractional map instead, and a lookup that
++// consulted only the integral one served the host's value. Callers take the
++// result as double and narrow it; for an integer pname every value in either
++// map is whole, so the narrowing is exact.
++std::optional<double> ApostateClaimedLimit(
++    const base::apostate::Profile* profile,
++    const char* name) {
++  const auto& fractional = profile->gl_limits_fractional();
++  if (const auto it = fractional.find(name); it != fractional.end()) {
++    return it->second;
 +  }
-+  // Read and written through std::array and std::copy_n rather than
-+  // params[0]/params[1]. The GL entry point contract guarantees two elements
-+  // and GLApiBase has just filled both, but raw indexing past [0] trips
-+  // -Wunsafe-buffer-usage, and nothing in ui/gl uses the UNSAFE_BUFFERS
-+  // escape hatch -- patch 0029 set this pattern for the shader precision
-+  // range and there is no reason to be the first to break it.
-+  std::array<T, 2> real = {};
-+  std::copy_n(params, real.size(), real.begin());
-+
-+  // Intersecting an interval takes the higher floor and the lower ceiling.
-+  // A pair of independent ceilings takes the lower of each.
-+  const std::array<T, 2> served = {
-+      ApostateServedLimit(static_cast<T>(low->second), real[0], enforces,
-+                          /*is_minimum=*/range.is_interval),
-+      ApostateServedLimit(static_cast<T>(high->second), real[1], enforces,
-+                          /*is_minimum=*/false)};
-+  std::copy_n(served.begin(), served.size(), params);
-+  return true;
++  const auto& integral = profile->gl_limits();
++  if (const auto it = integral.find(name); it != integral.end()) {
++    return static_cast<double>(it->second);
++  }
++  return std::nullopt;
 +}
  
 -  // Serve the claimed device's limit. On a backend that enforces what it
@@ -495,6 +568,38 @@ Ledger: webgl.parameters, webgl2.parameters, gpu.angle-backend, headless.gpu-sta
 -  // already present at the host's own reported maximum on this fork -- patch
 -  // 0027 raised MAX_TEXTURE_SIZE from 8192 to 16384 and 16384 already fails
 -  // completeness under SwiftShader -- and the reference product has it too.
++// Serve a two-element range in place. Both endpoints come from the profile or
++// neither does: half a served interval is a pair no device reported.
++template <typename T>
++bool ApostateServeRange(const base::apostate::Profile* profile,
++                        const ApostateGlRange& range,
++                        bool enforces,
++                        T* params) {
++  const std::optional<double> low = ApostateClaimedLimit(profile, range.low);
++  const std::optional<double> high = ApostateClaimedLimit(profile, range.high);
++  if (!low.has_value() || !high.has_value()) {
++    return false;
++  }
++  // Read and written through std::array and std::copy_n rather than
++  // params[0]/params[1]. The GL entry point contract guarantees two elements
++  // and GLApiBase has just filled both, but raw indexing past [0] trips
++  // -Wunsafe-buffer-usage, and nothing in ui/gl uses the UNSAFE_BUFFERS
++  // escape hatch -- patch 0029 set this pattern for the shader precision
++  // range and there is no reason to be the first to break it.
++  std::array<T, 2> real = {};
++  std::copy_n(params, real.size(), real.begin());
++
++  // Intersecting an interval takes the higher floor and the lower ceiling.
++  // A pair of independent ceilings takes the lower of each.
++  const std::array<T, 2> served = {
++      ApostateServedLimit(static_cast<T>(*low), real[0], enforces,
++                          /*is_minimum=*/range.is_interval),
++      ApostateServedLimit(static_cast<T>(*high), real[1], enforces,
++                          /*is_minimum=*/false)};
++  std::copy_n(served.begin(), served.size(), params);
++  return true;
++}
++
 +// The profile to serve limits from, or nullptr when there is nothing to
 +// serve.
 +//
@@ -508,7 +613,7 @@ Ledger: webgl.parameters, webgl2.parameters, gpu.angle-backend, headless.gpu-sta
 +  if (!profile) {
 +    return nullptr;
 +  }
-+  if (profile->gl_limits().empty()) {
++  if (profile->gl_limits().empty() && profile->gl_limits_fractional().empty()) {
 +    static bool warned = false;
 +    if (!warned && profile->gpu_renderer().has_value()) {
 +      warned = true;
@@ -558,36 +663,42 @@ Ledger: webgl.parameters, webgl2.parameters, gpu.angle-backend, headless.gpu-sta
 +                          T* params,
 +                          GLsizei available) {
 +  if (!params) {
-+    return;
-+  }
-+  for (const auto& range : ranges) {
-+    if (range.pname != pname) {
-+      continue;
-+    }
-+    if (available >= 0 && available < 2) {
-+      return;
-+    }
-+    ApostateServeRange(profile, range, enforces, params);
-+    return;
-+  }
-+  if (available == 0) {
      return;
    }
-   for (const auto& limit : kApostateGlLimits) {
-@@ -374,107 +564,124 @@ void RealGLApi::glGetIntegervFn(GLenum pname, GLint* params) {
-     if (it == profile->gl_limits().end()) {
+-  for (const auto& limit : kApostateGlLimits) {
+-    if (limit.pname != pname) {
++  for (const auto& range : ranges) {
++    if (range.pname != pname) {
+       continue;
+     }
+-    auto it = profile->gl_limits().find(limit.name);
+-    if (it == profile->gl_limits().end()) {
++    if (available >= 0 && available < 2) {
        return;
      }
 -    const GLint real = *params;
 -    const GLint claimed = static_cast<GLint>(it->second);
 -    if (!BackendEnforcesGlLimits()) {
 -      *params = claimed;
--      return;
--    }
++    ApostateServeRange(profile, range, enforces, params);
++    return;
++  }
++  if (available == 0) {
++    return;
++  }
++  for (const auto& limit : kApostateGlLimits) {
++    if (limit.pname != pname) {
++      continue;
++    }
++    const std::optional<double> value =
++        ApostateClaimedLimit(profile, limit.name);
++    if (!value.has_value()) {
+       return;
+     }
 -    *params = std::min(claimed, real);
 -    if (claimed > real) {
 +    const T real = *params;
-+    const T claimed = static_cast<T>(it->second);
++    const T claimed = static_cast<T>(*value);
 +    *params = ApostateServedLimit(claimed, real, enforces, limit.is_minimum);
 +    if (enforces && (limit.is_minimum ? claimed < real : claimed > real)) {
        LOG(WARNING) << "apostate: profile claims " << limit.name << " = "

@@ -105,7 +105,11 @@ def derive_gl_limits(gl1, gl2):
                 limits[name] = value[0]
         elif name in GL_LIMIT_RANGE_KEYS:
             # An interval: ordered, finite, positive, and float-valued
-            # endpoints are legal because a real device reports them.
+            # endpoints are legal because a real device reports them. The
+            # Linux/Vulkan anchor's point-size maximum really is 2047.9375,
+            # and the shared rule now carries that fraction rather than
+            # dropping it, so a measured interval is no longer lost for being
+            # nonintegral.
             if (not isinstance(value, list) or len(value) != 2
                     or any(type(v) not in (int, float) or not math.isfinite(v)
                            or not 0 < v <= 2**31 - 1 for v in value)
@@ -115,8 +119,12 @@ def derive_gl_limits(gl1, gl2):
             if entries:
                 limits.update(entries)
             else:
-                print(f"WARNING: nonintegral {name} {value!r} stays inherited; "
-                      "integer profile caps cannot represent it", file=sys.stderr)
+                # Defensive. Both range names the shared rule accepts here are
+                # float-valued, so a pair that passed the validation above
+                # should always convert. Report rather than drop silently if
+                # that ever stops being true.
+                print(f"WARNING: {name} {value!r} stays inherited; the profile "
+                      "rule produced no entry for it", file=sys.stderr)
         else:
             limits.update(gl_limit_entries(name, value))
     return limits

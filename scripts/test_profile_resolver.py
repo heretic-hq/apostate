@@ -511,18 +511,37 @@ class CompositionTests(unittest.TestCase):
         with self.assertRaises(resolver.ResolverError):
             resolver._anchor_capability_layer(record, "ANGLE (NVIDIA, fabricated RTX 5090)")
 
-    def test_a_nonintegral_point_size_endpoint_stays_unrepresented(self) -> None:
+    def test_a_measured_point_size_fraction_is_carried(self) -> None:
+        """A float-valued GL parameter keeps its fraction; a count does not.
+
+        This asserted the opposite until the shipped build was measured. The
+        Linux/Vulkan anchor reports ALIASED_POINT_SIZE_RANGE max 2047.9375 --
+        2047 + 15/16, what a four-bit subpixel point size produces -- and
+        leaving it unrepresented served the host's 256 under an NVIDIA
+        renderer string. Truncating to 2047 would be equally wrong, so the
+        fraction is carried as measured.
+        """
         catalogue, tables, records = resolver._load_catalogue()
+        seen_fraction = False
         for anchor in catalogue["anchors"]:
             record = records[anchor["id"]]["record"]
             renderer = ((record["members"][0]["identity"])["webgl1"])["unmaskedRenderer"]
             limits = resolver._anchor_capability_layer(record, renderer)["gl_limits"]
             raw = record["capability_cluster"]["webgl1"]["parameters"]["ALIASED_POINT_SIZE_RANGE"]
-            integral = all(float(endpoint).is_integer() for endpoint in raw)
-            self.assertEqual(integral, "ALIASED_POINT_SIZE_RANGE_MAX" in limits,
-                             f"{anchor['id']} point range {raw} handled wrongly")
-            for value in limits.values():
-                self.assertIsInstance(value, int)
+            self.assertIn("ALIASED_POINT_SIZE_RANGE_MAX", limits,
+                          f"{anchor['id']} point range {raw} was dropped")
+            self.assertEqual(limits["ALIASED_POINT_SIZE_RANGE_MAX"], raw[1],
+                             f"{anchor['id']} point range {raw} was not served as measured")
+            if not float(raw[1]).is_integer():
+                seen_fraction = True
+            for name, value in limits.items():
+                # Only the genuinely float-valued names may be nonintegral.
+                if not float(value).is_integer():
+                    self.assertIn(name.rsplit("_", 1)[0], resolver.GL_LIMIT_FRACTIONAL_KEYS,
+                                  f"{name} is a count and must not carry a fraction")
+        self.assertTrue(seen_fraction,
+                        "no anchor exercises the fractional path any more; this test "
+                        "no longer guards what it was written for")
 
     def test_cross_backend_clusters_are_not_interchangeable(self) -> None:
         catalogue, _, records = resolver._load_catalogue()

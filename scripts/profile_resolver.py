@@ -20,6 +20,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -1123,8 +1124,38 @@ GL_LIMIT_SCALAR_KEYS: frozenset[str] = frozenset(
     {"MIN_PROGRAM_TEXEL_OFFSET", "UNIFORM_BUFFER_OFFSET_ALIGNMENT"}
 )
 
+#: GL parameters that are float-valued in GL itself, so a measured fraction is
+#: a real measurement rather than noise. Everything else is a count and must be
+#: integral.
+#:
+#: The Linux/Vulkan anchor measures ALIASED_POINT_SIZE_RANGE max 2047.9375 --
+#: 2047 + 15/16, exactly what a four-bit subpixel point size produces. Rounding
+#: it to 2047 would serve a number no device reported, and rejecting it served
+#: the host's [1, 256] under an NVIDIA renderer string. The other two are
+#: float-valued for the same reason and are listed by GL type rather than
+#: because the corpus happens to show a fraction in them today.
+GL_LIMIT_FRACTIONAL_KEYS: frozenset[str] = frozenset(
+    {"ALIASED_LINE_WIDTH_RANGE", "ALIASED_POINT_SIZE_RANGE",
+     "MAX_TEXTURE_LOD_BIAS"}
+)
 
-def gl_limit_entries(name: str, value: Any) -> list[tuple[str, int]]:
+
+def _limit_number(name: str, value: Any) -> int | float | None:
+    """A measured limit as the number the profile should carry, or None.
+
+    Integral values stay ``int`` whatever the parameter, so nothing that
+    already resolved changes shape or bytes. Only a genuinely fractional
+    measurement of a genuinely float-valued parameter stays ``float``.
+    """
+    exact = _integral(value)
+    if exact is not None:
+        return exact
+    if name in GL_LIMIT_FRACTIONAL_KEYS and isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return None
+
+
+def gl_limit_entries(name: str, value: Any) -> list[tuple[str, int | float]]:
     """The profile limit entries one measured GL parameter produces.
 
     One function because three consumers have to agree on it: this resolver,
@@ -1145,10 +1176,18 @@ def gl_limit_entries(name: str, value: Any) -> list[tuple[str, int]]:
     came to sit beside a 16384x16384 viewport.
 
     A range yields both endpoints or neither: half an interval is a fabricated
-    limit, and the schema says a nonintegral endpoint stays unrepresented and
-    inherited rather than truncated, which is what keeps the Linux/Vulkan
-    anchor's 2047.9375 point size out. A scalar yields any losslessly integral
-    value, including 0 and negative ones, because those are measurements too.
+    limit. A scalar yields any losslessly integral value, including 0 and
+    negative ones, because those are measurements too.
+
+    A fraction is kept only where GL itself is float-valued, per
+    GL_LIMIT_FRACTIONAL_KEYS. That is the seventh place this codebase assumed
+    a capability is a positive INTEGRAL scalar, and the integral half outlived
+    the other six because the values they held happened to be whole. The
+    Linux/Vulkan anchor measures ALIASED_POINT_SIZE_RANGE max 2047.9375 and
+    this used to drop it, which served the host's 256 under an NVIDIA
+    renderer string. Anywhere else a fraction is still refused rather than
+    rounded, because a count with a fraction in it is not a measurement this
+    can represent.
 
     A ``_WEBGL``-suffixed name is a WebGL-specification constant rather than a
     GL limit -- MAX_CLIENT_WAIT_TIMEOUT_WEBGL is answered by Blink, not by the
@@ -1163,14 +1202,15 @@ def gl_limit_entries(name: str, value: Any) -> list[tuple[str, int]]:
     if endpoints is not None:
         if not isinstance(value, (list, tuple)) or len(value) != 2:
             return []
-        low, high = _integral(value[0]), _integral(value[1])
+        low = _limit_number(name, value[0])
+        high = _limit_number(name, value[1])
         if low is None or high is None or low < 1 or high < 1:
             return []
         return [(endpoints[0], low), (endpoints[1], high)]
-    exact = _integral(value)
-    if exact is None:
+    number = _limit_number(name, value)
+    if number is None:
         return []
-    return [(name, exact)]
+    return [(name, number)]
 
 
 def gl_limit_is_servable(name: str) -> bool:

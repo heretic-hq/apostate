@@ -181,7 +181,7 @@
 
 # 0112 serves the anchor's GL capability limits the serving table never named
 # and the clamp direction discarded, and stops --fingerprint-explain claiming
-# they were served when they were not. It touches four files.
+# they were served when they were not. It touches five files.
 #
 # ui/gl/gl_gl_api_implementation.cc carries most of it, and that file's own
 # history is the ordering: 0026 created kApostateGlLimits and the
@@ -214,6 +214,10 @@
 # the most recent patch to touch that file, so 0112 must follow 0110 too --
 # for context, not for behaviour. Without this hunk the other two files are
 # still wrong for those two limits, because they never reach gl_limits().
+#
+# base/apostate/profile.h gains the companion map for the few limits a device
+# reports with a genuine fraction, so gl_limits() stays integral. Its only
+# ordering constraint is that 0070 widened that storage to int64 first.
 #
 # It is inert on its own: five of the thirteen limits it serves are emitted
 # only after the anchor_gl_layer filter fix in
